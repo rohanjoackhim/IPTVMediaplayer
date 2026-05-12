@@ -63,6 +63,7 @@ function playlistProxyDevPlugin() {
 }
 
 export default defineConfig({
+  base: "./",
   plugins: [react(), playlistProxyDevPlugin()],
   server: {
     port: 5173,
