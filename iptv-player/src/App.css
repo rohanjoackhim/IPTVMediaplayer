@@ -1,0 +1,44 @@
+.app-shell {
+  display: flex;
+  height: 100%;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+.browser-pane {
+  flex: 0 0 min(420px, 38vw);
+  min-width: 280px;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.player-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .browser-pane {
+    flex: 0 0 auto;
+    max-width: none;
+    min-width: 0;
+    height: min(45vh, 360px);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .player-pane {
+    flex: 1;
+    min-height: 200px;
+  }
+}
