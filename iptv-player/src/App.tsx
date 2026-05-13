@@ -10,6 +10,7 @@ import {
   loadLastPlaylistUrl,
   saveLastActiveChannelUrl,
 } from "./utils/playlistSettingsStorage";
+import { clearVideoResume } from "./utils/localVideoResumeStorage";
 import { clampSidebarWidthPx, loadUiSession, saveUiSession } from "./utils/uiSessionStorage";
 import type { Channel } from "./types";
 
@@ -79,6 +80,20 @@ function fitSidebarToViewport(px: number): number {
   return Math.round(Math.max(260, Math.min(cap, px)));
 }
 
+function revokeLocalVideoBlobUrls(channels: Channel[]) {
+  for (const c of channels) {
+    if (!c.localVideoFile) continue;
+    clearVideoResume(c.id);
+    const u = c.url?.trim() ?? "";
+    if (!u.toLowerCase().startsWith("blob:")) continue;
+    try {
+      URL.revokeObjectURL(u);
+    } catch {
+      /* noop */
+    }
+  }
+}
+
 export default function App() {
   const [channels, setChannels] = useState<Channel[]>(() => {
     const stored = loadStoredChannels();
@@ -86,7 +101,7 @@ export default function App() {
   });
   const [active, setActive] = useState<Channel | null>(null);
   const [channelRight, setChannelRight] = useState<Channel | null>(null);
-  const [splitView, setSplitView] = useState(() => loadUiSession().splitView);
+  const [splitView, setSplitView] = useState(false);
   const [assignTarget, setAssignTarget] = useState(() => loadUiSession().assignTarget);
   const [volumeLeft, setVolumeLeft] = useState(() => loadUiSession().volumeLeft);
   const [volumeRight, setVolumeRight] = useState(() => loadUiSession().volumeRight);
@@ -184,7 +199,8 @@ export default function App() {
       saveLastActiveChannelUrl(null);
       return;
     }
-    if (active.url.trim().toLowerCase().startsWith("blob:")) return;
+    const u = active.url.trim().toLowerCase();
+    if (u.startsWith("blob:") || u.startsWith("file:")) return;
     saveLastActiveChannelUrl(active.url);
   }, [active]);
 
@@ -240,7 +256,13 @@ export default function App() {
     setParseMessage(
       next.length ? `Loaded ${next.length} channel(s).${errors.length ? " " + errors.join(" ") : ""}` : null
     );
-    setChannels((prev) => (replace ? next : [...prev, ...next]));
+    setChannels((prev) => {
+      if (replace) {
+        revokeLocalVideoBlobUrls(prev);
+        return next;
+      }
+      return [...prev, ...next];
+    });
     if (replace) setChannelRight(null);
     setActive((cur) => {
       if (replace) {
@@ -257,10 +279,22 @@ export default function App() {
   }, []);
 
   const onClearList = useCallback(() => {
-    setChannels([]);
+    setChannels((prev) => {
+      revokeLocalVideoBlobUrls(prev);
+      return [];
+    });
     setActive(null);
     setChannelRight(null);
     setParseMessage("Playlist cleared.");
+  }, []);
+
+  const onAddLocalVideoChannels = useCallback((incoming: Channel[]) => {
+    if (!incoming.length) return;
+    setChannels((prev) => [...incoming, ...prev]);
+    setSplitView(true);
+    setParseMessage(
+      `Added ${incoming.length} local video file(s) at the top of the list (see the Local videos tab). Playback position is saved per file. Turn on Split view if it was off, then use Next click plays on to put IPTV on one player and a local file on the other.`
+    );
   }, []);
 
   const channelCount = useMemo(() => channels.length, [channels]);
@@ -321,6 +355,7 @@ export default function App() {
           onSelectChannel={handleSelectChannel}
           onLoadM3U={onLoadM3U}
           onClearList={onClearList}
+          onAddLocalVideoChannels={onAddLocalVideoChannels}
           parseMessage={parseMessage}
           onPlaylistMessage={setParseMessage}
           favoriteUrls={favoriteUrls}

@@ -110,7 +110,8 @@
 }
 
 .radio-inline-tag,
-.library-inline-tag {
+.library-inline-tag,
+.local-video-inline-tag {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;

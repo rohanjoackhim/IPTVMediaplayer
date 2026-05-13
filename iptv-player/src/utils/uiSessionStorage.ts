@@ -2,7 +2,9 @@ import { parseEqCustomGains, parseEqPresetId, type EqPresetId } from "./eqPreset
 
 const KEY = "iptv-ui-session";
 
-export type ListTabPersisted = "all" | "favorites";
+export type ListTabPersisted = "all" | "favorites" | "localVideos";
+/** Radio sidebar: only all vs favorites (no local-files tab). */
+export type RadioListTabPersisted = "all" | "favorites";
 export type AssignPanePersisted = "L" | "R";
 export type SidebarModePersisted = "tv" | "radio" | "audio";
 
@@ -10,7 +12,7 @@ export interface UiSession {
   v: 7;
   listTab: ListTabPersisted;
   /** Radio sidebar: all stations in country vs favorites only (same URLs as Television favorites). */
-  radioListTab: ListTabPersisted;
+  radioListTab: RadioListTabPersisted;
   /** Left sidebar: IPTV, online radio, or local MP3 / audiobooks. */
   sidebarMode: SidebarModePersisted;
   /** Radio Browser country name (exact match to API country list). */
@@ -63,14 +65,20 @@ function parseSidebarMode(raw: unknown): SidebarModePersisted {
   return "tv";
 }
 
-function parseListTab(raw: unknown): ListTabPersisted {
+function parseRadioListTab(raw: unknown): RadioListTabPersisted {
   return raw === "favorites" ? "favorites" : "all";
+}
+
+function parseListTab(raw: unknown): ListTabPersisted {
+  if (raw === "favorites") return "favorites";
+  if (raw === "localVideos") return "localVideos";
+  return "all";
 }
 
 function migrateFromV2(o: Record<string, unknown>): UiSession {
   return {
     v: 7,
-    listTab: o.listTab === "favorites" ? "favorites" : "all",
+    listTab: parseListTab(o.listTab),
     radioListTab: "all",
     sidebarMode: "tv",
     radioCountry: "",
@@ -90,7 +98,7 @@ function migrateFromV2(o: Record<string, unknown>): UiSession {
 function migrateFromV3(o: Record<string, unknown>): UiSession {
   return {
     v: 7,
-    listTab: o.listTab === "favorites" ? "favorites" : "all",
+    listTab: parseListTab(o.listTab),
     radioListTab: "all",
     sidebarMode: parseSidebarMode(o.sidebarMode),
     radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
@@ -112,7 +120,7 @@ function migrateFromV3(o: Record<string, unknown>): UiSession {
 function migrateFromV4(o: Record<string, unknown>): UiSession {
   return {
     v: 7,
-    listTab: o.listTab === "favorites" ? "favorites" : "all",
+    listTab: parseListTab(o.listTab),
     radioListTab: "all",
     sidebarMode: parseSidebarMode(o.sidebarMode),
     radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
@@ -134,8 +142,8 @@ function migrateFromV4(o: Record<string, unknown>): UiSession {
 function migrateFromV5(o: Record<string, unknown>): UiSession {
   return {
     v: 7,
-    listTab: o.listTab === "favorites" ? "favorites" : "all",
-    radioListTab: parseListTab(o.radioListTab),
+    listTab: parseListTab(o.listTab),
+    radioListTab: parseRadioListTab(o.radioListTab),
     sidebarMode: parseSidebarMode(o.sidebarMode),
     radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
     query: typeof o.query === "string" ? o.query : "",
@@ -156,8 +164,8 @@ function migrateFromV5(o: Record<string, unknown>): UiSession {
 function migrateFromV6(o: Record<string, unknown>): UiSession {
   return {
     v: 7,
-    listTab: o.listTab === "favorites" ? "favorites" : "all",
-    radioListTab: parseListTab(o.radioListTab),
+    listTab: parseListTab(o.listTab),
+    radioListTab: parseRadioListTab(o.radioListTab),
     sidebarMode: parseSidebarMode(o.sidebarMode),
     radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
     query: typeof o.query === "string" ? o.query : "",
@@ -199,8 +207,8 @@ export function loadUiSession(): UiSession {
     if (o.v !== 7) return { ...defaultSession };
     return {
       v: 7,
-      listTab: o.listTab === "favorites" ? "favorites" : "all",
-      radioListTab: parseListTab(o.radioListTab),
+      listTab: parseListTab(o.listTab),
+      radioListTab: parseRadioListTab(o.radioListTab),
       sidebarMode: parseSidebarMode(o.sidebarMode),
       radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
       query: typeof o.query === "string" ? o.query : "",

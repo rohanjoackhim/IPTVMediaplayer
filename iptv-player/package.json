@@ -2,7 +2,7 @@
   "name": "iptv-player",
   "private": true,
   "version": "1.0.0",
-  "description": "RJ IPTV and Online Radio Player — M3U / IPTV channels and Radio Browser streams for web and Windows (Electron).",
+  "description": "RJ IPTV and Online Radio Player — M3U / IPTV channels and Radio Browser streams for web, Windows, and macOS (Electron).",
   "author": "Cyberlink",
   "type": "module",
   "main": "electron/main.cjs",
@@ -14,9 +14,12 @@
     "electron": "electron .",
     "electron:run": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win --x64",
-    "dist:win:portable": "npm run build && electron-builder --win portable --x64"
+    "dist:win:portable": "npm run build && electron-builder --win portable --x64",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:mac:universal": "npm run build && electron-builder --mac --universal"
   },
   "dependencies": {
+    "ffmpeg-static": "^5.2.0",
     "hls.js": "^1.5.7",
     "mpegts.js": "^1.8.0",
     "react": "^18.3.1",
@@ -44,9 +47,11 @@
       "dist/**/*",
       "electron/main.cjs",
       "electron/preload.cjs",
-      "package.json"
+      "package.json",
+      "node_modules/ffmpeg-static/**/*"
     ],
     "asar": true,
+    "asarUnpack": ["node_modules/ffmpeg-static/**"],
     "win": {
       "target": [
         {
@@ -66,6 +71,15 @@
         "en_US"
       ],
       "artifactName": "${productName}-${version}-Windows-Setup.${ext}"
+    },
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "hardenedRuntime": true,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
+      "target": ["dmg", "zip"]
+    },
+    "dmg": {
+      "title": "${productName} ${version}"
     }
   }
 }

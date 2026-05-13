@@ -8,8 +8,12 @@ export interface Channel {
   country?: string;
   /** IndexedDB key for local MP3 / audiobook resume (stable file fingerprint). */
   libraryTrackId?: string;
-  /** MIME for local library playback (e.g. audio/mpeg); helps Chromium pick a decoder for blob URLs. */
+  /** MIME hint for local playback (`<source type>`): audio library, or desktop-picked video (AVI/MKV/MPEG, etc.). */
   libraryContentType?: string;
+  /** Television: video picked from disk (`file://` in desktop app) or browser (`blob:`); use split view to play alongside IPTV. */
+  localVideoFile?: boolean;
+  /** Original file name with extension (browser picks); used to detect MKV for FFmpeg vs native path. */
+  localOriginalFileName?: string;
 }
 
 export interface ParseResult {

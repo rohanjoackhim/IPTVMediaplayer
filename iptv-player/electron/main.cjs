@@ -9,7 +9,9 @@ const path = require("path");
 const http = require("http");
 const fs = require("fs");
 const crypto = require("crypto");
+const { spawn } = require("child_process");
 const { Readable } = require("stream");
+const { fileURLToPath, pathToFileURL } = require("url");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -174,6 +176,256 @@ ipcMain.handle("iptv-pick-local-audio-files", async () => {
     });
   }
   return out;
+});
+
+/**
+ * Desktop: pick video files and return `file://` URLs for native `<video>` playback (no full-file read).
+ */
+function mimeForLocalVideoExt(ext) {
+  const e = String(ext || "").toLowerCase();
+  if (e === ".avi" || e === ".divx") return "video/x-msvideo";
+  if (e === ".mkv") return "video/x-matroska";
+  if (e === ".mpeg" || e === ".mpg" || e === ".mpe" || e === ".mpv" || e === ".m1v" || e === ".m2v") return "video/mpeg";
+  if (e === ".m2ts" || e === ".mts" || e === ".ts") return "video/mp2t";
+  if (e === ".webm") return "video/webm";
+  if (e === ".mp4" || e === ".m4v") return "video/mp4";
+  if (e === ".mov" || e === ".qt") return "video/quicktime";
+  if (e === ".ogv") return "video/ogg";
+  if (e === ".wmv") return "video/x-ms-wmv";
+  if (e === ".asf" || e === ".wm") return "video/x-ms-asf";
+  return "";
+}
+
+ipcMain.handle("iptv-pick-local-video-files", async () => {
+  const { pathToFileURL } = require("url");
+  const { dialog } = require("electron");
+  const r = await dialog.showOpenDialog({
+    properties: ["openFile", "multiSelections"],
+    filters: [
+      {
+        name: "Video",
+        extensions: [
+          "mp4",
+          "webm",
+          "mkv",
+          "mov",
+          "m4v",
+          "ogv",
+          "avi",
+          "divx",
+          "wmv",
+          "mpeg",
+          "mpg",
+          "mpe",
+          "mpv",
+          "m1v",
+          "m2v",
+          "m2ts",
+          "mts",
+          "ts",
+          "asf",
+          "wm",
+        ],
+      },
+      { name: "All files", extensions: ["*"] },
+    ],
+    title: "RJ IPTV — add local video files",
+  });
+  if (r.canceled || !r.filePaths?.length) return [];
+  const fsp = fs.promises;
+  const out = [];
+  for (const fp of r.filePaths) {
+    let stat;
+    try {
+      stat = await fsp.stat(fp);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile() || stat.size === 0) continue;
+    const ext = path.extname(fp);
+    const base = path.basename(fp);
+    const name =
+      ext && base.toLowerCase().endsWith(ext.toLowerCase()) ? base.slice(0, -ext.length) : base;
+    const fpNorm = path.resolve(fp);
+    const h = crypto
+      .createHash("sha256")
+      .update(`${fpNorm}\0${stat.size}\0${Number(stat.mtimeMs)}`)
+      .digest("hex")
+      .slice(0, 40);
+    let href;
+    try {
+      href = pathToFileURL(fpNorm).href;
+    } catch {
+      continue;
+    }
+    const mime = mimeForLocalVideoExt(ext) || undefined;
+    out.push({
+      id: `local-video-${h}`,
+      name,
+      url: href,
+      mime,
+      originalFileName: base,
+    });
+  }
+  return out;
+});
+
+function getBundledFfmpegPath() {
+  try {
+    let p = require("ffmpeg-static");
+    if (typeof p !== "string" || !p.trim()) return null;
+    p = path.normalize(p.trim());
+    if (p.includes(`${path.sep}app.asar${path.sep}`) && !p.includes(`${path.sep}app.asar.unpacked${path.sep}`)) {
+      const unpacked = p.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+      if (fs.existsSync(unpacked)) p = unpacked;
+    }
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
+}
+
+function runFfmpeg(ffmpegPath, args) {
+  return new Promise((resolve, reject) => {
+    const stderrChunks = [];
+    const child = spawn(ffmpegPath, args, { windowsHide: true });
+    child.stderr?.on("data", (d) => stderrChunks.push(d));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else {
+        const tail = Buffer.concat(stderrChunks)
+          .toString("utf8")
+          .replace(/\r/g, "")
+          .trim()
+          .slice(-1400);
+        reject(new Error(tail ? `ffmpeg exited ${code}: ${tail}` : `ffmpeg exited with code ${code}`));
+      }
+    });
+  });
+}
+
+/**
+ * Matroska (.mkv) often uses codecs Chromium cannot decode (HEVC, DTS, etc.). Remux or transcode to H.264/AAC MP4
+ * via bundled ffmpeg-static (first open may take a while; result is cached under the user temp folder).
+ */
+ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
+  const fileUrl = String(fileUrlRaw ?? "").trim();
+  if (!/^file:/i.test(fileUrl)) {
+    return { playUrl: fileUrl, mimeType: "video/mp4", usedTranscode: false };
+  }
+  let inPath;
+  try {
+    inPath = fileURLToPath(fileUrl);
+  } catch {
+    throw new Error("Invalid file URL.");
+  }
+  const ext = path.extname(inPath).toLowerCase();
+  if (ext !== ".mkv" && ext !== ".mka") {
+    return { playUrl: fileUrl, mimeType: undefined, usedTranscode: false };
+  }
+
+  const ffmpegPath = getBundledFfmpegPath();
+  if (!ffmpegPath) {
+    throw new Error(
+      "FFmpeg is not bundled with this app. MKV playback needs a packaged desktop build with ffmpeg-static."
+    );
+  }
+
+  const fsp = fs.promises;
+  let st;
+  try {
+    st = await fsp.stat(inPath);
+  } catch {
+    throw new Error("Could not read the video file from disk.");
+  }
+  if (!st.isFile() || st.size === 0) throw new Error("Video file is missing or empty.");
+
+  const fpNorm = path.resolve(inPath);
+  const cacheKey = crypto
+    .createHash("sha256")
+    .update(`${fpNorm}\0${st.size}\0${Number(st.mtimeMs)}`)
+    .digest("hex")
+    .slice(0, 48);
+  const cacheDir = path.join(app.getPath("temp"), "rj-iptv-mkv-cache");
+  await fsp.mkdir(cacheDir, { recursive: true });
+  const outPath = path.join(cacheDir, `${cacheKey}.mp4`);
+
+  try {
+    const ost = await fsp.stat(outPath);
+    if (ost.size > 32_000) {
+      return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true, fromCache: true };
+    }
+  } catch {
+    /* build */
+  }
+
+  const tryUnlink = async (p) => {
+    try {
+      await fsp.unlink(p);
+    } catch {
+      /* noop */
+    }
+  };
+
+  await tryUnlink(outPath);
+
+  const baseArgs = ["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i", fpNorm];
+
+  const copyWithAudio = ["-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"];
+  const copyVideoOnly = ["-map", "0:v:0", "-c", "copy", "-an", "-movflags", "+faststart"];
+  const x264aac = [
+    "-map",
+    "0:v:0",
+    "-map",
+    "0:a:0",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "21",
+    "-c:a",
+    "aac",
+    "-ar",
+    "48000",
+    "-b:a",
+    "192k",
+    "-ac",
+    "2",
+    "-movflags",
+    "+faststart",
+  ];
+  const x264an = ["-map", "0:v:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-an", "-movflags", "+faststart"];
+
+  const tryEncode = async (extraArgs) => {
+    await tryUnlink(outPath);
+    await runFfmpeg(ffmpegPath, [...baseArgs, ...extraArgs, outPath]);
+  };
+
+  try {
+    await tryEncode(copyWithAudio);
+    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
+  } catch {
+    await tryUnlink(outPath);
+  }
+
+  try {
+    await tryEncode(copyVideoOnly);
+    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
+  } catch {
+    await tryUnlink(outPath);
+  }
+
+  try {
+    await tryEncode(x264aac);
+    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
+  } catch {
+    await tryUnlink(outPath);
+  }
+
+  await tryEncode(x264an);
+  return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
 });
 
 function attachRecordingFanout(id, upstream, ws, filePath, tapMime) {

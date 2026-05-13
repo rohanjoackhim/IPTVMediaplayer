@@ -20,6 +20,16 @@ declare global {
           data: ArrayBuffer;
         }>
       >;
+      pickLocalVideoFiles: () => Promise<Array<{ id: string; name: string; url: string; mime?: string }>>;
+      prepareMkvPlayback: (
+        fileUrl: string
+      ) => Promise<{
+        playUrl: string;
+        mimeType?: string;
+        usedTranscode: boolean;
+        fromCache?: boolean;
+        remuxed?: boolean;
+      }>;
       startStreamRecord: (payload: {
         url: string;
         outDir: string;

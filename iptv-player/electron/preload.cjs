@@ -16,6 +16,12 @@ contextBridge.exposeInMainWorld("iptv", {
   /** Desktop: native open dialog + main-process readFile; returns rows for IndexedDB. */
   pickLocalAudioFiles: () => ipcRenderer.invoke("iptv-pick-local-audio-files"),
 
+  /** Desktop: native open dialog; returns `{ id, name, url }[]` with `file://` playback URLs. */
+  pickLocalVideoFiles: () => ipcRenderer.invoke("iptv-pick-local-video-files"),
+
+  /** Desktop: remux or transcode Matroska to H.264/AAC MP4 for Chromium playback; returns `playUrl` (often `file://` temp). */
+  prepareMkvPlayback: (fileUrl) => ipcRenderer.invoke("iptv-prepare-mkv-playback", fileUrl),
+
   startStreamRecord: (payload) => ipcRenderer.invoke("iptv-start-stream-record", payload),
 
   stopStreamRecord: (id) => ipcRenderer.invoke("iptv-stop-stream-record", id),

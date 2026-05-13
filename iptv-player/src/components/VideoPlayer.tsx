@@ -14,6 +14,8 @@ import {
 import { formatBufferStatsLine, getBufferedAheadSec } from "../utils/mediaBufferedStats";
 import { srtToWebVtt } from "../utils/srtToWebVtt";
 import { clearAudioResume, loadAudioResumeSeconds, saveAudioResumeSeconds } from "../utils/audioResumeStorage";
+import { clearVideoResume, loadVideoResumeSeconds, saveVideoResumeSeconds } from "../utils/localVideoResumeStorage";
+import { mimeHintForLocalVideoUrl } from "../utils/localVideoMime";
 import { RadioEqualizer } from "./RadioEqualizer";
 import "./VideoPlayer.css";
 
@@ -132,6 +134,11 @@ export type PlaybackModeLabel =
   | "Radio · native"
   | "Radio · record tap"
   | "Library · native"
+  | "Local video · native"
+  | "Local video · preparing MKV…"
+  | "Local video · MP4 (cache)"
+  | "Local video · MP4 (remux)"
+  | "Local video · MP4 (transcoded)"
   | "URL · blocked";
 
 export function VideoPlayer({
@@ -183,6 +190,10 @@ export function VideoPlayer({
     !!channel?.libraryTrackId?.trim() &&
     !!channel.url?.trim() &&
     channel.url.trim().toLowerCase().startsWith("blob:");
+  const isLocalVideoChannel =
+    !!channel?.localVideoFile &&
+    !!channel.url?.trim() &&
+    (/^file:/i.test(channel.url.trim()) || /^blob:/i.test(channel.url.trim()));
 
   useEffect(() => {
     setUnderLogoFailed(false);
@@ -318,6 +329,17 @@ export function VideoPlayer({
     }
 
     const el = video;
+
+    let skipDefaultFinish = false;
+    const isMatroskaFileUrl = (u: string) => {
+      try {
+        if (!/^file:/i.test(u)) return false;
+        const pth = decodeURIComponent(new URL(u).pathname).replace(/\\/g, "/").toLowerCase();
+        return pth.endsWith(".mkv") || pth.endsWith(".mka");
+      } catch {
+        return false;
+      }
+    };
 
     const onTracks = () => refreshTextTracks();
 
@@ -516,6 +538,168 @@ export function VideoPlayer({
 
       setPlaybackMode("Library · native");
       el.load();
+    } else if (channel.localVideoFile && (/^file:/i.test(url) || /^blob:/i.test(url))) {
+      const origLower = (channel.localOriginalFileName ?? "").trim().toLowerCase();
+      const blobMkvBlocked =
+        /^blob:/i.test(url) &&
+        typeof window !== "undefined" &&
+        typeof window.iptv?.prepareMkvPlayback === "function" &&
+        (origLower.endsWith(".mkv") || origLower.endsWith(".mka"));
+
+      if (blobMkvBlocked) {
+        skipDefaultFinish = true;
+        setPlaybackMode(null);
+        setError(
+          "MKV cannot play from the browser file picker in the desktop app. Use “+ Add local video” so FFmpeg can read the file from disk."
+        );
+      } else {
+      const resumeId = channel.id.trim();
+      let lastThrottleMs = 0;
+      const persistPosition = () => {
+        const t = el.currentTime;
+        if (!Number.isFinite(t) || t < 0.5) return;
+        const dur = el.duration;
+        if (Number.isFinite(dur) && dur > 0 && t >= dur - 1) {
+          clearVideoResume(resumeId);
+          return;
+        }
+        saveVideoResumeSeconds(resumeId, t);
+      };
+      let resumeApplied = false;
+      const applyResume = () => {
+        if (resumeApplied) return;
+        const dur = el.duration;
+        if (!Number.isFinite(dur) || dur <= 0) return;
+        const saved = loadVideoResumeSeconds(resumeId);
+        if (saved == null || saved < 1) {
+          resumeApplied = true;
+          return;
+        }
+        if (saved >= dur - 2) {
+          clearVideoResume(resumeId);
+          resumeApplied = true;
+          return;
+        }
+        el.currentTime = saved;
+        resumeApplied = true;
+      };
+      const onTimeUpdate = () => {
+        const now = performance.now();
+        if (now - lastThrottleMs < 3500) return;
+        lastThrottleMs = now;
+        persistPosition();
+      };
+      const onPause = () => persistPosition();
+      const onEnded = () => {
+        const dur = el.duration;
+        if (Number.isFinite(dur) && dur > 0) clearVideoResume(resumeId);
+      };
+      const onPageHide = () => persistPosition();
+
+      let localVidReadyDone = false;
+      function onLocalVideoReady() {
+        if (localVidReadyDone || el.error) return;
+        const dur = el.duration;
+        const hasPositiveDuration = Number.isFinite(dur) && dur > 0;
+        if (!hasPositiveDuration && el.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        localVidReadyDone = true;
+        el.removeEventListener("loadedmetadata", onLocalVideoReady);
+        el.removeEventListener("loadeddata", onLocalVideoReady);
+        el.removeEventListener("canplay", onLocalVideoReady);
+        el.removeEventListener("error", onLocalVideoError);
+        applyResume();
+        onTracks();
+      }
+      function onLocalVideoError() {
+        el.removeEventListener("loadedmetadata", onLocalVideoReady);
+        el.removeEventListener("loadeddata", onLocalVideoReady);
+        el.removeEventListener("canplay", onLocalVideoReady);
+        setPlaybackMode(null);
+        setError(
+          "Could not play this local file. If it is MKV, try the Windows desktop app (uses FFmpeg). Otherwise try H.264/AAC in MP4, or pick the file again."
+        );
+      }
+
+      const bindLocalVideoSource = (playUrl: string, mimeForSource?: string | null) => {
+        localVidReadyDone = false;
+        el.removeEventListener("error", onLocalVideoError);
+        el.removeEventListener("loadedmetadata", onLocalVideoReady);
+        el.removeEventListener("loadeddata", onLocalVideoReady);
+        el.removeEventListener("canplay", onLocalVideoReady);
+
+        el.addEventListener("error", onLocalVideoError, { once: true });
+        el.addEventListener("loadedmetadata", onLocalVideoReady);
+        el.addEventListener("loadeddata", onLocalVideoReady);
+        el.addEventListener("canplay", onLocalVideoReady);
+        el.addEventListener("timeupdate", onTimeUpdate);
+        el.addEventListener("pause", onPause);
+        el.addEventListener("ended", onEnded);
+        window.addEventListener("pagehide", onPageHide);
+
+        nativeErrCleanup = () => {
+          persistPosition();
+          el.removeEventListener("error", onLocalVideoError);
+          el.removeEventListener("loadedmetadata", onLocalVideoReady);
+          el.removeEventListener("loadeddata", onLocalVideoReady);
+          el.removeEventListener("canplay", onLocalVideoReady);
+          el.removeEventListener("timeupdate", onTimeUpdate);
+          el.removeEventListener("pause", onPause);
+          el.removeEventListener("ended", onEnded);
+          window.removeEventListener("pagehide", onPageHide);
+          el.removeAttribute("src");
+          el.querySelectorAll("source[data-iptv-local-video]").forEach((node) => node.remove());
+        };
+
+        el.removeAttribute("src");
+        el.querySelectorAll("source[data-iptv-local-video]").forEach((node) => node.remove());
+        const srcEl = document.createElement("source");
+        srcEl.setAttribute("data-iptv-local-video", "1");
+        srcEl.src = playUrl;
+        const typeHint =
+          (mimeForSource && mimeForSource.trim()) ||
+          (channel.libraryContentType && channel.libraryContentType.trim()) ||
+          mimeHintForLocalVideoUrl(playUrl);
+        if (typeHint) srcEl.type = typeHint;
+        el.appendChild(srcEl);
+        el.load();
+      };
+
+      const canPrepareMkv =
+        isMatroskaFileUrl(url) && typeof window !== "undefined" && typeof window.iptv?.prepareMkvPlayback === "function";
+
+      if (canPrepareMkv) {
+        skipDefaultFinish = true;
+        setPlaybackMode("Local video · preparing MKV…");
+        const iptvMk = window.iptv!;
+        void iptvMk
+          .prepareMkvPlayback(url)
+          .then((r) => {
+            if (!effectLive) return;
+            const playUrl = typeof r?.playUrl === "string" && r.playUrl.trim() ? r.playUrl.trim() : url;
+            const mimeForSource =
+              typeof r?.mimeType === "string" && r.mimeType.trim() ? r.mimeType.trim() : "video/mp4";
+            bindLocalVideoSource(playUrl, mimeForSource);
+            if (r?.fromCache) setPlaybackMode("Local video · MP4 (cache)");
+            else if (r?.remuxed) setPlaybackMode("Local video · MP4 (remux)");
+            else if (r?.usedTranscode) setPlaybackMode("Local video · MP4 (transcoded)");
+            else setPlaybackMode("Local video · native");
+            el.addEventListener("addtrack", onTracks as EventListener);
+            void el.play().catch(() => {});
+          })
+          .catch((e) => {
+            if (!effectLive) return;
+            setPlaybackMode(null);
+            setError(
+              e instanceof Error
+                ? e.message
+                : "Could not prepare MKV for playback. Use the Windows desktop build with FFmpeg bundled."
+            );
+          });
+      } else {
+        bindLocalVideoSource(url, null);
+        setPlaybackMode("Local video · native");
+      }
+      }
     } else if (isLikelyHls(url)) {
       if (Hls.isSupported()) {
         const splitHlsViaLocalProxy =
@@ -757,11 +941,13 @@ export function VideoPlayer({
       el.src = nativePlay;
     }
 
-    el.addEventListener("addtrack", onTracks as EventListener);
+    if (!skipDefaultFinish) {
+      el.addEventListener("addtrack", onTracks as EventListener);
 
-    void el.play().catch(() => {
-      /* autoplay policy — user can press play */
-    });
+      void el.play().catch(() => {
+        /* autoplay policy — user can press play */
+      });
+    }
 
     return () => {
       effectLive = false;
@@ -1002,6 +1188,7 @@ export function VideoPlayer({
               <div className="player-now-playing-name">
                 {isRadioChannel ? <span className="radio-inline-tag">Radio</span> : null}
                 {isLibraryChannel ? <span className="library-inline-tag">Local audio</span> : null}
+                {isLocalVideoChannel ? <span className="local-video-inline-tag">Local video</span> : null}
                 <span className="player-now-playing-title-text">{channel.name}</span>
               </div>
               {channel.group?.trim() ? (

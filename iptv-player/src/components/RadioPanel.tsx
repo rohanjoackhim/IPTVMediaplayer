@@ -8,7 +8,7 @@ import {
   type RadioBrowserCountryRow,
   type RadioBrowserStationRow,
 } from "../utils/radioBrowserApi";
-import { loadUiSession, saveUiSession, type ListTabPersisted } from "../utils/uiSessionStorage";
+import { loadUiSession, saveUiSession, type RadioListTabPersisted } from "../utils/uiSessionStorage";
 import "./RadioPanel.css";
 
 const ROW_H = 52;
@@ -59,7 +59,7 @@ export function RadioPanel({
 }: RadioPanelProps) {
   const [countries, setCountries] = useState<RadioBrowserCountryRow[]>([]);
   const [stations, setStations] = useState<RadioBrowserStationRow[]>([]);
-  const [radioListTab, setRadioListTab] = useState<ListTabPersisted>(() => loadUiSession().radioListTab);
+  const [radioListTab, setRadioListTab] = useState<RadioListTabPersisted>(() => loadUiSession().radioListTab);
   const [query, setQuery] = useState("");
   const [loadingCountries, setLoadingCountries] = useState(true);
   const [loadingStations, setLoadingStations] = useState(false);

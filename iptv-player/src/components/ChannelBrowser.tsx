@@ -4,12 +4,73 @@ import { fetchM3uPlaylist } from "../utils/fetchM3uPlaylist";
 import { favoriteKeyForChannel } from "../utils/favoritesStorage";
 import { loadLastPlaylistUrl, saveLastPlaylistUrl } from "../utils/playlistSettingsStorage";
 import { loadUiSession, saveUiSession, type AssignPanePersisted, type ListTabPersisted, type SidebarModePersisted } from "../utils/uiSessionStorage";
+import { loadVideoResumeSeconds } from "../utils/localVideoResumeStorage";
+import { mimeHintForLocalVideoFilename } from "../utils/localVideoMime";
 import { LocalAudioPanel } from "./LocalAudioPanel";
 import { RadioPanel } from "./RadioPanel";
 import "./ChannelBrowser.css";
 
 const ROW_H = 52;
 const OVERSCAN = 12;
+
+function normalizeDesktopLocalVideoRows(raw: unknown): Channel[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Channel[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const id = typeof o.id === "string" && o.id.trim() ? o.id.trim() : "";
+    const name = typeof o.name === "string" && o.name.trim() ? o.name.trim() : "Video";
+    const url = typeof o.url === "string" && o.url.trim() ? o.url.trim() : "";
+    if (!id || !url) continue;
+    const mime = typeof o.mime === "string" && o.mime.trim() ? o.mime.trim() : undefined;
+    const originalFileName = typeof o.originalFileName === "string" ? o.originalFileName.trim() : "";
+    out.push({
+      id,
+      name,
+      url,
+      group: "Local video",
+      localVideoFile: true,
+      libraryContentType: mime,
+      localOriginalFileName: originalFileName || undefined,
+    });
+  }
+  return out;
+}
+
+function channelsFromBrowserVideoFiles(list: FileList | null): Channel[] {
+  if (!list?.length) return [];
+  const out: Channel[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    if (!f || f.size === 0) continue;
+    const url = URL.createObjectURL(f);
+    const stripped = f.name.replace(/\.[^./]+$/, "");
+    const name = stripped.trim() || f.name;
+    const hint = mimeHintForLocalVideoFilename(f.name);
+    let mime: string | undefined = hint;
+    const ft = f.type?.trim();
+    if (ft && ft !== "application/octet-stream") mime = ft;
+    out.push({
+      id: `local-video-web-${crypto.randomUUID()}`,
+      name,
+      url,
+      group: "Local video",
+      localVideoFile: true,
+      libraryContentType: mime,
+      localOriginalFileName: f.name,
+    });
+  }
+  return out;
+}
+
+function formatVideoResume(sec: number): string {
+  const s = Math.floor(sec % 60);
+  const m = Math.floor((sec / 60) % 60);
+  const h = Math.floor(sec / 3600);
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 function useGroups(channels: Channel[]) {
   return useMemo(() => {
@@ -33,6 +94,8 @@ export interface ChannelBrowserProps {
   onSelectChannel: (c: Channel) => void;
   onLoadM3U: (text: string, replace: boolean) => void;
   onClearList: () => void;
+  /** Television: append channels for disk / browser-picked video files (split view with IPTV). */
+  onAddLocalVideoChannels: (channels: Channel[]) => void;
   parseMessage: string | null;
   onPlaylistMessage: (message: string | null) => void;
   favoriteUrls: Set<string>;
@@ -53,6 +116,7 @@ export function ChannelBrowser({
   onSelectChannel,
   onLoadM3U,
   onClearList,
+  onAddLocalVideoChannels,
   parseMessage,
   onPlaylistMessage,
   favoriteUrls,
@@ -68,7 +132,11 @@ export function ChannelBrowser({
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const localVideoFileRef = useRef<HTMLInputElement>(null);
   const groups = useGroups(channels);
+
+  const hasDesktopVideoPick =
+    typeof window !== "undefined" && typeof window.iptv?.pickLocalVideoFiles === "function";
 
   useEffect(() => {
     if (!groups.includes(group)) setGroup("All groups");
@@ -89,12 +157,26 @@ export function ChannelBrowser({
 
   const isFavorite = useCallback((c: Channel) => favoriteUrls.has(favoriteKeyForChannel(c)), [favoriteUrls]);
 
+  const flushLocalVideoAdd = useCallback(
+    (rows: Channel[]) => {
+      if (!rows.length) return;
+      onAddLocalVideoChannels(rows);
+      setListTab("localVideos");
+    },
+    [onAddLocalVideoChannels]
+  );
+
   const tabFiltered = useMemo(() => {
     if (listTab === "favorites") {
       return channels.filter((c) => favoriteUrls.has(favoriteKeyForChannel(c)));
     }
+    if (listTab === "localVideos") {
+      return channels.filter((c) => !!c.localVideoFile);
+    }
     return channels;
   }, [channels, listTab, favoriteUrls]);
+
+  const localVideosCount = useMemo(() => channels.filter((c) => !!c.localVideoFile).length, [channels]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -133,6 +215,16 @@ export function ChannelBrowser({
 
   const readFile = (file: File) => {
     const lower = file.name.toLowerCase();
+    if (
+      /\.(mp4|webm|mkv|mov|m4v|ogv|avi|wmv|mpeg|mpg|mpe|mpv|m1v|m2v|m2ts|mts|ts|divx|asf|wm)(\?|$)/i.test(
+        lower
+      )
+    ) {
+      onPlaylistMessage(
+        "That file is a video, not an M3U playlist. Use + Add local video (or Add local video via browser) in the Television toolbar."
+      );
+      return;
+    }
     if (/\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac|webm)$/.test(lower)) {
       onPlaylistMessage(
         "That file is audio, not an M3U playlist. Open the MP3 & audiobooks tab and add files there (desktop: Add files…)."
@@ -222,8 +314,9 @@ export function ChannelBrowser({
         {sidebarMode === "tv" ? (
           <>
             <p className="browser-sub">
-              {channelCount} channels · {favCount} favorite{favCount === 1 ? "" : "s"} · list, last playlist URL, last
-              played stream, and favorites saved in this browser · left: browse · right: play
+              {channelCount} channels · {favCount} favorite{favCount === 1 ? "" : "s"} · {localVideosCount} local
+              video{localVideosCount === 1 ? "" : "s"} · list and resume positions saved in this browser · use the{" "}
+              <strong>Local videos</strong> tab to add files; split view plays IPTV and a file on different panes
             </p>
             <div className="toolbar">
               <input
@@ -321,6 +414,15 @@ export function ChannelBrowser({
           >
             Favorites{favoritesInLibrary > 0 ? ` (${favoritesInLibrary})` : ""}
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={listTab === "localVideos"}
+            className={`browser-tab${listTab === "localVideos" ? " active" : ""}`}
+            onClick={() => setListTab("localVideos")}
+          >
+            Local videos{localVideosCount > 0 ? ` (${localVideosCount})` : ""}
+          </button>
         </div>
       ) : null}
 
@@ -351,22 +453,79 @@ export function ChannelBrowser({
           <div className="filters">
             <input
               className="search-input"
-              placeholder="Search channels…"
+              placeholder={listTab === "localVideos" ? "Search local videos…" : "Search channels…"}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               autoComplete="off"
               spellCheck={false}
             />
-            <div className="filter-selects">
-              <select className="group-select" value={group} onChange={(e) => setGroup(e.target.value)}>
-                {groups.map((g) => (
-                  <option key={g} value={g}>
-                    {g === "All groups" ? "All groups" : `Group: ${g}`}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {listTab !== "localVideos" ? (
+              <div className="filter-selects">
+                <select className="group-select" value={group} onChange={(e) => setGroup(e.target.value)}>
+                  {groups.map((g) => (
+                    <option key={g} value={g}>
+                      {g === "All groups" ? "All groups" : `Group: ${g}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
           </div>
+
+          {listTab === "localVideos" ? (
+            <div className="local-videos-toolbar" role="region" aria-label="Local video files">
+              <input
+                ref={localVideoFileRef}
+                type="file"
+                accept="video/*,.mp4,.webm,.mkv,.mov,.m4v,.ogv,.avi,.wmv,.mpeg,.mpg,.mpe,.mpv,.m1v,.m2v,.m2ts,.mts,.ts,.divx,.asf,.wm"
+                className="hidden-input"
+                multiple
+                onChange={(e) => {
+                  const list = e.target.files;
+                  e.target.value = "";
+                  const rows = channelsFromBrowserVideoFiles(list);
+                  if (!rows.length) {
+                    onPlaylistMessage("No video files were selected (or files were empty).");
+                    return;
+                  }
+                  flushLocalVideoAdd(rows);
+                  onPlaylistMessage(null);
+                }}
+              />
+              {hasDesktopVideoPick ? (
+                <button
+                  type="button"
+                  className="file-btn"
+                  onClick={() => {
+                    void (async () => {
+                      try {
+                        const raw = await window.iptv!.pickLocalVideoFiles();
+                        const rows = normalizeDesktopLocalVideoRows(raw);
+                        if (!rows.length) {
+                          onPlaylistMessage("No video files were added (empty selection or unreadable files).");
+                          return;
+                        }
+                        flushLocalVideoAdd(rows);
+                        onPlaylistMessage(null);
+                      } catch (e) {
+                        onPlaylistMessage(e instanceof Error ? e.message : String(e));
+                      }
+                    })();
+                  }}
+                >
+                  + Add local video
+                </button>
+              ) : null}
+              <button type="button" className="file-btn" onClick={() => localVideoFileRef.current?.click()}>
+                {hasDesktopVideoPick ? "+ Add local video (browser)" : "+ Add local video"}
+              </button>
+              <p className="local-videos-toolbar-hint">
+                Last played time is remembered per file (this browser). On the desktop app, <strong>.mkv</strong> files
+                are converted to H.264/AAC MP4 on first play (FFmpeg; may take a while). Use split view and Next click
+                plays on to play a file on one side while IPTV runs on the other.
+              </p>
+            </div>
+          ) : null}
 
           <div className="channel-scroll" ref={scrollRef} onScroll={onScroll}>
             {filtered.length === 0 ? (
@@ -391,6 +550,16 @@ export function ChannelBrowser({
                       No favorites match your search or filters. Try clearing the search box or choosing{" "}
                       <strong>All groups</strong>.
                     </>
+                  )
+                ) : listTab === "localVideos" ? (
+                  localVideosCount === 0 ? (
+                    <>
+                      No local videos yet. Use <strong>+ Add local video</strong> (desktop) or{" "}
+                      <strong>+ Add local video (browser)</strong> above. Playback position is saved per file in this
+                      browser.
+                    </>
+                  ) : (
+                    <>No local videos match your search. Try clearing the search box.</>
                   )
                 ) : (
                   <>
@@ -422,12 +591,29 @@ export function ChannelBrowser({
                             loading="lazy"
                             referrerPolicy="no-referrer"
                           />
+                        ) : c.localVideoFile ? (
+                          <span className="channel-logo placeholder" aria-hidden>
+                            ▶
+                          </span>
                         ) : (
                           <span className="channel-logo placeholder">TV</span>
                         )}
                         <span className="channel-meta">
                           <span className="channel-name">{c.name}</span>
-                          {c.group || c.country ? (
+                          {c.localVideoFile ? (
+                            <span className="channel-group">
+                              <span>{c.group?.trim() || "Local video"}</span>
+                              <span className="channel-sep"> · </span>
+                              <span className="channel-local-video-resume">
+                                {(() => {
+                                  const rs = loadVideoResumeSeconds(c.id);
+                                  return rs != null && rs >= 3
+                                    ? `Resume at ${formatVideoResume(rs)}`
+                                    : "Start from beginning";
+                                })()}
+                              </span>
+                            </span>
+                          ) : c.group || c.country ? (
                             <span className="channel-group">
                               {c.country ? <span className="channel-country">{c.country}</span> : null}
                               {c.country && c.group ? <span className="channel-sep"> · </span> : null}
