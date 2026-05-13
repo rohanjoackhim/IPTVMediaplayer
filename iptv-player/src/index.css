@@ -1,18 +1,40 @@
 :root {
   color-scheme: dark;
-  --bg-deep: #0a0c10;
-  --bg-panel: #12151c;
-  --bg-elevated: #1a1f2a;
-  --border: #2a3142;
-  --text: #e8ecf4;
-  --text-muted: #8b95a8;
-  --accent: #3d8bfd;
-  --accent-dim: #2563c4;
-  --success: #34d399;
-  --danger: #f87171;
+  /* Xbox-inspired surfaces: near-black with a subtle green cast */
+  --bg-deep: #0a0b0a;
+  --bg-panel: #141816;
+  --bg-elevated: #1c211d;
+  --bg-input: #121514;
+  --border: #2a3029;
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  /* Text */
+  --text: #f5f6f3;
+  --text-secondary: #c8cfcc;
+  --text-muted: #8b9590;
+  /* Xbox accent (Series / Game Pass lime) */
+  --accent: #9bf00b;
+  --accent-hover: #c5ff52;
+  --accent-dim: rgba(155, 240, 11, 0.4);
+  --accent-muted: rgba(155, 240, 11, 0.14);
+  --accent-border: rgba(155, 240, 11, 0.42);
+  --accent-glow: rgba(155, 240, 11, 0.12);
+  /* Secondary highlight (split right / status) — Xbox cyan */
+  --success: #5ce1e6;
+  --success-muted: rgba(92, 225, 230, 0.12);
+  --danger: #ff6b6b;
+  --danger-muted: rgba(255, 107, 107, 0.12);
+  /* Layout — slightly tighter radii like console tiles */
   --row-h: 52px;
-  font-family: "DM Sans", system-ui, sans-serif;
-  line-height: 1.45;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-panel: 0 0 0 1px var(--border-subtle), 0 12px 40px rgba(0, 0, 0, 0.5),
+    0 0 100px rgba(155, 240, 11, 0.025);
+  --font: "Segoe UI Variable", "Segoe UI", "Bahnschrift", system-ui, -apple-system, sans-serif;
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 *,
@@ -32,6 +54,12 @@ body {
   background: var(--bg-deep);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: rgba(155, 240, 11, 0.28);
+  color: var(--text);
 }
 
 button,
@@ -42,4 +70,34 @@ select {
 
 button {
   cursor: pointer;
+}
+
+/* Scrollbars — Xbox lime accent */
+.channel-scroll,
+.radio-scroll,
+.local-audio-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(155, 240, 11, 0.28) transparent;
+}
+
+.channel-scroll::-webkit-scrollbar,
+.radio-scroll::-webkit-scrollbar,
+.local-audio-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.channel-scroll::-webkit-scrollbar-thumb,
+.radio-scroll::-webkit-scrollbar-thumb,
+.local-audio-scroll::-webkit-scrollbar-thumb {
+  background: rgba(155, 240, 11, 0.22);
+  border-radius: 99px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.channel-scroll::-webkit-scrollbar-thumb:hover,
+.radio-scroll::-webkit-scrollbar-thumb:hover,
+.local-audio-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(155, 240, 11, 0.4);
+  background-clip: padding-box;
 }

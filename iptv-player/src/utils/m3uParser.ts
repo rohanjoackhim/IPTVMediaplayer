@@ -1,4 +1,5 @@
 import type { Channel, ParseResult } from "../types";
+import { inferCountryFromGroupTitle, normalizeCountryLabel } from "./countryFromM3u";
 
 let idCounter = 0;
 function nextId(): string {
@@ -34,6 +35,7 @@ export function parseM3U(text: string): ParseResult {
         url,
         logo: pending.logo,
         group: pending.group,
+        country: pending.country,
       });
       pending = null;
     } else if (/^https?:\/\//i.test(url) || url.startsWith("rtmp://") || url.startsWith("rtsp://")) {
@@ -52,6 +54,20 @@ export function parseM3U(text: string): ParseResult {
   return { channels, errors };
 }
 
+function countryFromAttrs(attrs: Record<string, string>): string | undefined {
+  const raw =
+    attrs["tvg-country"] ||
+    attrs["country"] ||
+    attrs["tvg-country-code"] ||
+    attrs["tvg-countryname"] ||
+    "";
+  const fromAttr = raw.trim() ? normalizeCountryLabel(raw) : "";
+  const group = attrs["group-title"] || attrs["group"];
+  const fromGroup = inferCountryFromGroupTitle(group);
+  const out = fromAttr || fromGroup;
+  return out || undefined;
+}
+
 function parseExtInf(line: string): Partial<Channel> {
   // #EXTINF:-1 tvg-id="x" tvg-logo="..." group-title="News",Channel Name
   const attrs: Record<string, string> = {};
@@ -65,9 +81,12 @@ function parseExtInf(line: string): Partial<Channel> {
   const name =
     commaIdx >= 0 ? line.slice(commaIdx + 1).trim() : line.replace(/^#EXTINF:[^,]*,?\s*/, "").trim();
 
+  const group = attrs["group-title"] || attrs["group"];
+
   return {
     name: name || undefined,
     logo: attrs["tvg-logo"] || attrs["logo"],
-    group: attrs["group-title"] || attrs["group"],
+    group,
+    country: countryFromAttrs(attrs),
   };
 }

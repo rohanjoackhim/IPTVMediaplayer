@@ -24,37 +24,73 @@ export function assertHttpPlaylistUrl(urlString: string): URL {
   return u;
 }
 
+function abortAfter(ms: number): AbortSignal | undefined {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  const c = new AbortController();
+  setTimeout(() => c.abort(), ms);
+  return c.signal;
+}
+
+const readResponse = async (res: Response): Promise<string> => {
+  if (!res.ok) {
+    const snippet = (await res.text()).slice(0, 200).replace(/\s+/g, " ");
+    throw new Error(snippet ? `HTTP ${res.status}: ${snippet}` : `HTTP ${res.status}`);
+  }
+  return res.text();
+};
+
 /**
- * Fetches M3U/M3U8 text. Tries the browser first; in dev, falls back to the Vite
- * same-origin proxy when the remote server blocks CORS.
+ * Fetches M3U/M3U8 text.
+ * - **Electron (.exe)**: main process fetch (no CORS).
+ * - **Browser + `npm run dev`**: direct fetch, then Vite `/__proxy/m3u` on failure.
+ * - **Static / preview build**: direct fetch only (will fail if the playlist host blocks CORS).
  */
 export async function fetchM3uPlaylist(urlString: string): Promise<string> {
   const u = assertHttpPlaylistUrl(urlString);
+  const url = u.toString();
 
-  const readResponse = async (res: Response): Promise<string> => {
-    if (!res.ok) {
-      const snippet = (await res.text()).slice(0, 200).replace(/\s+/g, " ");
-      throw new Error(snippet ? `HTTP ${res.status}: ${snippet}` : `HTTP ${res.status}`);
-    }
-    return res.text();
-  };
+  if (typeof window !== "undefined" && window.iptv?.fetchPlaylistText) {
+    return window.iptv.fetchPlaylistText(url);
+  }
 
-  try {
-    const res = await fetch(u.toString(), {
+  const tryDirect = async () => {
+    const res = await fetch(url, {
       method: "GET",
       mode: "cors",
       credentials: "omit",
-      signal: AbortSignal.timeout(120_000),
+      signal: abortAfter(120_000),
     });
-    return await readResponse(res);
+    return readResponse(res);
+  };
+
+  const tryDevProxy = async () => {
+    const proxyPath = `${PROXY_PATH}?target=${encodeURIComponent(url)}`;
+    const proxyUrl =
+      typeof window !== "undefined" && window.location?.origin
+        ? new URL(proxyPath, window.location.origin).toString()
+        : proxyPath;
+    const res = await fetch(proxyUrl, { signal: abortAfter(120_000) });
+    return readResponse(res);
+  };
+
+  try {
+    return await tryDirect();
   } catch (first) {
-    if (!import.meta.env.DEV) {
-      throw first instanceof Error
-        ? first
-        : new Error("Could not load playlist (network or CORS). Try dev server (npm run dev) or download the file.");
+    if (import.meta.env.DEV) {
+      try {
+        return await tryDevProxy();
+      } catch (second) {
+        const a = first instanceof Error ? first.message : String(first);
+        const b = second instanceof Error ? second.message : String(second);
+        throw new Error(`Could not load playlist. Browser: ${a}. Dev proxy: ${b}.`);
+      }
     }
-    const proxyUrl = `${PROXY_PATH}?target=${encodeURIComponent(u.toString())}`;
-    const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(120_000) });
-    return await readResponse(res);
+    throw first instanceof Error
+      ? first
+      : new Error(
+          "Could not load playlist (network or CORS). Use the desktop app, run npm run dev for the playlist proxy, or load an .m3u file from disk."
+        );
   }
 }

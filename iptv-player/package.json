@@ -2,15 +2,19 @@
   "name": "iptv-player",
   "private": true,
   "version": "1.0.0",
+  "description": "RJ IPTV and Online Radio Player — M3U / IPTV channels and Radio Browser streams for web and Windows (Electron).",
+  "author": "Cyberlink",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "test": "vitest run",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "electron": "electron .",
     "electron:run": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win portable --x64"
+    "dist:win": "npm run build && electron-builder --win --x64",
+    "dist:win:portable": "npm run build && electron-builder --win portable --x64"
   },
   "dependencies": {
     "hls.js": "^1.5.7",
@@ -24,32 +28,44 @@
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.6.2",
-    "vite": "^5.4.10"
+    "vite": "^5.4.10",
+    "vitest": "^4.1.6"
   },
   "build": {
     "appId": "com.cyberlink.iptvplayer",
-    "productName": "IPTV Player",
+    "productName": "RJ IPTV and Online Radio Player",
     "copyright": "Copyright © contributors",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "electron/**/*",
+      "electron/main.cjs",
+      "electron/preload.cjs",
       "package.json"
     ],
     "asar": true,
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "${productName}-${version}-Windows-Portable.${ext}"
+      "artifactName": "${productName}-${version}-Windows-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "en_US"
+      ],
+      "artifactName": "${productName}-${version}-Windows-Setup.${ext}"
     }
   }
 }
