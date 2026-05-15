@@ -1,0 +1,109 @@
+.mp3-lyrics-panel-head-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mp3-lyrics-translate-wrap {
+  position: relative;
+}
+
+.mp3-lyrics-translate-btn {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-border);
+  background: rgba(18, 22, 30, 0.95);
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mp3-lyrics-translate-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.mp3-lyrics-translate-btn--open {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  color: var(--text);
+}
+
+.mp3-lyrics-translate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mp3-lyrics-translate-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  min-width: 200px;
+  max-height: min(52vh, 320px);
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: rgba(12, 14, 18, 0.98);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.mp3-lyrics-translate-option {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mp3-lyrics-translate-option:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.mp3-lyrics-translate-option--active {
+  background: var(--accent-muted);
+  color: var(--accent-hover);
+}
+
+.mp3-lyrics-translate-option-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.mp3-lyrics-translate-option-native {
+  font-size: 0.6875rem;
+  opacity: 0.85;
+}
+
+.mp3-lyrics-translate-status {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  color: var(--accent-hover);
+  background: rgba(155, 240, 11, 0.08);
+  border-radius: var(--radius-sm);
+}
+
+.mp3-lyrics-translate-err {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  color: #fecaca;
+  background: var(--danger-muted);
+  border-radius: var(--radius-sm);
+}

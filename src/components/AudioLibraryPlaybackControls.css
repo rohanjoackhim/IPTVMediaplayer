@@ -1,0 +1,58 @@
+.audio-playback-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.audio-playback-controls-label {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin-right: 2px;
+}
+
+.audio-playback-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.audio-playback-icon-glyph {
+  font-size: 0.875rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.audio-playback-icon-btn:hover:not(:disabled) {
+  color: var(--text-secondary);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.audio-playback-icon-btn--on {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.audio-playback-icon-btn--danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.35);
+  background: var(--danger-muted);
+}
+
+.audio-playback-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

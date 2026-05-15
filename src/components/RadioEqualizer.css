@@ -1,0 +1,122 @@
+.radio-eq-toggle {
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.radio-eq-toggle:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.radio-eq-toggle[aria-expanded="true"] {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.radio-eq-panel {
+  margin-top: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.radio-eq-preset-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.radio-eq-preset-row label {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.radio-eq-select {
+  min-width: 10rem;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.radio-eq-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
+.radio-eq-sliders {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 8px 0 4px;
+  overflow-x: auto;
+}
+
+.radio-eq-band {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 28px;
+}
+
+.radio-eq-band label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.radio-eq-band input[type="range"] {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 1.25rem;
+  height: 88px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.radio-eq-band-val {
+  font-size: 0.625rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  min-height: 1rem;
+}
+
+.radio-eq-hint {
+  margin: 0;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.radio-eq-err {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--danger);
+  line-height: 1.4;
+}
