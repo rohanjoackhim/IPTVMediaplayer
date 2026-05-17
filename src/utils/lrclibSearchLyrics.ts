@@ -33,7 +33,65 @@ function isUsableLyricsRecord(r: LrclibRecord): boolean {
   return plainFromRecord(r).length > 0;
 }
 
-function scoreRecord(r: LrclibRecord, durationSec: number | null): number {
+function comparableText(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(feat|ft|featuring)\b\.?/g, " ")
+    .replace(/\b(remaster(?:ed)?|remix|radio edit|explicit|clean|mono|stereo|version|edit|live|official|lyrics?)\b/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textTokens(s: string): Set<string> {
+  return new Set(comparableText(s).split(/\s+/).filter((t) => t.length > 1));
+}
+
+function tokenSimilarity(a: string, b: string): number {
+  const aa = comparableText(a);
+  const bb = comparableText(b);
+  if (!aa || !bb) return 0;
+  if (aa === bb) return 1;
+  if (aa.includes(bb) || bb.includes(aa)) return 0.86;
+  const at = textTokens(aa);
+  const bt = textTokens(bb);
+  if (!at.size || !bt.size) return 0;
+  let overlap = 0;
+  for (const t of at) {
+    if (bt.has(t)) overlap += 1;
+  }
+  return overlap / Math.max(at.size, bt.size);
+}
+
+function expectedIdentity(displayName: string, fileMeta?: LyricsFileMetadata | null): { artist: string; title: string } {
+  const metaArtist = fileMeta?.artist?.trim() ?? "";
+  const metaTitle = fileMeta?.title?.trim() ?? "";
+  if (metaArtist || metaTitle) return { artist: metaArtist, title: metaTitle };
+  const guess = guessArtistAndTrackFromFilename(displayName);
+  return { artist: guess.artist.trim(), title: guess.track.trim() || normalizeLyricsTitleSource(displayName) };
+}
+
+function identityQuality(r: LrclibRecord, expected: { artist: string; title: string }): number {
+  const titleScore = tokenSimilarity(expected.title, r.trackName ?? "");
+  const artistScore = expected.artist ? tokenSimilarity(expected.artist, r.artistName ?? "") : 0.62;
+  if (!expected.title && !expected.artist) return 0.5;
+  if (expected.artist) return titleScore * 0.68 + artistScore * 0.32;
+  return titleScore;
+}
+
+function isPlausibleIdentityMatch(r: LrclibRecord, expected: { artist: string; title: string }, durationSec: number | null): boolean {
+  const titleScore = tokenSimilarity(expected.title, r.trackName ?? "");
+  const artistScore = expected.artist ? tokenSimilarity(expected.artist, r.artistName ?? "") : 0.7;
+  const d = typeof r.duration === "number" && Number.isFinite(r.duration) ? r.duration : null;
+  const durationClose = durationSec != null && d != null && Math.abs(d - durationSec) <= 8;
+  if (expected.title && titleScore < 0.55) return false;
+  if (expected.artist && artistScore < 0.34 && !durationClose) return false;
+  return true;
+}
+
+function scoreRecord(r: LrclibRecord, durationSec: number | null, expected: { artist: string; title: string }): number {
   let score = 0;
   const plain = plainFromRecord(r);
   if (plain.length > 120) score += 55;
@@ -42,6 +100,7 @@ function scoreRecord(r: LrclibRecord, durationSec: number | null): number {
   else if (plain.length > 0) score += 28;
   if (typeof r.plainLyrics === "string" && r.plainLyrics.trim().length > 0) score += 8;
   if (r.instrumental) score -= 500;
+  score += Math.round(identityQuality(r, expected) * 160);
   const d = typeof r.duration === "number" && Number.isFinite(r.duration) ? r.duration : null;
   if (durationSec != null && d != null && d > 0) {
     const diff = Math.abs(d - durationSec);
@@ -169,18 +228,21 @@ async function fetchSearchResults(
 /** Return best hit early when quality is already high enough to skip remaining search batches. */
 function pickUsableIfGoodEnough(
   merged: Map<number, LrclibRecord>,
-  durationSec: number | null
+  durationSec: number | null,
+  expected: { artist: string; title: string }
 ): { plain: string; record: LrclibRecord } | null {
   const ranked = [...merged.values()].sort(
-    (a, b) => scoreRecord(b, durationSec) - scoreRecord(a, durationSec)
+    (a, b) => scoreRecord(b, durationSec, expected) - scoreRecord(a, durationSec, expected)
   );
   for (const r of ranked) {
     if (!isUsableLyricsRecord(r)) continue;
+    if (!isPlausibleIdentityMatch(r, expected, durationSec)) continue;
     const plain = plainFromRecord(r);
-    const sc = scoreRecord(r, durationSec);
-    if (plain.length >= 200) return { plain, record: r };
-    if (plain.length >= 90 && sc >= 100) return { plain, record: r };
-    if (plain.length >= 45 && sc >= 125) return { plain, record: r };
+    const sc = scoreRecord(r, durationSec, expected);
+    const identity = identityQuality(r, expected);
+    if (plain.length >= 200 && identity >= 0.78) return { plain, record: r };
+    if (plain.length >= 90 && sc >= 190 && identity >= 0.66) return { plain, record: r };
+    if (plain.length >= 45 && sc >= 230 && identity >= 0.74) return { plain, record: r };
   }
   return null;
 }
@@ -196,6 +258,7 @@ export async function lrclibFindBestLyrics(
   fileMeta?: LyricsFileMetadata | null
 ): Promise<{ plain: string; record: LrclibRecord } | null> {
   const merged = new Map<number, LrclibRecord>();
+  const expected = expectedIdentity(displayName, fileMeta);
 
   if (durationSec != null && durationSec > 2) {
     const tasks: Promise<void>[] = [];
@@ -224,7 +287,7 @@ export async function lrclibFindBestLyrics(
     await Promise.all(tasks);
   }
 
-  const early = pickUsableIfGoodEnough(merged, durationSec);
+  const early = pickUsableIfGoodEnough(merged, durationSec, expected);
   if (early) return early;
 
   const plans = buildLrclibSearchPlans(displayName, fileMeta);
@@ -238,16 +301,16 @@ export async function lrclibFindBestLyrics(
         if (!merged.has(r.id)) merged.set(r.id, r);
       }
     }
-    const quick = pickUsableIfGoodEnough(merged, durationSec);
+    const quick = pickUsableIfGoodEnough(merged, durationSec, expected);
     if (quick) return quick;
   }
 
   const ranked = [...merged.values()].sort(
-    (a, b) => scoreRecord(b, durationSec) - scoreRecord(a, durationSec)
+    (a, b) => scoreRecord(b, durationSec, expected) - scoreRecord(a, durationSec, expected)
   );
 
   for (const r of ranked) {
-    if (isUsableLyricsRecord(r)) {
+    if (isUsableLyricsRecord(r) && isPlausibleIdentityMatch(r, expected, durationSec)) {
       return { plain: plainFromRecord(r), record: r };
     }
   }

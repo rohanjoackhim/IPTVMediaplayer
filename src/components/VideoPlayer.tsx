@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject, type ReactNode, type WheelEvent } from "react";
 import { flushSync } from "react-dom";
 import Hls, { FetchLoader } from "hls.js";
 import mpegts from "mpegts.js";
 import type { Channel } from "../types";
-import { isLikelyHls, isLikelyMpegTsOverHttp } from "../utils/streamKind";
+import { isLikelyHls, isLikelyMpegTsOverHttp, isLikelyProgressiveVideoUrl } from "../utils/streamKind";
 import { mpegtsIptvConfig, streamRefererForUrl } from "../utils/iptvStreamHeaders";
 import { isAlreadyProxiedStreamUrl, proxiedStreamUrl, shouldUseStreamProxy } from "../utils/proxiedStreamUrl";
 import {
@@ -16,12 +16,20 @@ import { srtToWebVtt } from "../utils/srtToWebVtt";
 import { clearAudioResume, loadAudioResumeSeconds, saveAudioResumeSeconds } from "../utils/audioResumeStorage";
 import { clearVideoResume, loadVideoResumeSeconds, saveVideoResumeSeconds } from "../utils/localVideoResumeStorage";
 import { mimeHintForLocalVideoUrl } from "../utils/localVideoMime";
-import { getLibraryLyricsCache } from "../utils/audioLibraryDb";
+import {
+  getLibraryLyricsCache,
+  getLibraryLyricsTranslationCache,
+  putLibraryLyricsTranslationCache,
+} from "../utils/audioLibraryDb";
 import { isLikelyLocalMp3Channel, youtubeSearchQueryFromTrackName } from "../utils/youtubeSearchFromLocalTitle";
 import {
   enrichLocalMp3LyricsWithSongMeaning,
   fetchBilingualLyricsForLocalMp3,
+  fetchDeepSeekLyricsForLocalMp3,
+  fetchGeminiLyricsForLocalMp3,
+  LOCAL_LYRICS_MATCH_VERSION,
   mapCachedLibraryLyricsToResult,
+  saveLocalMp3LyricsResultToCache,
   type LyricLinePair,
   type LocalMp3LyricsResult,
 } from "../utils/localMp3LyricsPipeline";
@@ -58,6 +66,8 @@ export interface VideoPlayerProps {
   splitIsolateNetwork?: boolean;
   /** Which player this instance is (for local library auto-advance). */
   playbackPane?: "L" | "R";
+  /** Split view: keep video panes equal height by capping/scrolling the chrome block below the video. */
+  inSplitView?: boolean;
   /** Fires when a local IndexedDB library track (`blob:` + `libraryTrackId`) finishes naturally. */
   onLocalLibraryAudioEnded?: (info: { pane: "L" | "R"; channelId: string }) => void;
 }
@@ -66,6 +76,111 @@ interface TrackOption {
   id: string;
   label: string;
   index: number;
+}
+
+interface EbookSpeechBoundary {
+  ebookId: string;
+  chunkIndex: number;
+  pageIndex?: number;
+  charIndex: number;
+  charLength?: number;
+}
+
+const EBOOK_SPEECH_EVENT = "iptv-ebook-speech-boundary";
+const EBOOK_START_EVENT = "iptv-ebook-start-at";
+const EBOOK_OCR_TEXT_EVENT = "iptv-ebook-ocr-text";
+const LIBRARY_AUDIO_TOGGLE_EVENT = "iptv-library-audio-toggle";
+const LIBRARY_AUDIO_STATE_EVENT = "iptv-library-audio-state";
+
+function splitEbookText(text: string): string[] {
+  const cleaned = text.replace(/\s+/g, " ").trim();
+  if (!cleaned) return [];
+  const sentences = cleaned.match(/[^.!?。！？]+[.!?。！？"]*|[^.!?。！？]+$/g) ?? [cleaned];
+  const chunks: string[] = [];
+  let cur = "";
+  for (const sentence of sentences) {
+    const s = sentence.trim();
+    if (!s) continue;
+    if ((cur + " " + s).trim().length <= 520) {
+      cur = (cur + " " + s).trim();
+      continue;
+    }
+    if (cur) chunks.push(cur);
+    if (s.length <= 520) {
+      cur = s;
+      continue;
+    }
+    for (let i = 0; i < s.length; i += 520) chunks.push(s.slice(i, i + 520));
+    cur = "";
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
+function ebookHighlightRange(chunk: string, boundary: EbookSpeechBoundary | null): { start: number; end: number } | null {
+  if (!boundary) return null;
+  const start = Math.max(0, Math.min(boundary.charIndex, chunk.length));
+  let end =
+    typeof boundary.charLength === "number" && boundary.charLength > 0
+      ? Math.min(chunk.length, start + boundary.charLength)
+      : start;
+  if (end <= start) {
+    while (end < chunk.length && /\s/.test(chunk[end] ?? "")) end++;
+    while (end < chunk.length && !/\s/.test(chunk[end] ?? "")) end++;
+  }
+  return end > start ? { start, end } : null;
+}
+
+function dispatchEbookStartAt(ebookId: string, chunkIndex: number, charIndex: number, word?: string, source?: "navigation" | "word-dblclick") {
+  window.dispatchEvent(
+    new CustomEvent(EBOOK_START_EVENT, {
+      detail: { ebookId, chunkIndex, pageIndex: chunkIndex, charIndex, word, source },
+    })
+  );
+}
+
+function dispatchLibraryAudioState(trackId: string, paused: boolean) {
+  window.dispatchEvent(new CustomEvent(LIBRARY_AUDIO_STATE_EVENT, { detail: { trackId, paused } }));
+}
+
+function ebookPartPreview(chunk: string): string {
+  const trimmed = chunk.replace(/\s+/g, " ").trim();
+  return trimmed.length > 88 ? `${trimmed.slice(0, 88)}…` : trimmed;
+}
+
+function useEbookWheelPaging(currentPage: number, pageCount: number, goToPage: (idx: number) => void) {
+  const wheelAccumRef = useRef(0);
+  const lastTurnAtRef = useRef(0);
+  return useCallback(
+    (ev: WheelEvent<HTMLElement>) => {
+      const rawDelta = Math.abs(ev.deltaX) > Math.abs(ev.deltaY) ? ev.deltaX : ev.deltaY;
+      if (!rawDelta) return;
+      const el = ev.currentTarget;
+      const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? Math.max(el.clientHeight, 1) : 1;
+      const delta = rawDelta * unit;
+      const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      const canScrollCurrentPage =
+        maxScrollTop > 2 &&
+        ((delta > 0 && el.scrollTop < maxScrollTop - 2) || (delta < 0 && el.scrollTop > 2));
+      if (canScrollCurrentPage) {
+        wheelAccumRef.current = 0;
+        return;
+      }
+      const direction = delta > 0 ? 1 : -1;
+      const nextPage = currentPage + direction;
+      if (nextPage < 0 || nextPage >= pageCount) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const now = performance.now();
+      if (now - lastTurnAtRef.current > 600) wheelAccumRef.current = 0;
+      wheelAccumRef.current += delta;
+      if (Math.abs(wheelAccumRef.current) < 80 || now - lastTurnAtRef.current < 320) return;
+      wheelAccumRef.current = 0;
+      lastTurnAtRef.current = now;
+      goToPage(nextPage);
+    },
+    [currentPage, goToPage, pageCount]
+  );
 }
 
 type MpegtsPlayer = ReturnType<typeof mpegts.createPlayer>;
@@ -87,6 +202,20 @@ function mpegTsErrorHttpInfo(extra: unknown): { status?: number; msg?: string } 
 
 function mpegTsIsHttpStatusCodeError(detail: unknown): boolean {
   return String(detail ?? "").includes("HttpStatusCodeInvalid");
+}
+
+function mpegTsIsFormatUnsupported(type: unknown, detail: unknown, extra: unknown): boolean {
+  const text = `${String(type ?? "")} ${String(detail ?? "")} ${
+    extra != null && typeof extra === "object" ? JSON.stringify(extra) : String(extra ?? "")
+  }`.toLowerCase();
+  return (
+    text.includes("formatunsupported") ||
+    text.includes("unsupported media type") ||
+    text.includes("non mpeg-ts") ||
+    text.includes("non-mpeg-ts") ||
+    text.includes("non flv") ||
+    text.includes("non-flv")
+  );
 }
 
 function mpegTsStreamErrorMessage(type: unknown, detail: unknown, extra: unknown): string {
@@ -118,6 +247,13 @@ function mpegTsStreamErrorMessage(type: unknown, detail: unknown, extra: unknown
     if (typeof s === "number" && s >= 400) {
       return `HTTP ${s}: stream request rejected${http.msg ? ` — ${http.msg}` : ""}.`;
     }
+  }
+
+  if (mpegTsIsFormatUnsupported(type, detail, extra)) {
+    return (
+      "This URL did not return MPEG-TS/FLV data. The provider may be returning MP4, HLS, an HTML login/error page, or another media type. " +
+      "The player will try direct browser playback when possible; if it still fails, use a direct .m3u8 or .mp4 URL from your provider."
+    );
   }
 
   const extraStr =
@@ -179,7 +315,643 @@ export type PlaybackModeLabel =
   | "Local video · MP4 (cache)"
   | "Local video · MP4 (remux)"
   | "Local video · MP4 (transcoded)"
+  | "Screen off · recording"
   | "URL · blocked";
+
+type PdfJsDocument = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<PdfJsPage>;
+};
+
+type PdfJsPage = {
+  getViewport: (options: { scale: number }) => { width: number; height: number; transform?: number[] };
+  render: (options: { canvas?: HTMLCanvasElement; canvasContext: CanvasRenderingContext2D; viewport: unknown }) => { promise: Promise<void> };
+  getTextContent: () => Promise<{ items: Array<{ str?: unknown; transform?: unknown; width?: unknown; height?: unknown }> }>;
+};
+
+type PdfTextSpan = {
+  text: string;
+  start: number;
+  end: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+function dispatchEbookOcrText(ebookId: string, pageIndex: number, text: string) {
+  window.dispatchEvent(new CustomEvent(EBOOK_OCR_TEXT_EVENT, { detail: { ebookId, pageIndex, text } }));
+}
+
+function EbookPlainTextPage({
+  channel,
+  ebookChunks,
+  ebookStartChunk,
+  ebookSpeechBoundary,
+  ebookCurrentWordRef,
+}: {
+  channel: Channel;
+  ebookChunks: string[];
+  ebookStartChunk: number;
+  ebookSpeechBoundary: EbookSpeechBoundary | null;
+  ebookCurrentWordRef: MutableRefObject<HTMLButtonElement | null>;
+}) {
+  const pageScrollRef = useRef<HTMLDivElement | null>(null);
+  const [textScale, setTextScale] = useState(1);
+  const [visiblePart, setVisiblePart] = useState(ebookStartChunk);
+  const speech = ebookSpeechBoundary;
+  const currentPart = visiblePart;
+  const pageCount = Math.max(ebookChunks.length, 1);
+  useEffect(() => {
+    setVisiblePart(Math.max(0, Math.min(ebookStartChunk, pageCount - 1)));
+  }, [ebookStartChunk, pageCount]);
+  useEffect(() => {
+    if (!speech || speech.ebookId !== channel.ebookId) return;
+    setVisiblePart(Math.max(0, Math.min(speech.chunkIndex, pageCount - 1)));
+  }, [channel.ebookId, pageCount, speech]);
+  const goToPart = useCallback(
+    (idx: number) => {
+      const next = Math.max(0, Math.min(pageCount - 1, idx));
+      setVisiblePart(next);
+      if (channel.ebookId) dispatchEbookStartAt(channel.ebookId, next, 0, undefined, "navigation");
+    },
+    [channel.ebookId, pageCount]
+  );
+  const onPageWheel = useEbookWheelPaging(currentPart, pageCount, goToPart);
+  useEffect(() => {
+    pageScrollRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [currentPart]);
+  return (
+    <div className="ebook-player-body">
+      <nav className="ebook-page-browser" aria-label="Book parts">
+        <div className="ebook-page-browser-title">Pages</div>
+        <div className="ebook-page-browser-list">
+          {ebookChunks.map((chunk, idx) => {
+            const isCurrent = idx === currentPart;
+            return (
+              <button
+                key={idx}
+                type="button"
+                className={`ebook-page-browser-item${isCurrent ? " ebook-page-browser-item--current" : ""}`}
+                onClick={() => goToPart(idx)}
+              >
+                <span className="ebook-page-browser-num">{idx + 1}</span>
+                <span className="ebook-page-browser-preview">{ebookPartPreview(chunk)}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+      <div className="ebook-reader-pane">
+        <div className="ebook-real-toolbar ebook-real-toolbar--top">
+          <button type="button" onClick={() => goToPart(0)} disabled={currentPart <= 0}>
+            First
+          </button>
+          <button type="button" onClick={() => goToPart(currentPart - 1)} disabled={currentPart <= 0}>
+            Prev
+          </button>
+          <span>Part {Math.min(currentPart + 1, pageCount)} of {pageCount}</span>
+          <button type="button" onClick={() => goToPart(currentPart + 1)} disabled={currentPart >= pageCount - 1}>
+            Next
+          </button>
+          <button type="button" onClick={() => goToPart(pageCount - 1)} disabled={currentPart >= pageCount - 1}>
+            Last
+          </button>
+          <button type="button" onClick={() => setTextScale((s) => Math.max(0.8, Number((s - 0.1).toFixed(1))))}>
+            Zoom -
+          </button>
+          <span>{Math.round(textScale * 100)}%</span>
+          <button type="button" onClick={() => setTextScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(1))))}>
+            Zoom +
+          </button>
+        </div>
+      <div
+        ref={pageScrollRef}
+        className="ebook-player-text"
+        style={{ fontSize: `calc(clamp(1.08rem, 1.48vw, 1.42rem) * ${textScale})` }}
+        onWheel={onPageWheel}
+      >
+        {ebookChunks.map((chunk, idx) => {
+          const speech = ebookSpeechBoundary;
+          const boundary =
+            speech && speech.ebookId === channel.ebookId && speech.chunkIndex === idx
+              ? speech
+              : null;
+          const range = ebookHighlightRange(chunk, boundary);
+          return (
+            <section
+              key={idx}
+              className={
+                idx === currentPart
+                  ? "ebook-player-section ebook-player-section--start"
+                  : "ebook-player-section"
+              }
+              aria-label={`Part ${idx + 1}`}
+              hidden={idx !== currentPart}
+            >
+              <span className="ebook-player-section-label">
+                {idx === currentPart ? "Current page" : `Part ${idx + 1}`}
+              </span>
+              <p className="ebook-player-paragraph">
+                {(() => {
+                  const ebookId = channel.ebookId;
+                  if (!ebookId) return chunk;
+                  const parts: ReactNode[] = [];
+                  const re = /\s+|\S+/g;
+                  let match: RegExpExecArray | null;
+                  while ((match = re.exec(chunk)) != null) {
+                    const token = match[0];
+                    const start = match.index;
+                    const end = start + token.length;
+                    if (/^\s+$/.test(token)) {
+                      parts.push(token);
+                      continue;
+                    }
+                    const highlighted = !!range && start < range.end && end > range.start;
+                    parts.push(
+                      <button
+                        key={`${idx}-${start}`}
+                        type="button"
+                        className="ebook-player-word-btn"
+                        ref={highlighted ? ebookCurrentWordRef : undefined}
+                        title="Start reading from this word"
+                        onClick={() => dispatchEbookStartAt(ebookId, idx, start, token)}
+                        onDoubleClick={() => dispatchEbookStartAt(ebookId, idx, start, token, "word-dblclick")}
+                      >
+                        {highlighted ? <mark className="ebook-player-word">{token}</mark> : token}
+                      </button>
+                    );
+                  }
+                  return parts;
+                })()}
+              </p>
+            </section>
+          );
+        })}
+      </div>
+      </div>
+    </div>
+  );
+}
+
+function PdfReader({
+  channel,
+  pageTexts,
+  ebookStartChunk,
+  ebookSpeechBoundary,
+}: {
+  channel: Channel;
+  pageTexts: string[];
+  ebookStartChunk: number;
+  ebookSpeechBoundary: EbookSpeechBoundary | null;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const pageScrollRef = useRef<HTMLDivElement | null>(null);
+  const [pdfDoc, setPdfDoc] = useState<PdfJsDocument | null>(null);
+  const [pdfUtil, setPdfUtil] = useState<{ transform?: (m1: number[], m2: number[]) => number[] } | null>(null);
+  const [pageIndex, setPageIndex] = useState(ebookStartChunk);
+  const [scale, setScale] = useState(1.2);
+  const [spans, setSpans] = useState<PdfTextSpan[]>([]);
+  const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  const [status, setStatus] = useState("Loading PDF…");
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrPageTexts, setOcrPageTexts] = useState<Record<number, string>>({});
+  const effectivePageTexts = useMemo(
+    () => Array.from({ length: Math.max(pdfDoc?.numPages ?? 0, pageTexts.length, 1) }, (_, idx) => ocrPageTexts[idx] ?? pageTexts[idx] ?? ""),
+    [ocrPageTexts, pageTexts, pdfDoc?.numPages]
+  );
+  const pageCount = pdfDoc?.numPages ?? Math.max(effectivePageTexts.length, 1);
+  const ebookId = channel.ebookId ?? "";
+
+  useEffect(() => {
+    let cancelled = false;
+    setStatus("Loading PDF…");
+    setPdfDoc(null);
+    setSpans([]);
+    void (async () => {
+      try {
+        if (!(channel.ebookBlob instanceof Blob)) throw new Error("The original PDF file is not available.");
+        const [pdfjs, pdfWorker] = await Promise.all([
+          import("pdfjs-dist/legacy/build/pdf.mjs"),
+          import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
+        ]);
+        (globalThis as typeof globalThis & { pdfjsWorker?: unknown }).pdfjsWorker = pdfWorker;
+        const data = new Uint8Array(await channel.ebookBlob.arrayBuffer());
+        const doc = await pdfjs.getDocument({ data, isEvalSupported: false, useWorkerFetch: false } as Parameters<typeof pdfjs.getDocument>[0]).promise;
+        if (cancelled) return;
+        setPdfUtil(pdfjs.Util ?? null);
+        setPdfDoc(doc as unknown as PdfJsDocument);
+        setPageIndex((cur) => Math.max(0, Math.min(cur, doc.numPages - 1)));
+        setStatus("");
+      } catch (e) {
+        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [channel.ebookBlob]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSpans([]);
+    setStatus((cur) => (cur === "Loading PDF…" ? cur : ""));
+    void (async () => {
+      try {
+        if (!pdfDoc || !canvasRef.current) return;
+        const page = await pdfDoc.getPage(pageIndex + 1);
+        if (cancelled) return;
+        const viewport = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Could not create a PDF canvas context.");
+        canvas.width = Math.max(1, Math.floor(viewport.width));
+        canvas.height = Math.max(1, Math.floor(viewport.height));
+        setPageSize({ width: viewport.width, height: viewport.height });
+        await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+        if (cancelled) return;
+        const text = await page.getTextContent();
+        if (cancelled) return;
+        let cursor = 0;
+        const nextSpans: PdfTextSpan[] = [];
+        for (const item of text.items) {
+          const str = typeof item.str === "string" ? item.str : "";
+          if (!str.trim()) {
+            cursor += str.length + 1;
+            continue;
+          }
+          const rawTransform = Array.isArray(item.transform) ? (item.transform as number[]) : null;
+          const tx = rawTransform && viewport.transform && pdfUtil?.transform
+            ? pdfUtil.transform(viewport.transform, rawTransform)
+            : rawTransform;
+          const fontHeight = tx ? Math.max(8, Math.hypot(tx[2] ?? 0, tx[3] ?? 10)) : 12;
+          const left = tx?.[4] ?? 0;
+          const top = tx ? viewport.height - (tx[5] ?? 0) - fontHeight : 0;
+          const width = typeof item.width === "number" ? Math.max(8, item.width * scale) : Math.max(8, str.length * fontHeight * 0.45);
+          nextSpans.push({
+            text: str,
+            start: cursor,
+            end: cursor + str.length,
+            left,
+            top,
+            width,
+            height: fontHeight * 1.25,
+          });
+          cursor += str.length + 1;
+        }
+        setSpans(nextSpans);
+        if (nextSpans.length === 0 && !(effectivePageTexts[pageIndex] ?? "").trim()) {
+          setStatus("This PDF page has no selectable text. Press OCR page to scan it for read-aloud and highlighting.");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setPageSize({ width: 0, height: 0 });
+          setStatus(e instanceof Error ? `Could not render this PDF page: ${e.message}` : `Could not render this PDF page: ${String(e)}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectivePageTexts, pageIndex, pdfDoc, pdfUtil, scale]);
+
+  useEffect(() => {
+    const speech = ebookSpeechBoundary;
+    if (!speech || speech.ebookId !== ebookId) return;
+    setPageIndex(Math.max(0, Math.min(speech.chunkIndex, Math.max(pageCount - 1, 0))));
+  }, [ebookId, ebookSpeechBoundary, pageCount]);
+
+  const runOcr = useCallback(async () => {
+    const canvas = canvasRef.current;
+    if (!canvas || !ebookId) return;
+    setOcrBusy(true);
+    setStatus("Running OCR on this page…");
+    try {
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng");
+      const result = await worker.recognize(canvas.toDataURL("image/png"));
+      await worker.terminate();
+      const text = String(result.data.text ?? "").trim();
+      if (!text) throw new Error("OCR did not find readable text on this page.");
+      setOcrPageTexts((prev) => ({ ...prev, [pageIndex]: text }));
+      dispatchEbookOcrText(ebookId, pageIndex, text);
+      setStatus("OCR text saved for this page.");
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOcrBusy(false);
+    }
+  }, [ebookId, pageIndex]);
+
+  const boundary =
+    ebookSpeechBoundary && ebookSpeechBoundary.ebookId === ebookId && ebookSpeechBoundary.chunkIndex === pageIndex
+      ? ebookSpeechBoundary
+      : null;
+  const range = ebookHighlightRange(effectivePageTexts[pageIndex] ?? "", boundary);
+  const goToPdfPage = useCallback(
+    (idx: number) => {
+      const next = Math.max(0, Math.min(pageCount - 1, idx));
+      setPageIndex(next);
+      if (ebookId) dispatchEbookStartAt(ebookId, next, 0, undefined, "navigation");
+    },
+    [ebookId, pageCount]
+  );
+  const onPageWheel = useEbookWheelPaging(pageIndex, pageCount, goToPdfPage);
+  useEffect(() => {
+    pageScrollRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [pageIndex]);
+
+  return (
+    <div className="ebook-real-reader">
+      <aside className="ebook-real-sidebar" aria-label="PDF pages">
+        <div className="ebook-page-browser-title">Pages</div>
+        <div className="ebook-real-thumb-list">
+          {Array.from({ length: pageCount }, (_, idx) => (
+            <button
+              key={idx}
+              type="button"
+              className={`ebook-real-thumb${idx === pageIndex ? " ebook-real-thumb--current" : ""}`}
+              onClick={() => goToPdfPage(idx)}
+            >
+              <span className="ebook-real-thumb-page">{idx + 1}</span>
+              <span className="ebook-real-thumb-lines">{ebookPartPreview(effectivePageTexts[idx] || "Scanned page")}</span>
+            </button>
+          ))}
+        </div>
+      </aside>
+      <section className="ebook-real-main">
+        <div className="ebook-real-toolbar ebook-real-toolbar--top">
+          <button type="button" onClick={() => goToPdfPage(0)} disabled={pageIndex <= 0}>
+            First
+          </button>
+          <button type="button" onClick={() => goToPdfPage(pageIndex - 1)} disabled={pageIndex <= 0}>
+            Prev
+          </button>
+          <span>Page {pageIndex + 1} of {pageCount}</span>
+          <button type="button" onClick={() => goToPdfPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1}>
+            Next
+          </button>
+          <button type="button" onClick={() => goToPdfPage(pageCount - 1)} disabled={pageIndex >= pageCount - 1}>
+            Last
+          </button>
+          <button type="button" onClick={() => setScale((s) => Math.max(0.7, Number((s - 0.1).toFixed(1))))}>Zoom -</button>
+          <span>{Math.round(scale * 100)}%</span>
+          <button type="button" onClick={() => setScale((s) => Math.min(2.4, Number((s + 0.1).toFixed(1))))}>Zoom +</button>
+          <button type="button" onClick={() => void runOcr()} disabled={ocrBusy || !pdfDoc}>
+            {ocrBusy ? "OCR…" : "OCR page"}
+          </button>
+        </div>
+        {status ? <div className="ebook-real-status" role="status">{status}</div> : null}
+        <div ref={pageScrollRef} className="ebook-pdf-scroll" onWheel={onPageWheel}>
+          <div className="ebook-pdf-page" style={{ width: pageSize.width || undefined, height: pageSize.height || undefined }}>
+            <canvas ref={canvasRef} className="ebook-pdf-canvas" />
+            <div className="ebook-pdf-text-layer" aria-label={`PDF page ${pageIndex + 1}`}>
+              {spans.map((span, idx) => {
+                const highlighted = !!range && span.start < range.end && span.end > range.start;
+                return (
+                  <button
+                    key={`${pageIndex}-${idx}-${span.start}`}
+                    type="button"
+                    className={`ebook-pdf-text-span${highlighted ? " ebook-pdf-text-span--highlight" : ""}`}
+                    style={{
+                      left: span.left,
+                      top: span.top,
+                      width: span.width,
+                      height: span.height,
+                      fontSize: span.height * 0.78,
+                    }}
+                    title="Start reading from this text"
+                    onClick={() => {
+                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text);
+                    }}
+                    onDoubleClick={() => {
+                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text, "word-dblclick");
+                    }}
+                  >
+                    {span.text}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function extractEpubMediaHtml(html: string): string {
+  if (typeof DOMParser === "undefined") return "";
+  const doc = new DOMParser().parseFromString(html || "<p></p>", "text/html");
+  doc.querySelectorAll("script, style, noscript").forEach((node) => node.remove());
+  const media = Array.from(doc.body.querySelectorAll("img, svg, figure"))
+    .map((node) => node.outerHTML)
+    .join("");
+  return media;
+}
+
+function EpubReader({
+  channel,
+  pageTexts,
+  ebookStartChunk,
+  ebookSpeechBoundary,
+}: {
+  channel: Channel;
+  pageTexts: string[];
+  ebookStartChunk: number;
+  ebookSpeechBoundary: EbookSpeechBoundary | null;
+}) {
+  const articleRef = useRef<HTMLElement | null>(null);
+  const [pageIndex, setPageIndex] = useState(ebookStartChunk);
+  const [scale, setScale] = useState(1);
+  const [pages, setPages] = useState<Array<{ html: string; text: string }>>([]);
+  const [status, setStatus] = useState("Loading EPUB…");
+  const ebookId = channel.ebookId ?? "";
+
+  useEffect(() => {
+    let cancelled = false;
+    const objectUrls: string[] = [];
+    setStatus("Loading EPUB…");
+    setPages([]);
+    void (async () => {
+      try {
+        if (!(channel.ebookBlob instanceof Blob)) throw new Error("The original EPUB file is not available.");
+        const JSZip = (await import("jszip")).default;
+        const zip = await JSZip.loadAsync(channel.ebookBlob);
+        const container = await zip.file("META-INF/container.xml")?.async("string");
+        const rootfile = container?.match(/full-path\s*=\s*["']([^"']+)["']/i)?.[1];
+        if (!rootfile) throw new Error("Could not find the EPUB package file.");
+        const opf = await zip.file(rootfile)?.async("string");
+        if (!opf) throw new Error("Could not read the EPUB package file.");
+        const base = rootfile.includes("/") ? rootfile.slice(0, rootfile.lastIndexOf("/") + 1) : "";
+        const manifest = new Map<string, { href: string; mediaType: string }>();
+        for (const item of opf.matchAll(/<item\b[^>]*>/gi)) {
+          const tag = item[0];
+          const id = tag.match(/\bid\s*=\s*["']([^"']+)["']/i)?.[1];
+          const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
+          const mediaType = tag.match(/\bmedia-type\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
+          if (id && href) manifest.set(id, { href, mediaType });
+        }
+        const resolve = (href: string) => {
+          const parts = `${base}${href}`.split("/");
+          const out: string[] = [];
+          for (const part of parts) {
+            if (!part || part === ".") continue;
+            if (part === "..") out.pop();
+            else out.push(part);
+          }
+          return out.join("/");
+        };
+        const assetUrls = new Map<string, string>();
+        for (const entry of manifest.values()) {
+          if (!/^image\//i.test(entry.mediaType) && !/font|css/i.test(entry.mediaType)) continue;
+          const path = resolve(entry.href);
+          const file = zip.file(path);
+          if (!file) continue;
+          const blob = await file.async("blob");
+          const url = URL.createObjectURL(blob);
+          objectUrls.push(url);
+          assetUrls.set(path, url);
+        }
+        const built: Array<{ html: string; text: string }> = [];
+        for (const ref of opf.matchAll(/<itemref\b[^>]*>/gi)) {
+          const idref = ref[0].match(/\bidref\s*=\s*["']([^"']+)["']/i)?.[1];
+          const entry = idref ? manifest.get(idref) : null;
+          if (!entry || !/\.(xhtml|html|htm|xml)$/i.test(entry.href)) continue;
+          const path = resolve(entry.href);
+          let html = await zip.file(path)?.async("string");
+          if (!html) continue;
+          html = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/\s(on\w+)=["'][^"']*["']/gi, "");
+          html = html.replace(/\b(src|href)=["']([^"']+)["']/gi, (raw, attr: string, href: string) => {
+            if (/^(https?:|data:|blob:|#)/i.test(href)) return raw;
+            const assetPath = resolve(href);
+            const url = assetUrls.get(assetPath);
+            return url ? `${attr}="${url}"` : raw;
+          });
+          const text = new DOMParser().parseFromString(html, "text/html").body.textContent?.replace(/\s+/g, " ").trim() ?? "";
+          built.push({ html, text });
+        }
+        if (cancelled) return;
+        setPages(built.length ? built : pageTexts.map((text) => ({ html: `<p>${text}</p>`, text })));
+        setStatus("");
+      } catch (e) {
+        if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [channel.ebookBlob, pageTexts]);
+
+  useEffect(() => {
+    const speech = ebookSpeechBoundary;
+    if (!speech || speech.ebookId !== ebookId) return;
+    setPageIndex(Math.max(0, Math.min(speech.chunkIndex, Math.max(pages.length - 1, 0))));
+  }, [ebookId, ebookSpeechBoundary, pages.length]);
+
+  const current = pages[pageIndex] ?? null;
+  const syncText = pageTexts[pageIndex] || current?.text || "";
+  const boundary =
+    ebookSpeechBoundary && ebookSpeechBoundary.ebookId === ebookId && ebookSpeechBoundary.chunkIndex === pageIndex
+      ? ebookSpeechBoundary
+      : null;
+  const range = ebookHighlightRange(syncText, boundary);
+  const pageCount = Math.max(pages.length || pageTexts.length, 1);
+  const goToEpubPage = useCallback(
+    (idx: number) => {
+      const next = Math.max(0, Math.min(pageCount - 1, idx));
+      setPageIndex(next);
+      if (ebookId) dispatchEbookStartAt(ebookId, next, 0, undefined, "navigation");
+    },
+    [ebookId, pageCount]
+  );
+  const onPageWheel = useEbookWheelPaging(pageIndex, pageCount, goToEpubPage);
+  useEffect(() => {
+    articleRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [pageIndex]);
+  const mediaHtml = useMemo(() => extractEpubMediaHtml(current?.html ?? ""), [current?.html]);
+  useEffect(() => {
+    const hit = articleRef.current?.querySelector(".ebook-epub-word--highlight");
+    hit?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  }, [range]);
+  return (
+    <div className="ebook-real-reader">
+      <aside className="ebook-real-sidebar" aria-label="EPUB chapters">
+        <div className="ebook-page-browser-title">Contents</div>
+        <div className="ebook-real-thumb-list">
+          {(pages.length ? pages : pageTexts.map((text) => ({ html: "", text }))).map((page, idx) => (
+            <button
+              key={idx}
+              type="button"
+              className={`ebook-real-thumb${idx === pageIndex ? " ebook-real-thumb--current" : ""}`}
+              onClick={() => goToEpubPage(idx)}
+            >
+              <span className="ebook-real-thumb-page">{idx + 1}</span>
+              <span className="ebook-real-thumb-lines">{ebookPartPreview(page.text || `Chapter ${idx + 1}`)}</span>
+            </button>
+          ))}
+        </div>
+      </aside>
+      <section className="ebook-real-main">
+        <div className="ebook-real-toolbar ebook-real-toolbar--top">
+          <button type="button" onClick={() => goToEpubPage(0)} disabled={pageIndex <= 0}>First</button>
+          <button type="button" onClick={() => goToEpubPage(pageIndex - 1)} disabled={pageIndex <= 0}>Prev</button>
+          <span>Chapter {pageIndex + 1} of {pageCount}</span>
+          <button type="button" onClick={() => goToEpubPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1}>Next</button>
+          <button type="button" onClick={() => goToEpubPage(pageCount - 1)} disabled={pageIndex >= pageCount - 1}>Last</button>
+          <button type="button" onClick={() => setScale((s) => Math.max(0.8, Number((s - 0.1).toFixed(1))))}>Zoom -</button>
+          <span>{Math.round(scale * 100)}%</span>
+          <button type="button" onClick={() => setScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(1))))}>Zoom +</button>
+        </div>
+        {status ? <div className="ebook-real-status" role="status">{status}</div> : null}
+        <article
+          ref={articleRef}
+          className="ebook-epub-page"
+          style={{ fontSize: `calc(clamp(1rem, 1.3vw, 1.28rem) * ${scale})` }}
+          onWheel={onPageWheel}
+        >
+          {mediaHtml ? (
+            <div className="ebook-epub-media" dangerouslySetInnerHTML={{ __html: mediaHtml }} />
+          ) : null}
+          <p className="ebook-epub-sync-text">
+            {syncText ? (() => {
+              const parts: ReactNode[] = [];
+              const re = /\s+|\S+/g;
+              let match: RegExpExecArray | null;
+              while ((match = re.exec(syncText)) != null) {
+                const token = match[0];
+                const start = match.index;
+                const end = start + token.length;
+                if (/^\s+$/.test(token)) {
+                  parts.push(token);
+                  continue;
+                }
+                const highlighted = !!range && start < range.end && end > range.start;
+                parts.push(
+                  <button
+                    key={`${pageIndex}-${start}`}
+                    type="button"
+                    className={`ebook-epub-word${highlighted ? " ebook-epub-word--highlight" : ""}`}
+                    onClick={() => {
+                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, start, token);
+                    }}
+                    onDoubleClick={() => {
+                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, start, token, "word-dblclick");
+                    }}
+                  >
+                    {token}
+                  </button>
+                );
+              }
+              return parts;
+            })() : "No readable EPUB page found."}
+          </p>
+        </article>
+      </section>
+    </div>
+  );
+}
 
 export function VideoPlayer({
   channel,
@@ -190,6 +962,7 @@ export function VideoPlayer({
   streamProxyOrigin,
   splitIsolateNetwork = false,
   playbackPane,
+  inSplitView = false,
   onLocalLibraryAudioEnded,
 }: VideoPlayerProps) {
   const mediaRef = useRef<HTMLVideoElement>(null);
@@ -212,6 +985,7 @@ export function VideoPlayer({
   const [recordBusy, setRecordBusy] = useState(false);
   const [recordErr, setRecordErr] = useState<string | null>(null);
   const [recordSavedPath, setRecordSavedPath] = useState<string | null>(null);
+  const [screenPlaybackOff, setScreenPlaybackOff] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackModeLabel | null>(null);
   const [trackOptions, setTrackOptions] = useState<TrackOption[]>([]);
   const [selectedTrack, setSelectedTrack] = useState<string>("off");
@@ -233,7 +1007,6 @@ export function VideoPlayer({
     | { kind: "ready"; data: LocalMp3LyricsResult };
   const [mp3Lyrics, setMp3Lyrics] = useState<Mp3LyricsState>({ kind: "idle" });
   const [mp3LyricsHidden, setMp3LyricsHidden] = useState(false);
-  const [mp3LyricsRefresh, setMp3LyricsRefresh] = useState(0);
   /** Artist / title / album from file tags (shown above lyrics). */
   const [lyricsTrackMeta, setLyricsTrackMeta] = useState<TrackFileMetadata | null>(null);
   /** LLM “what this song is about” — separate from lyrics fetch so duration updates do not abort it. */
@@ -249,8 +1022,7 @@ export function VideoPlayer({
     height: number;
   } | null>(null);
   const lyricsSpatialFullscreen = lyricsSpatialBox !== null;
-  /** Next lyrics fetch should ignore IndexedDB cache (Refresh lyrics). */
-  const skipLyricsCacheOnceRef = useRef(false);
+  const apiOnlyLyricsPreviewRef = useRef(false);
   const lyricsTranslateAbortRef = useRef<AbortController | null>(null);
   const [lyricsOverridePairs, setLyricsOverridePairs] = useState<LyricLinePair[] | null>(null);
   const [lyricsTranslateTarget, setLyricsTranslateTarget] = useState<string | null>(null);
@@ -270,6 +1042,10 @@ export function VideoPlayer({
   /** Bump to re-run the stream bind effect for the same radio channel (reconnect). */
   const [radioStreamReloadTick, setRadioStreamReloadTick] = useState(0);
   const [playerChromeNotice, setPlayerChromeNotice] = useState<string | null>(null);
+  const [ebookSpeechBoundary, setEbookSpeechBoundary] = useState<EbookSpeechBoundary | null>(null);
+  const ebookCurrentWordRef = useRef<HTMLButtonElement | null>(null);
+  const ebookPlayerRef = useRef<HTMLElement | null>(null);
+  const [ebookFullscreen, setEbookFullscreen] = useState(false);
 
   const hasDesktopRecordApi =
     typeof window !== "undefined" &&
@@ -277,9 +1053,60 @@ export function VideoPlayer({
     !!window.iptv?.startStreamRecord &&
     !!window.iptv?.stopStreamRecord;
 
-  const streamOkForRecord =
-    !!channel?.url?.trim() && canRecordRawHttpStream(channel.url, channel.id);
   const isRadioChannel = !!channel?.id && isRadioStationChannelId(channel.id);
+  const isYoutubeChannel = !!channel?.youtubeVideoId?.trim();
+  const isWebVideoPageChannel = !!channel?.webVideoPageUrl?.trim();
+  const isEmbeddedWebChannel = isYoutubeChannel || isWebVideoPageChannel;
+  const isEbookChannel = !!channel?.ebookId?.trim() && (!!channel.ebookText?.trim() || channel.ebookBlob instanceof Blob);
+  const streamOkForRecord =
+    !!channel?.url?.trim() && !isWebVideoPageChannel && canRecordRawHttpStream(channel.url, channel.id);
+  const ebookChunks = useMemo(() => {
+    const pages = channel?.ebookPages?.map((page) => page.trim()).filter(Boolean);
+    if (pages?.length) return pages;
+    return splitEbookText(channel?.ebookText ?? "");
+  }, [channel?.ebookPages, channel?.ebookText]);
+  const ebookStartChunk =
+    typeof channel?.ebookStartChunk === "number" && Number.isFinite(channel.ebookStartChunk)
+      ? Math.max(0, Math.min(channel.ebookStartChunk, Math.max(ebookChunks.length - 1, 0)))
+      : 0;
+  useEffect(() => {
+    if (!isEbookChannel || !channel?.ebookId) {
+      setEbookSpeechBoundary(null);
+      return;
+    }
+    const onBoundary = (ev: Event) => {
+      const detail = (ev as CustomEvent<EbookSpeechBoundary>).detail;
+      if (!detail || detail.ebookId !== channel.ebookId) return;
+      setEbookSpeechBoundary(detail);
+    };
+    window.addEventListener(EBOOK_SPEECH_EVENT, onBoundary);
+    return () => window.removeEventListener(EBOOK_SPEECH_EVENT, onBoundary);
+  }, [channel?.ebookId, isEbookChannel]);
+
+  useEffect(() => {
+    if (!ebookSpeechBoundary) return;
+    const node = ebookCurrentWordRef.current;
+    if (!node) return;
+    node.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  }, [ebookSpeechBoundary]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setEbookFullscreen(document.fullscreenElement === ebookPlayerRef.current);
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+  }, []);
+
+  const toggleEbookFullscreen = useCallback(() => {
+    const node = ebookPlayerRef.current;
+    if (!node) return;
+    if (document.fullscreenElement === node) {
+      void document.exitFullscreen?.();
+      return;
+    }
+    void node.requestFullscreen?.();
+  }, []);
   const isLibraryChannel =
     !!channel?.libraryTrackId?.trim() &&
     !!channel.url?.trim() &&
@@ -288,6 +1115,12 @@ export function VideoPlayer({
     !!channel?.localVideoFile &&
     !!channel.url?.trim() &&
     (/^file:/i.test(channel.url.trim()) || /^blob:/i.test(channel.url.trim()));
+  const webVideoEmbedSrc =
+    isYoutubeChannel && channel?.youtubeVideoId
+      ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(channel.youtubeVideoId)}?autoplay=1&rel=0`
+      : isWebVideoPageChannel && channel?.webVideoPageUrl
+        ? channel.webVideoPageUrl
+      : null;
 
   const lyricsDurationKey =
     libAudioDurationSec != null && Number.isFinite(libAudioDurationSec) && libAudioDurationSec > 2
@@ -355,6 +1188,7 @@ export function VideoPlayer({
     setYtBusy(false);
     setMp3Lyrics({ kind: "idle" });
     setMp3LyricsHidden(false);
+    apiOnlyLyricsPreviewRef.current = false;
     lyricsTranslateAbortRef.current?.abort();
     lyricsTranslateAbortRef.current = null;
     setLyricsOverridePairs(null);
@@ -369,6 +1203,20 @@ export function VideoPlayer({
     setVolumePopoverOpen(false);
     setLyricsSpatialBox(null);
   }, [channel?.id]);
+
+  useEffect(() => {
+    if (!isEbookChannel) return;
+    setMp3Lyrics({ kind: "idle" });
+    setMp3LyricsHidden(true);
+    setLyricsSpatialBox(null);
+    lyricsTranslateAbortRef.current?.abort();
+    lyricsTranslateAbortRef.current = null;
+    setLyricsOverridePairs(null);
+    setLyricsTranslateTarget(null);
+    setLyricsTranslateBusy(false);
+    setLyricsTranslateErr(null);
+    setLyricsTranslateHint(null);
+  }, [isEbookChannel]);
 
   useEffect(() => {
     if (!channel || !isLibraryChannel) {
@@ -419,6 +1267,8 @@ export function VideoPlayer({
       const t = el.currentTime;
       if (Number.isFinite(t) && t >= 0) setLibSeekUiSec(t);
       setLibTransportPaused(el.paused);
+      const trackId = channel?.libraryTrackId?.trim();
+      if (trackId) dispatchLibraryAudioState(trackId, el.paused);
     };
     sync();
     el.addEventListener("timeupdate", sync);
@@ -437,7 +1287,23 @@ export function VideoPlayer({
       el.removeEventListener("pause", sync);
       el.removeEventListener("ended", sync);
     };
-  }, [isLibraryChannel, channel?.id, channel?.url]);
+  }, [isLibraryChannel, channel?.id, channel?.url, channel?.libraryTrackId]);
+
+  useEffect(() => {
+    if (!isLibraryChannel) return;
+    const trackId = channel?.libraryTrackId?.trim();
+    if (!trackId) return;
+    const onToggle = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ trackId?: string }>).detail;
+      if (detail?.trackId !== trackId) return;
+      const el = mediaRef.current;
+      if (!el) return;
+      if (el.paused) void el.play().catch(() => {});
+      else el.pause();
+    };
+    window.addEventListener(LIBRARY_AUDIO_TOGGLE_EVENT, onToggle);
+    return () => window.removeEventListener(LIBRARY_AUDIO_TOGGLE_EVENT, onToggle);
+  }, [isLibraryChannel, channel?.id, channel?.libraryTrackId]);
 
   useEffect(() => {
     const el = mediaRef.current;
@@ -513,13 +1379,12 @@ export function VideoPlayer({
     const ac = new AbortController();
     const run = async () => {
       const tid = ch.libraryTrackId?.trim();
-      const skipCache = skipLyricsCacheOnceRef.current;
-      skipLyricsCacheOnceRef.current = false;
 
-      if (tid && !skipCache && typeof indexedDB !== "undefined") {
+      if (tid && typeof indexedDB !== "undefined") {
         try {
           const cached = await getLibraryLyricsCache(tid);
-          if (cached?.pairs?.length && !ac.signal.aborted) {
+          if (cached?.pairs?.length && cached.lyricsMatchVersion === LOCAL_LYRICS_MATCH_VERSION && !ac.signal.aborted) {
+            apiOnlyLyricsPreviewRef.current = false;
             setMp3Lyrics({ kind: "ready", data: mapCachedLibraryLyricsToResult(cached) });
             return;
           }
@@ -538,7 +1403,10 @@ export function VideoPlayer({
         const data = await fetchBilingualLyricsForLocalMp3(ch.name, durationSec, ac.signal, {
           libraryTrackId: ch.libraryTrackId?.trim(),
         });
-        if (!ac.signal.aborted) setMp3Lyrics({ kind: "ready", data });
+        if (!ac.signal.aborted) {
+          apiOnlyLyricsPreviewRef.current = false;
+          setMp3Lyrics({ kind: "ready", data });
+        }
       } catch (e) {
         if (ac.signal.aborted) return;
         setMp3Lyrics({
@@ -555,7 +1423,6 @@ export function VideoPlayer({
     channel?.url,
     channel?.libraryTrackId,
     channel?.libraryContentType,
-    mp3LyricsRefresh,
     lyricsDurationKey,
   ]);
 
@@ -589,14 +1456,67 @@ export function VideoPlayer({
       lyricsTrackMeta?.title.trim() ||
       "";
     const album = lyricsTrackMeta?.album.trim() || "";
-    if (!artist && !title) return null;
+    if (!artist && !title && !album) return null;
     return {
       artist,
       title,
       album,
-      fromTags: lyricsTrackMeta?.source === "tags",
     };
   }, [mp3Lyrics, lyricsTrackMeta]);
+
+  const lyricsSourceSummary = useMemo(() => {
+    if (mp3Lyrics.kind !== "ready" || !mp3Lyrics.data.pairs.length) return null;
+    const data = mp3Lyrics.data;
+    const llmLyrics =
+      data.lyricsLlmModel && data.lyricsLlmHost
+        ? formatLlmUsageLine(
+            data.lyricsLlmPurpose || "lyrics find + translate",
+            data.lyricsLlmModel,
+            data.lyricsLlmHost
+          )
+        : "";
+    const originalSource = llmLyrics
+      ? llmLyrics
+      : data.lrclibTrack
+        ? `LRCLIB (${data.lrclibTrack})`
+        : "Local database / unknown source";
+    const translationSource =
+      lyricsOverridePairs && lyricsTranslateTarget
+        ? `${labelForLyricsTargetCode(lyricsTranslateTarget)} translation - ${
+            lyricsTranslateHint?.replace(/^Translated to\s+[^·]+(?:\s+·\s+)?/i, "").trim() ||
+            "current override"
+          }`
+        : llmLyrics
+          ? llmLyrics
+          : data.pairs.every((p) => p.orig.trim() === p.en.trim())
+            ? "Original text (no separate translation)"
+            : "Free translators / same-language fallback";
+    const meaningSource =
+      data.songMeaningLlmModel && data.songMeaningLlmHost
+        ? `${formatLlmUsageLine(
+            data.songMeaningLlmPurpose || "song meaning",
+            data.songMeaningLlmModel,
+            data.songMeaningLlmHost
+          )}${data.songMeaning ? " - loaded" : data.songMeaningError ? " - failed" : ""}`
+        : data.songMeaning
+          ? "Local database (provider not recorded)"
+          : data.songMeaningError
+            ? "Not loaded - error"
+            : songMeaningLoading
+              ? "Loading"
+              : "Not loaded";
+    return {
+      originalSource,
+      translationSource,
+      meaningSource,
+    };
+  }, [
+    lyricsOverridePairs,
+    lyricsTranslateHint,
+    lyricsTranslateTarget,
+    mp3Lyrics,
+    songMeaningLoading,
+  ]);
 
   /** Short label for the lyrics panel header (avoid LRCLIB / translation / “restored from cache” debug strings). */
   const lyricsPanelTitle = useMemo(() => {
@@ -628,7 +1548,7 @@ export function VideoPlayer({
     setLyricsTranslateTarget(null);
     setLyricsTranslateErr(null);
     setLyricsTranslateHint(null);
-  }, [channel?.id, mp3LyricsRefresh]);
+  }, [channel?.id]);
 
   const onLyricsTranslateLanguage = useCallback(
     async (targetCode: string) => {
@@ -640,7 +1560,22 @@ export function VideoPlayer({
       setLyricsTranslateErr(null);
       setLyricsTranslateHint(null);
       const origLines = mp3Lyrics.data.pairs.map((p) => p.orig);
+      const tid = channel?.libraryTrackId?.trim() || "";
+      const langLabel = labelForLyricsTargetCode(targetCode);
       try {
+        if (tid && typeof indexedDB !== "undefined") {
+          try {
+            const cached = await getLibraryLyricsTranslationCache(tid, targetCode);
+            if (cached?.pairs?.length && !ac.signal.aborted) {
+              setLyricsOverridePairs(cached.pairs);
+              setLyricsTranslateTarget(targetCode);
+              setLyricsTranslateHint(`Translated to ${langLabel} · loaded from local cache`);
+              return;
+            }
+          } catch {
+            /* ignore cache read failures */
+          }
+        }
         const fetchJson = createLyricsJsonFetcher();
         const tr = await translateLineBatchesToLanguage(
           origLines,
@@ -656,10 +1591,12 @@ export function VideoPlayer({
         }));
         setLyricsOverridePairs(pairs);
         setLyricsTranslateTarget(targetCode);
-        const langLabel = labelForLyricsTargetCode(targetCode);
         setLyricsTranslateHint(
           tr.providerHint ? `Translated to ${langLabel} · ${tr.providerHint}` : `Translated to ${langLabel}`
         );
+        if (tid && typeof indexedDB !== "undefined") {
+          void putLibraryLyricsTranslationCache(tid, targetCode, pairs).catch(() => {});
+        }
       } catch (e) {
         if (ac.signal.aborted) return;
         setLyricsTranslateErr(e instanceof Error ? e.message : String(e));
@@ -669,8 +1606,108 @@ export function VideoPlayer({
         if (!ac.signal.aborted) setLyricsTranslateBusy(false);
       }
     },
-    [mp3Lyrics]
+    [channel?.libraryTrackId, mp3Lyrics]
   );
+
+  const loadLyricsFromLocalDbOnly = useCallback(async () => {
+    const ch = channel;
+    const tid = ch?.libraryTrackId?.trim() || "";
+    if (!ch || !isLikelyLocalMp3Channel(ch) || !tid || typeof indexedDB === "undefined") {
+      setPlayerChromeNotice("No local lyrics database is available for this track.");
+      return;
+    }
+    setMp3LyricsHidden(false);
+    apiOnlyLyricsPreviewRef.current = false;
+    setMp3Lyrics({ kind: "loading" });
+    try {
+      const cached = await getLibraryLyricsCache(tid);
+      if (cached?.pairs?.length) {
+        setMp3Lyrics({ kind: "ready", data: mapCachedLibraryLyricsToResult(cached) });
+        setPlayerChromeNotice("Loaded lyrics and meaning from the local database.");
+        return;
+      }
+      setMp3Lyrics({ kind: "error", message: "No saved lyrics found in the local database for this track." });
+      setPlayerChromeNotice("No saved local lyrics found for this track.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setMp3Lyrics({ kind: "error", message: msg || "Could not read saved lyrics." });
+    }
+  }, [channel]);
+
+  const fetchLyricsFromDeepSeekOnly = useCallback(async () => {
+    const ch = channel;
+    if (!ch || !isLikelyLocalMp3Channel(ch)) return;
+    const el = mediaRef.current;
+    const inline = el?.duration;
+    const inlineOk = typeof inline === "number" && Number.isFinite(inline) && inline > 2 ? inline : null;
+    const durationSec =
+      lyricsDurationKey != null && lyricsDurationKey > 2 ? lyricsDurationKey : inlineOk;
+    setMp3LyricsHidden(false);
+    apiOnlyLyricsPreviewRef.current = true;
+    setMp3Lyrics({ kind: "loading" });
+    setPlayerChromeNotice("Fetching lyrics and meaning from DeepSeek only; local database will not be changed.");
+    try {
+      const data = await fetchDeepSeekLyricsForLocalMp3(ch.name, durationSec, undefined, {
+        libraryTrackId: ch.libraryTrackId?.trim(),
+        saveToCache: false,
+      });
+      apiOnlyLyricsPreviewRef.current = true;
+      setMp3Lyrics({ kind: "ready", data });
+      setPlayerChromeNotice("Fetched from DeepSeek only. Use Save lyrics if this version is better.");
+    } catch (e) {
+      setMp3Lyrics({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [channel, lyricsDurationKey]);
+
+  const fetchLyricsFromGeminiOnly = useCallback(async () => {
+    const ch = channel;
+    if (!ch || !isLikelyLocalMp3Channel(ch)) return;
+    const el = mediaRef.current;
+    const inline = el?.duration;
+    const inlineOk = typeof inline === "number" && Number.isFinite(inline) && inline > 2 ? inline : null;
+    const durationSec =
+      lyricsDurationKey != null && lyricsDurationKey > 2 ? lyricsDurationKey : inlineOk;
+    setMp3LyricsHidden(false);
+    apiOnlyLyricsPreviewRef.current = true;
+    setMp3Lyrics({ kind: "loading" });
+    setPlayerChromeNotice("Fetching lyrics and meaning from Gemini only; local database will not be changed.");
+    try {
+      const data = await fetchGeminiLyricsForLocalMp3(ch.name, durationSec, undefined, {
+        libraryTrackId: ch.libraryTrackId?.trim(),
+        saveToCache: false,
+      });
+      apiOnlyLyricsPreviewRef.current = true;
+      setMp3Lyrics({ kind: "ready", data });
+      setPlayerChromeNotice("Fetched from Gemini only. Use Save lyrics if this version is better.");
+    } catch (e) {
+      setMp3Lyrics({
+        kind: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [channel, lyricsDurationKey]);
+
+  const saveShownLyricsToLocalDb = useCallback(async () => {
+    const ch = channel;
+    const tid = ch?.libraryTrackId?.trim() || "";
+    if (!tid || mp3Lyrics.kind !== "ready" || !mp3Lyrics.data.pairs.length) {
+      setPlayerChromeNotice("No loaded lyrics to save for this track.");
+      return;
+    }
+    try {
+      await saveLocalMp3LyricsResultToCache(tid, mp3Lyrics.data);
+      if (lyricsOverridePairs?.length && lyricsTranslateTarget) {
+        await putLibraryLyricsTranslationCache(tid, lyricsTranslateTarget, lyricsOverridePairs);
+      }
+      apiOnlyLyricsPreviewRef.current = false;
+      setPlayerChromeNotice("Saved the current lyrics and meaning to the local database.");
+    } catch (e) {
+      setPlayerChromeNotice(e instanceof Error ? e.message : "Could not save lyrics to the local database.");
+    }
+  }, [channel, lyricsOverridePairs, lyricsTranslateTarget, mp3Lyrics]);
 
   useEffect(() => {
     const ch = channel;
@@ -684,6 +1721,10 @@ export function VideoPlayer({
       return;
     }
     if (readyLyricsMeaning || readyLyricsMeaningError) {
+      setSongMeaningLoading(false);
+      return;
+    }
+    if (apiOnlyLyricsPreviewRef.current) {
       setSongMeaningLoading(false);
       return;
     }
@@ -727,29 +1768,28 @@ export function VideoPlayer({
     channel?.name,
     channel?.libraryTrackId,
     mp3Lyrics.kind,
-    mp3LyricsRefresh,
     readyLyricsMeaning,
     readyLyricsMeaningError,
     readyLyrics?.pairs.length,
   ]);
 
-  const canStartRecording = recordable && streamOkForRecord && hasDesktopRecordApi;
-  /** Hide REC and related chrome for local library audio (blob playback). */
-  const showRecordChrome = recordable && !isLibraryChannel;
+  const canStartRecording = recordable && streamOkForRecord && hasDesktopRecordApi && !isYoutubeChannel && !isEbookChannel;
+  /** Hide REC and related chrome for local library audio, ebooks, and YouTube embeds. */
+  const showRecordChrome = recordable && !isLibraryChannel && !isYoutubeChannel && !isEbookChannel;
 
   const recordButtonTitle = !recordable
     ? ""
     : !hasDesktopRecordApi
-      ? "Record live stream to a folder you choose — install the RJ IPTV and Online Radio Player Windows desktop app."
+      ? "Record live stream to a folder you choose — install the Smart Media player Windows desktop app."
       : !streamOkForRecord
-        ? isLikelyHls(channel?.url ?? "")
-          ? "HLS (.m3u8) cannot be saved as one continuous raw file. Use a direct stream URL if the station offers one."
+        ? isWebVideoPageChannel
+            ? "This web page is not a direct media stream, so the app cannot record it. Paste a direct .mp4, .webm, .ts, or similar media URL instead."
           : isRadioChannel
-            ? "This station URL cannot be recorded from the app (needs http(s), not HLS)."
-            : "This URL is not a continuous MPEG-TS stream (or http audio). Use a TS-style IPTV URL or a direct radio stream."
+            ? "This station URL cannot be recorded from the app unless it is a direct http(s) media stream."
+            : "REC needs a direct http(s) media stream URL, not an embedded website page."
         : isRadioChannel
           ? "Save the live audio stream to disk (same bytes as playback via one upstream on desktop)."
-          : "Save the live transport stream to a .mpeg file. On desktop, one upstream feeds both playback and disk so recording does not halve your bandwidth.";
+          : "Save the live IPTV stream, then finalize it as a quality-preserving .mp4 after Stop. Playback stays on the live stream while recording.";
 
   useEffect(() => {
     return () => {
@@ -765,6 +1805,10 @@ export function VideoPlayer({
   }, [channel?.url]);
 
   useEffect(() => {
+    if (screenPlaybackOff) {
+      setBufferLine(recording ? "Screen off · recording continues" : "Screen off");
+      return;
+    }
     if (!channel?.url?.trim()) {
       setBufferLine("—");
       return;
@@ -785,7 +1829,7 @@ export function VideoPlayer({
     tick();
     const id = window.setInterval(tick, 450);
     return () => clearInterval(id);
-  }, [channel?.url]);
+  }, [channel?.url, recording, screenPlaybackOff]);
 
   const refreshTextTracks = useCallback(() => {
     const video = mediaRef.current;
@@ -811,6 +1855,7 @@ export function VideoPlayer({
       setRecording(false);
       setRecordErr(null);
       setRecordSavedPath(null);
+      setScreenPlaybackOff(false);
     }
 
     hlsRef.current?.destroy();
@@ -830,6 +1875,15 @@ export function VideoPlayer({
     setPlaybackMode(null);
     setTrackOptions([]);
     setSelectedTrack("off");
+
+    if (screenPlaybackOff) {
+      setPlaybackMode(recording ? "Screen off · recording" : null);
+      setBufferLine(recording ? "Screen off · recording continues" : "Screen off");
+      return;
+    }
+
+    if (channel?.ebookId) return;
+    if (channel?.youtubeVideoId || channel?.webVideoPageUrl) return;
 
     if (!channel?.url) return;
 
@@ -859,6 +1913,41 @@ export function VideoPlayer({
     let effectLive = true;
     let mpegtsTransientRetries = 0;
     let mpegtsRetryTimer: number | null = null;
+    let nativeFallbackTried = false;
+
+    /** IPTV-only: if nothing useful loads in 15s, show a simple error (unless a more specific error is already set). */
+    let iptvLoadTimer: number | null = null;
+    let iptvLoadReadyCleanup: (() => void) | null = null;
+    const clearIptvLoadWatch = () => {
+      if (iptvLoadTimer != null) {
+        clearTimeout(iptvLoadTimer);
+        iptvLoadTimer = null;
+      }
+      iptvLoadReadyCleanup?.();
+      iptvLoadReadyCleanup = null;
+    };
+    const startIptvLoadWatch = () => {
+      clearIptvLoadWatch();
+      const onVideoProgress = () => {
+        if (!effectLive) return;
+        clearIptvLoadWatch();
+      };
+      el.addEventListener("playing", onVideoProgress);
+      el.addEventListener("loadeddata", onVideoProgress);
+      el.addEventListener("canplay", onVideoProgress);
+      iptvLoadReadyCleanup = () => {
+        el.removeEventListener("playing", onVideoProgress);
+        el.removeEventListener("loadeddata", onVideoProgress);
+        el.removeEventListener("canplay", onVideoProgress);
+      };
+      iptvLoadTimer = window.setTimeout(() => {
+        iptvLoadTimer = null;
+        iptvLoadReadyCleanup?.();
+        iptvLoadReadyCleanup = null;
+        if (!effectLive) return;
+        setError((prev) => prev ?? "Can't load the channel.");
+      }, 15_000);
+    };
 
     const bindMpegTsPlayer = (streamUrl: string, tapPlayUrl: string | null): boolean => {
       if (!mpegts.isSupported()) return false;
@@ -898,6 +1987,7 @@ export function VideoPlayer({
       player.on(mpegts.Events.MEDIA_INFO, () => {
         mpegtsTransientRetries = 0;
         onTracks();
+        clearIptvLoadWatch();
       });
       player.on(mpegts.Events.ERROR, (...args: unknown[]) => {
         const [type, detail, extra] = args;
@@ -925,12 +2015,20 @@ export function VideoPlayer({
             mpegtsRetryTimer = null;
             if (!effectLive) return;
             if (bindMpegTsPlayer(streamUrl, tapPlayUrl)) {
+              startIptvLoadWatch();
               void el.play().catch(() => {});
             }
           }, delay);
           return;
         }
 
+        if (mpegTsIsFormatUnsupported(type, detail, extra) && !nativeFallbackTried && !tapPlayUrl?.trim()) {
+          clearIptvLoadWatch();
+          setError(null);
+          if (tryNativeDirectPlayback(streamUrl)) return;
+        }
+
+        clearIptvLoadWatch();
         setError(mpegTsStreamErrorMessage(type, detail, extra));
       });
       player.load();
@@ -942,6 +2040,44 @@ export function VideoPlayer({
     };
 
     let nativeErrCleanup: (() => void) | null = null;
+
+    const tryNativeDirectPlayback = (streamUrl: string, mode: PlaybackModeLabel = "Native · direct"): boolean => {
+      if (!/^https?:\/\//i.test(streamUrl)) return false;
+      nativeFallbackTried = true;
+      try {
+        mpegtsRef.current?.destroy();
+        mpegtsRef.current = null;
+        el.pause();
+        el.removeAttribute("src");
+        el.load();
+        function onNativeLoadedMeta() {
+          el.removeEventListener("error", onNativeError);
+          clearIptvLoadWatch();
+          onTracks();
+        }
+        function onNativeError() {
+          el.removeEventListener("loadedmetadata", onNativeLoadedMeta);
+          clearIptvLoadWatch();
+          setPlaybackMode(null);
+          setError(
+            "This URL is not MPEG-TS/FLV and the browser could not play it directly. It may be an HTML login/error page, an unsupported codec, or a provider URL that needs an HLS (.m3u8) variant."
+          );
+        }
+        nativeErrCleanup = () => {
+          el.removeEventListener("error", onNativeError);
+          el.removeEventListener("loadedmetadata", onNativeLoadedMeta);
+        };
+        el.addEventListener("error", onNativeError, { once: true });
+        el.addEventListener("loadedmetadata", onNativeLoadedMeta, { once: true });
+        setPlaybackMode(mode);
+        el.src = recordTapPlayUrl?.trim() || streamUrl;
+        startIptvLoadWatch();
+        void el.play().catch(() => {});
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
     if (channel.libraryTrackId?.trim() && url.toLowerCase().startsWith("blob:")) {
       const trackId = channel.libraryTrackId.trim();
@@ -1300,6 +2436,7 @@ export function VideoPlayer({
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           resetHlsLiveErrorBudget();
           onTracks();
+          clearIptvLoadWatch();
         });
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracks);
         hls.on(Hls.Events.LEVEL_LOADED, () => {
@@ -1319,6 +2456,7 @@ export function VideoPlayer({
               setError(null);
               return;
             }
+            clearIptvLoadWatch();
             setError(
               "Network error: the stream stopped loading after several retries. Check your connection, provider status, or try again later."
             );
@@ -1332,6 +2470,7 @@ export function VideoPlayer({
               try {
                 hls.recoverMediaError();
               } catch {
+                clearIptvLoadWatch();
                 setError("Playback error (decoder could not recover).");
               }
               return;
@@ -1343,10 +2482,12 @@ export function VideoPlayer({
                 hls.swapAudioCodec();
                 hls.recoverMediaError();
               } catch {
+                clearIptvLoadWatch();
                 setError("Playback error (decoder could not recover).");
               }
               return;
             }
+            clearIptvLoadWatch();
             setError(
               "Playback error (codec or stream issue). If this is HEVC / AC-4, try a channel encoded as H.264 + AAC, or another quality level."
             );
@@ -1364,6 +2505,7 @@ export function VideoPlayer({
               setError(null);
               return;
             }
+            clearIptvLoadWatch();
             setError(
               `Stream error (${data.type}${data.details ? `: ${data.details}` : ""}). The playlist or segments may be invalid or temporarily unavailable.`
             );
@@ -1371,20 +2513,24 @@ export function VideoPlayer({
           }
 
           if (data.type === Hls.ErrorTypes.KEY_SYSTEM_ERROR) {
+            clearIptvLoadWatch();
             setError("DRM / key system error — this stream may require authorization or a different player.");
             return;
           }
 
+          clearIptvLoadWatch();
           setError(
             `Playback error (${data.type}${data.details ? `: ${data.details}` : ""}). Try another channel or ask your provider for a stable HLS feed.`
           );
         });
         hls.attachMedia(el);
         hls.loadSource(manifestSrc);
+        startIptvLoadWatch();
         setPlaybackMode(splitHlsViaLocalProxy ? "HLS · hls.js · split proxy" : "HLS · hls.js");
       } else if (canPlayNativeHls(el as HTMLVideoElement)) {
         el.src = url;
         el.addEventListener("loadedmetadata", onTracks, { once: true });
+        startIptvLoadWatch();
         setPlaybackMode("HLS · native");
       } else {
         setPlaybackMode("HLS · blocked");
@@ -1416,19 +2562,23 @@ export function VideoPlayer({
       setPlaybackMode(recordTapPlayUrl ? "Radio · record tap" : "Radio · native");
       el.src = radioPlay;
     } else if (isLikelyMpegTsOverHttp(url)) {
-      if (!mpegts.isSupported()) {
+      if (isLikelyProgressiveVideoUrl(url)) {
+        tryNativeDirectPlayback(url, recordTapPlayUrl ? "Native · record tap" : "Native · direct");
+        skipDefaultFinish = true;
+      } else if (!mpegts.isSupported()) {
         setPlaybackMode("MPEG-TS · blocked");
         setError(
           "This channel looks like MPEG-TS. This browser does not support the in-page TS player (mpegts.js). Try Chrome/Edge, or ask your provider for an HLS (m3u8) playlist."
         );
         return;
-      }
-      if (!bindMpegTsPlayer(url, recordTapPlayUrl)) {
+      } else if (!bindMpegTsPlayer(url, recordTapPlayUrl)) {
         setPlaybackMode("MPEG-TS · blocked");
         setError("Could not start the MPEG-TS player in this browser.");
         return;
+      } else {
+        startIptvLoadWatch();
+        setPlaybackMode("MPEG-TS · mpegts.js");
       }
-      setPlaybackMode("MPEG-TS · mpegts.js");
     } else if (!/^https?:\/\//i.test(url)) {
       setPlaybackMode("URL · blocked");
       setError("This URL scheme is not supported in the browser player (use http(s) streams).");
@@ -1437,15 +2587,18 @@ export function VideoPlayer({
       /** Many IPTV URLs look like normal https links but are MPEG-TS; Firefox then shows a MIME error on a plain video src. Try native first, then mpegts.js. */
       function onNativeLoadedMeta() {
         el.removeEventListener("error", onNativeError);
+        clearIptvLoadWatch();
         onTracks();
       }
       function onNativeError() {
         el.removeEventListener("loadedmetadata", onNativeLoadedMeta);
+        clearIptvLoadWatch();
         el.removeAttribute("src");
         el.load();
         if (mpegts.isSupported() && bindMpegTsPlayer(url, recordTapPlayUrl)) {
           setPlaybackMode("MPEG-TS · mpegts.js");
           setError(null);
+          startIptvLoadWatch();
           void el.play().catch(() => {});
         } else {
           setPlaybackMode(null);
@@ -1463,6 +2616,7 @@ export function VideoPlayer({
       setPlaybackMode(recordTapPlayUrl ? "Native · record tap" : "Native · direct");
       const nativePlay = recordTapPlayUrl?.trim() || url;
       el.src = nativePlay;
+      startIptvLoadWatch();
     }
 
     if (!skipDefaultFinish) {
@@ -1475,6 +2629,7 @@ export function VideoPlayer({
 
     return () => {
       effectLive = false;
+      clearIptvLoadWatch();
       if (mpegtsRetryTimer != null) {
         clearTimeout(mpegtsRetryTimer);
         mpegtsRetryTimer = null;
@@ -1490,7 +2645,16 @@ export function VideoPlayer({
         externalUrlRef.current = null;
       }
     };
-  }, [channel, refreshTextTracks, recordTapPlayUrl, streamProxyOrigin, splitIsolateNetwork, radioStreamReloadTick]);
+  }, [
+    channel,
+    refreshTextTracks,
+    recordTapPlayUrl,
+    streamProxyOrigin,
+    splitIsolateNetwork,
+    radioStreamReloadTick,
+    channel?.streamResetNonce,
+    screenPlaybackOff,
+  ]);
 
   useEffect(() => {
     setPlayerChromeNotice(null);
@@ -1580,12 +2744,14 @@ export function VideoPlayer({
       const dir = await window.iptv!.pickRecordDir();
       if (!dir) return;
       const hint = recordFileSuffixAndTapType(channel.url.trim(), channel.id);
-      const out = await window.iptv!.startStreamRecord({
+      const recordPayload = {
         url: channel.url.trim(),
         outDir: dir,
         filenameExt: hint.filenameExt,
         tapContentType: hint.tapContentType,
-      });
+        recordMode: hint.recordMode,
+      };
+      const out = await window.iptv!.startStreamRecord(recordPayload);
       recordIdRef.current = out.id;
       flushSync(() => {
         setRecording(true);
@@ -1611,6 +2777,7 @@ export function VideoPlayer({
       recordIdRef.current = null;
       setRecording(false);
       setRecordTapPlayUrl(null);
+      setScreenPlaybackOff(false);
       setRecordBusy(false);
     }
   }, []);
@@ -1769,7 +2936,10 @@ export function VideoPlayer({
   };
 
   return (
-    <div className="player-root" ref={playerRootRef}>
+    <div
+      className={`player-root${inSplitView ? " player-root--split" : ""}`}
+      ref={playerRootRef}
+    >
       <div className="player-top">
         {!channel ? (
           <div className="player-placeholder">
@@ -1790,13 +2960,78 @@ export function VideoPlayer({
           </div>
         ) : (
           <div className="video-wrap">
+            {isEbookChannel ? (
+              <article className="ebook-player" aria-label="Ebook reader" ref={ebookPlayerRef}>
+                <div className="ebook-player-page">
+                  <div className="ebook-player-header">
+                    <div className="ebook-player-header-main">
+                      <span className="ebook-player-kicker">Ebook Reader</span>
+                      <h2 className="ebook-player-title">{channel.name}</h2>
+                      <p className="ebook-player-meta">
+                        {channel.ebookSourceFileName || "Local ebook"} · Reading from part {ebookStartChunk + 1} of{" "}
+                        {Math.max(ebookChunks.length, 1)}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="ebook-fullscreen-btn"
+                      onClick={toggleEbookFullscreen}
+                      title={ebookFullscreen ? "Exit ebook fullscreen" : "Read ebook fullscreen"}
+                      aria-label={ebookFullscreen ? "Exit ebook fullscreen" : "Read ebook fullscreen"}
+                    >
+                      {ebookFullscreen ? "Exit full screen" : "Full screen"}
+                    </button>
+                  </div>
+                  {channel.ebookFormat === "pdf" && channel.ebookBlob instanceof Blob ? (
+                    <PdfReader
+                      channel={channel}
+                      pageTexts={ebookChunks}
+                      ebookStartChunk={ebookStartChunk}
+                      ebookSpeechBoundary={ebookSpeechBoundary}
+                    />
+                  ) : channel.ebookFormat === "epub" && channel.ebookBlob instanceof Blob ? (
+                    <EpubReader
+                      channel={channel}
+                      pageTexts={ebookChunks}
+                      ebookStartChunk={ebookStartChunk}
+                      ebookSpeechBoundary={ebookSpeechBoundary}
+                    />
+                  ) : (
+                    <EbookPlainTextPage
+                      channel={channel}
+                      ebookChunks={ebookChunks}
+                      ebookStartChunk={ebookStartChunk}
+                      ebookSpeechBoundary={ebookSpeechBoundary}
+                      ebookCurrentWordRef={ebookCurrentWordRef}
+                    />
+                  )}
+                </div>
+              </article>
+            ) : null}
             <video
               ref={mediaRef}
-              className="video-el"
-              controls={!isRadioChannel}
+              className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff ? " video-el--hidden" : ""}`}
+              controls={!isRadioChannel && !isEmbeddedWebChannel && !isEbookChannel}
               playsInline
               preload="auto"
             />
+            {webVideoEmbedSrc ? (
+              <iframe
+                key={`${channel.id}-${channel.streamResetNonce ?? 0}`}
+                className="web-video-embed"
+                src={webVideoEmbedSrc}
+                title={channel.name || "Web video"}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowFullScreen
+                referrerPolicy="strict-origin-when-cross-origin"
+              />
+            ) : null}
+            {screenPlaybackOff ? (
+              <div className="screen-off-panel" role="status" aria-live="polite">
+                <span className="screen-off-title">Screen off</span>
+                <span className="screen-off-subtitle">Recording continues until you press Stop.</span>
+              </div>
+            ) : null}
             {isRadioChannel ? (
               <>
                 <div className="radio-on-air-badge" role="status" aria-live="polite">
@@ -1837,6 +3072,14 @@ export function VideoPlayer({
                   aria-hidden
                 />
                 Audio
+              </div>
+            ) : isEbookChannel ? (
+              <div className="library-on-air-badge" role="status" aria-live="polite">
+                Ebook
+              </div>
+            ) : isEmbeddedWebChannel ? (
+              <div className="library-on-air-badge" role="status" aria-live="polite">
+                {isYoutubeChannel ? "YouTube" : "Web video"}
               </div>
             ) : null}
             {channel &&
@@ -1895,19 +3138,12 @@ export function VideoPlayer({
                   <p className="mp3-lyrics-translate-status">{lyricsTranslateHint}</p>
                 ) : null}
                 {lyricsDisplayMeta ? (
-                  <header className="mp3-lyrics-track-meta" aria-label="Track from file tags">
-                    {lyricsDisplayMeta.artist ? (
-                      <p className="mp3-lyrics-track-artist">{lyricsDisplayMeta.artist}</p>
-                    ) : null}
-                    {lyricsDisplayMeta.title ? (
-                      <p className="mp3-lyrics-track-title">{lyricsDisplayMeta.title}</p>
-                    ) : null}
-                    {lyricsDisplayMeta.album ? (
-                      <p className="mp3-lyrics-track-album">{lyricsDisplayMeta.album}</p>
-                    ) : null}
-                    {lyricsDisplayMeta.fromTags ? (
-                      <p className="mp3-lyrics-track-source">From file tags</p>
-                    ) : null}
+                  <header className="mp3-lyrics-track-meta" aria-label="Track">
+                    <p className="mp3-lyrics-track-line">
+                      {[lyricsDisplayMeta.artist, lyricsDisplayMeta.title, lyricsDisplayMeta.album]
+                        .filter((s) => s.length > 0)
+                        .join(" - ")}
+                    </p>
                   </header>
                 ) : null}
                 {mp3Lyrics.kind === "error" ? (
@@ -1960,42 +3196,18 @@ export function VideoPlayer({
                         ) : null}
                       </section>
                     ) : null}
-                    {mp3Lyrics.data.pairs.length > 0 &&
-                    (mp3Lyrics.data.lyricsLlmModel ||
-                      mp3Lyrics.data.songMeaningLlmModel ||
-                      mp3Lyrics.data.songMeaningError) ? (
-                      <footer className="mp3-lyrics-llm-usage" aria-label="LLM models used">
-                        <p className="mp3-lyrics-llm-usage-title">LLM (Audio → Lyrics translation)</p>
-                        {mp3Lyrics.data.lyricsLlmModel && mp3Lyrics.data.lyricsLlmHost ? (
-                          <p className="mp3-lyrics-llm-usage-line">
-                            Lyrics (English):{" "}
-                            {formatLlmUsageLine(
-                              mp3Lyrics.data.lyricsLlmPurpose || "lyrics translation",
-                              mp3Lyrics.data.lyricsLlmModel,
-                              mp3Lyrics.data.lyricsLlmHost
-                            )}
-                          </p>
-                        ) : (
-                          <p className="mp3-lyrics-llm-usage-line mp3-lyrics-llm-usage-line--muted">
-                            Lyrics: LRCLIB original text; English via free translators or same-language
-                            (no LLM for translation on this track).
-                          </p>
-                        )}
-                        {mp3Lyrics.data.songMeaningLlmModel && mp3Lyrics.data.songMeaningLlmHost ? (
-                          <p className="mp3-lyrics-llm-usage-line">
-                            Song meaning:{" "}
-                            {formatLlmUsageLine(
-                              mp3Lyrics.data.songMeaningLlmPurpose || "song meaning",
-                              mp3Lyrics.data.songMeaningLlmModel,
-                              mp3Lyrics.data.songMeaningLlmHost
-                            )}
-                            {mp3Lyrics.data.songMeaning
-                              ? " · loaded"
-                              : mp3Lyrics.data.songMeaningError
-                                ? " · failed"
-                                : ""}
-                          </p>
-                        ) : null}
+                    {lyricsSourceSummary ? (
+                      <footer className="mp3-lyrics-llm-usage" aria-label="Lyrics and meaning sources">
+                        <p className="mp3-lyrics-llm-usage-title">Sources</p>
+                        <p className="mp3-lyrics-llm-usage-line">
+                          Lyrics: {lyricsSourceSummary.originalSource}
+                        </p>
+                        <p className="mp3-lyrics-llm-usage-line">
+                          Lyrics translation: {lyricsSourceSummary.translationSource}
+                        </p>
+                        <p className="mp3-lyrics-llm-usage-line">
+                          Song meaning: {lyricsSourceSummary.meaningSource}
+                        </p>
                       </footer>
                     ) : null}
                   </div>
@@ -2006,6 +3218,11 @@ export function VideoPlayer({
         )}
       </div>
 
+      <div
+        className={`${inSplitView ? "player-below-video player-below-video--split" : "player-below-video"}${
+          isEbookChannel ? " player-below-video--hidden" : ""
+        }`}
+      >
       {channel && !isLibraryChannel ? (
         <div className="player-now-playing" aria-label="Now playing">
           <div className="player-now-playing-inner">
@@ -2028,6 +3245,10 @@ export function VideoPlayer({
                 {isRadioChannel ? <span className="radio-inline-tag">Radio</span> : null}
                 {isLibraryChannel ? <span className="library-inline-tag">Local audio</span> : null}
                 {isLocalVideoChannel ? <span className="local-video-inline-tag">Local video</span> : null}
+                {isEbookChannel ? <span className="local-video-inline-tag">Ebook</span> : null}
+                {isEmbeddedWebChannel ? (
+                  <span className="local-video-inline-tag">{isYoutubeChannel ? "YouTube" : "Web video"}</span>
+                ) : null}
                 <span className="player-now-playing-title-text">{channel.name}</span>
               </div>
               {channel.group?.trim() ? (
@@ -2080,6 +3301,22 @@ export function VideoPlayer({
                       REC
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className={`screen-off-btn${screenPlaybackOff ? " screen-off-btn--on" : ""}`}
+                    disabled={recordBusy || (!recording && !screenPlaybackOff)}
+                    title={
+                      screenPlaybackOff
+                        ? "Turn the stream screen back on."
+                        : recording
+                          ? "Turn off playback video/audio while recording continues in the background."
+                          : "Start recording first, then you can turn the stream screen off."
+                    }
+                    aria-pressed={screenPlaybackOff}
+                    onClick={() => setScreenPlaybackOff((v) => !v)}
+                  >
+                    {screenPlaybackOff ? "Screen on" : "Screen off"}
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -2191,8 +3428,8 @@ export function VideoPlayer({
               </>
             ) : null}
             {channel && !isLibraryChannel ? (
-              <div className="now-url" title={channel.url}>
-                {channel.url}
+              <div className="now-url" title={isEbookChannel ? channel.ebookSourceFileName || channel.name : channel.url}>
+                {isEbookChannel ? channel.ebookSourceFileName || "Local ebook" : channel.url}
               </div>
             ) : null}
             {showRecordChrome && recordSavedPath ? (
@@ -2215,10 +3452,10 @@ export function VideoPlayer({
             {showRecordChrome && !canStartRecording && !recording && (!hasDesktopRecordApi || !streamOkForRecord) ? (
               <p className="record-hint record-hint--inline">
                 {!hasDesktopRecordApi
-                  ? "REC needs the RJ IPTV and Online Radio Player desktop build."
-                  : isLikelyHls(channel.url)
-                    ? "REC cannot save HLS (.m3u8) as one continuous raw file. Use a direct stream URL when available."
-                    : "REC needs http(s) and a continuous stream (MPEG-TS or direct audio)."}
+                  ? "REC needs the Smart Media player desktop build."
+                  : isWebVideoPageChannel
+                    ? "REC needs a direct media URL. Embedded website pages cannot be recorded by the app."
+                    : "REC needs a direct http(s) media stream URL."}
               </p>
             ) : null}
             {onVolumeChange && !isLibraryChannel ? renderVolumeEq() : null}
@@ -2246,14 +3483,37 @@ export function VideoPlayer({
                         type="button"
                         className="library-audio-tool-btn"
                         disabled={mp3Lyrics.kind === "loading"}
-                        title="LRCLIB + optional translation. Overwrites saved lyrics for this track if new lyrics are found."
-                        onClick={() => {
-                          skipLyricsCacheOnceRef.current = true;
-                          setMp3LyricsHidden(false);
-                          setMp3LyricsRefresh((n) => n + 1);
-                        }}
+                        title="Load lyrics and meaning only from the saved local database."
+                        onClick={() => void loadLyricsFromLocalDbOnly()}
                       >
-                        {mp3Lyrics.kind === "loading" ? "Lyrics…" : "Refresh lyrics"}
+                        {mp3Lyrics.kind === "loading" ? "Lyrics…" : "Saved lyrics"}
+                      </button>
+                      <button
+                        type="button"
+                        className="library-audio-tool-btn"
+                        disabled={mp3Lyrics.kind === "loading"}
+                        title="Fetch lyrics and meaning only from DeepSeek / the OpenAI-compatible key. This does not save over the local database."
+                        onClick={() => void fetchLyricsFromDeepSeekOnly()}
+                      >
+                        DeepSeek lyrics
+                      </button>
+                      <button
+                        type="button"
+                        className="library-audio-tool-btn"
+                        disabled={mp3Lyrics.kind === "loading"}
+                        title="Fetch lyrics and meaning only from Gemini. This does not save over the local database."
+                        onClick={() => void fetchLyricsFromGeminiOnly()}
+                      >
+                        Gemini lyrics
+                      </button>
+                      <button
+                        type="button"
+                        className="library-audio-tool-btn"
+                        disabled={mp3Lyrics.kind !== "ready" || !mp3Lyrics.data.pairs.length}
+                        title="Save the currently shown lyrics and meaning to the local database."
+                        onClick={() => void saveShownLyricsToLocalDb()}
+                      >
+                        Save lyrics
                       </button>
                       {!mp3LyricsHidden && mp3Lyrics.kind !== "idle" ? (
                         <button
@@ -2367,6 +3627,7 @@ export function VideoPlayer({
             )}
           </>
         ) : null}
+      </div>
       </div>
     </div>
   );

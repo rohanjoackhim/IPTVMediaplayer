@@ -1,5 +1,5 @@
 import type { LibraryLyricsCacheRow } from "./audioLibraryDb";
-import { putLibraryLyricsCache } from "./audioLibraryDb";
+import { getLibraryLyricsCache, putLibraryLyricsCache } from "./audioLibraryDb";
 import { fetchLyricsLlmEndpointInfo, hasLyricsLlmKey, hasSongMeaningKey } from "./lyricsLlmEndpointLabel";
 import { createLyricsJsonFetcher } from "./lyricsJsonFetch";
 import { tryUnifiedLlmLyrics } from "./llmUnifiedLyricsIpc";
@@ -35,6 +35,8 @@ export interface LocalMp3LyricsResult {
   metaArtist?: string;
   metaTitle?: string;
 }
+
+export const LOCAL_LYRICS_MATCH_VERSION = 2;
 
 function applyLyricsLlmMeta(
   result: LocalMp3LyricsResult,
@@ -78,6 +80,12 @@ export function mapCachedLibraryLyricsToResult(cached: LibraryLyricsCacheRow): L
     lrclibTrack: cached.lrclibTrack,
     songMeaning: cached.songMeaning?.trim() || undefined,
     songMeaningError: undefined,
+    lyricsLlmPurpose: cached.lyricsLlmPurpose?.trim() || undefined,
+    lyricsLlmModel: cached.lyricsLlmModel?.trim() || undefined,
+    lyricsLlmHost: cached.lyricsLlmHost?.trim() || undefined,
+    songMeaningLlmPurpose: cached.songMeaningLlmPurpose?.trim() || undefined,
+    songMeaningLlmModel: cached.songMeaningLlmModel?.trim() || undefined,
+    songMeaningLlmHost: cached.songMeaningLlmHost?.trim() || undefined,
     metaArtist: cached.metaArtist?.trim() || undefined,
     metaTitle: cached.metaTitle?.trim() || undefined,
   };
@@ -91,10 +99,27 @@ export async function enrichLocalMp3LyricsWithSongMeaning(
   signal?: AbortSignal
 ): Promise<LocalMp3LyricsResult> {
   if (result.songMeaning?.trim()) return result;
+  const trackId = libraryTrackId.trim();
+  if (trackId && typeof indexedDB !== "undefined") {
+    try {
+      const cached = await getLibraryLyricsCache(trackId);
+      if (cached?.songMeaning?.trim()) {
+        return {
+          ...mapCachedLibraryLyricsToResult(cached),
+          pairs: result.pairs,
+          headline: result.headline,
+          detectedFranc3: result.detectedFranc3,
+          lrclibTrack: result.lrclibTrack,
+        };
+      }
+    } catch {
+      /* ignore cache read failures */
+    }
+  }
   const meta = await resolveTrackMetadataFromLibrary(displayName, libraryTrackId);
   const enriched = await attachSongMeaning(result, meta, displayName, signal);
-  if (libraryTrackId.trim() && enriched.songMeaning) {
-    await saveLyricsCache(libraryTrackId.trim(), enriched);
+  if (trackId && enriched.songMeaning) {
+    await saveLocalMp3LyricsResultToCache(trackId, enriched);
   }
   return enriched;
 }
@@ -165,7 +190,10 @@ async function finalizeWithLlmSongMeaning(
   };
 }
 
-async function saveLyricsCache(trackId: string, result: LocalMp3LyricsResult): Promise<void> {
+export async function saveLocalMp3LyricsResultToCache(
+  trackId: string,
+  result: LocalMp3LyricsResult
+): Promise<void> {
   if (!trackId || !result.pairs.length || typeof indexedDB === "undefined") return;
   try {
     await putLibraryLyricsCache(trackId, {
@@ -174,12 +202,153 @@ async function saveLyricsCache(trackId: string, result: LocalMp3LyricsResult): P
       detectedFranc3: result.detectedFranc3,
       lrclibTrack: result.lrclibTrack,
       songMeaning: result.songMeaning,
+      lyricsLlmPurpose: result.lyricsLlmPurpose,
+      lyricsLlmModel: result.lyricsLlmModel,
+      lyricsLlmHost: result.lyricsLlmHost,
+      songMeaningLlmPurpose: result.songMeaningLlmPurpose,
+      songMeaningLlmModel: result.songMeaningLlmModel,
+      songMeaningLlmHost: result.songMeaningLlmHost,
       metaArtist: result.metaArtist,
       metaTitle: result.metaTitle,
+      lyricsMatchVersion: LOCAL_LYRICS_MATCH_VERSION,
     });
   } catch {
     /* quota / IndexedDB */
   }
+}
+
+function coerceGeminiLyricsResult(raw: unknown, fileMeta: TrackFileMetadata, displayName: string): LocalMp3LyricsResult {
+  if (!raw || typeof raw !== "object") throw new Error("Invalid Gemini response.");
+  const o = raw as Record<string, unknown>;
+  if (o.ok !== true) {
+    throw new Error(typeof o.error === "string" && o.error.trim() ? o.error.trim() : "Gemini could not load lyrics.");
+  }
+  const pairsIn = o.pairs;
+  if (!Array.isArray(pairsIn) || pairsIn.length === 0) throw new Error("Gemini returned no lyric lines.");
+  const pairs: LyricLinePair[] = [];
+  for (const row of pairsIn) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    const orig = typeof r.orig === "string" ? r.orig.trimEnd() : "";
+    const en = typeof r.en === "string" && r.en.trim() ? r.en.trimEnd() : orig;
+    if (orig) pairs.push({ orig, en });
+  }
+  if (!pairs.length) throw new Error("Gemini returned no valid lyric lines.");
+  let detectedFranc3 = typeof o.detectedFranc3 === "string" ? o.detectedFranc3.trim().toLowerCase() : "und";
+  if (!/^[a-z]{3}$/.test(detectedFranc3)) detectedFranc3 = "und";
+  const headline =
+    fileMeta.artist?.trim() && fileMeta.title?.trim()
+      ? `${fileMeta.artist.trim()} — ${fileMeta.title.trim()}`
+      : "Lyrics";
+  return {
+    pairs,
+    headline,
+    detectedFranc3,
+    lrclibTrack:
+      (typeof o.lrclibTrack === "string" && o.lrclibTrack.trim()) ||
+      lrclibLabelFromMetadata(fileMeta, displayName),
+    songMeaning: typeof o.meaning === "string" && o.meaning.trim() ? o.meaning.trim() : undefined,
+    lyricsLlmPurpose: typeof o.llmPurpose === "string" ? o.llmPurpose : "lyrics find + translate (Google Gemini)",
+    lyricsLlmModel: typeof o.llmModel === "string" ? o.llmModel : undefined,
+    lyricsLlmHost: typeof o.llmHost === "string" ? o.llmHost : undefined,
+    songMeaningLlmPurpose:
+      typeof o.songMeaningLlmPurpose === "string" ? o.songMeaningLlmPurpose : "song meaning (Google Gemini)",
+    songMeaningLlmModel: typeof o.songMeaningLlmModel === "string" ? o.songMeaningLlmModel : undefined,
+    songMeaningLlmHost: typeof o.songMeaningLlmHost === "string" ? o.songMeaningLlmHost : undefined,
+    metaArtist: fileMeta.artist || undefined,
+    metaTitle: fileMeta.title || undefined,
+  };
+}
+
+export async function fetchGeminiLyricsForLocalMp3(
+  displayName: string,
+  durationSec: number | null,
+  signal?: AbortSignal,
+  opts?: { libraryTrackId?: string | null; saveToCache?: boolean }
+): Promise<LocalMp3LyricsResult> {
+  const ipc = typeof window !== "undefined" ? window.iptv?.lyricsGeminiUnifiedFetch : undefined;
+  if (typeof ipc !== "function") throw new Error("Gemini lyrics need the desktop app.");
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const trackId = opts?.libraryTrackId?.trim() || "";
+  const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
+  const raw = await ipc({
+    displayName,
+    durationSec,
+    metaArtist: fileMeta.artist || undefined,
+    metaTitle: fileMeta.title || undefined,
+    metaAlbum: fileMeta.album || undefined,
+  });
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const result = coerceGeminiLyricsResult(raw, fileMeta, displayName);
+  if (opts?.saveToCache !== false) {
+    await saveLocalMp3LyricsResultToCache(trackId, result);
+  }
+  return result;
+}
+
+export async function fetchDeepSeekLyricsForLocalMp3(
+  displayName: string,
+  durationSec: number | null,
+  signal?: AbortSignal,
+  opts?: { libraryTrackId?: string | null; saveToCache?: boolean }
+): Promise<LocalMp3LyricsResult> {
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  const trackId = opts?.libraryTrackId?.trim() || "";
+  const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
+  const unified = await tryUnifiedLlmLyrics(displayName, durationSec, toLyricsFileMetadata(fileMeta), signal);
+  if (!unified?.pairs.length) {
+    throw new Error("DeepSeek could not find lyrics for this track.");
+  }
+  const headline =
+    fileMeta.artist?.trim() && fileMeta.title?.trim()
+      ? `${fileMeta.artist.trim()} — ${fileMeta.title.trim()}`
+      : "Lyrics";
+  let result: LocalMp3LyricsResult = {
+    pairs: unified.pairs,
+    headline,
+    detectedFranc3: unified.detectedFranc3,
+    lrclibTrack: unified.lrclibTrack || lrclibLabelFromMetadata(fileMeta, displayName),
+    metaArtist: fileMeta.artist || undefined,
+    metaTitle: fileMeta.title || undefined,
+  };
+  result = applyLyricsLlmMeta(
+    result,
+    unified.llmPurpose || "lyrics find + translate",
+    unified.llmModel,
+    unified.llmHost
+  );
+  const meaning = await fetchSongMeaningFromLlm(
+    {
+      artist: fileMeta.artist,
+      title: fileMeta.title,
+      album: fileMeta.album || undefined,
+      displayName,
+      forceOpenAiCompatible: true,
+    },
+    signal
+  );
+  if (meaning.ok && meaning.meaning) {
+    result = {
+      ...result,
+      songMeaning: meaning.meaning,
+      songMeaningError: undefined,
+      songMeaningLlmPurpose: meaning.llmPurpose || "song meaning",
+      songMeaningLlmModel: meaning.llmModel,
+      songMeaningLlmHost: meaning.llmHost,
+    };
+  } else if (meaning.error) {
+    result = {
+      ...result,
+      songMeaningError: meaning.error,
+      songMeaningLlmPurpose: meaning.llmPurpose || "song meaning",
+      songMeaningLlmModel: meaning.llmModel,
+      songMeaningLlmHost: meaning.llmHost,
+    };
+  }
+  if (opts?.saveToCache !== false) {
+    await saveLocalMp3LyricsResultToCache(trackId, result);
+  }
+  return result;
 }
 
 /**
@@ -190,7 +359,7 @@ export async function fetchBilingualLyricsForLocalMp3(
   displayName: string,
   durationSec: number | null,
   signal?: AbortSignal,
-  opts?: { libraryTrackId?: string | null }
+  opts?: { libraryTrackId?: string | null; saveToCache?: boolean }
 ): Promise<LocalMp3LyricsResult> {
   const fetchJson = createLyricsJsonFetcher();
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -198,44 +367,44 @@ export async function fetchBilingualLyricsForLocalMp3(
   const trackId = opts?.libraryTrackId?.trim() || "";
   const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
   const lyricsMeta = toLyricsFileMetadata(fileMeta);
-  const useLlmFirst = await hasLyricsLlmKey();
-
-  if (useLlmFirst) {
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    try {
-      const unified = await tryUnifiedLlmLyrics(displayName, durationSec, lyricsMeta, signal);
-      if (unified && unified.pairs.length > 0) {
-        const shortHeadline =
-          fileMeta.artist?.trim() && fileMeta.title?.trim()
-            ? `${fileMeta.artist.trim()} — ${fileMeta.title.trim()}`
-            : "Lyrics";
-        let result: LocalMp3LyricsResult = {
-          pairs: unified.pairs,
-          headline: shortHeadline,
-          detectedFranc3: unified.detectedFranc3,
-          lrclibTrack: unified.lrclibTrack || lrclibLabelFromMetadata(fileMeta, displayName),
-          metaArtist: fileMeta.artist || undefined,
-          metaTitle: fileMeta.title || undefined,
-        };
-        result = applyLyricsLlmMeta(
-          result,
-          unified.llmPurpose || "lyrics find + translate",
-          unified.llmModel,
-          unified.llmHost
-        );
-        result = await finalizeWithLlmSongMeaning(result, fileMeta, displayName, signal);
-        await saveLyricsCache(trackId, result);
-        return result;
-      }
-    } catch {
-      /* unified LLM failed; continue to LRCLIB */
-    }
-  }
+  const useLlmFallback = await hasLyricsLlmKey();
 
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
   const best = await lrclibFindBestLyrics(displayName, durationSec, fetchJson, signal, lyricsMeta);
   if (!best) {
+    if (useLlmFallback) {
+      try {
+        const unified = await tryUnifiedLlmLyrics(displayName, durationSec, lyricsMeta, signal);
+        if (unified && unified.pairs.length > 0) {
+          const shortHeadline =
+            fileMeta.artist?.trim() && fileMeta.title?.trim()
+              ? `${fileMeta.artist.trim()} — ${fileMeta.title.trim()}`
+              : "Lyrics";
+          let result: LocalMp3LyricsResult = {
+            pairs: unified.pairs,
+            headline: shortHeadline,
+            detectedFranc3: unified.detectedFranc3,
+            lrclibTrack: unified.lrclibTrack || lrclibLabelFromMetadata(fileMeta, displayName),
+            metaArtist: fileMeta.artist || undefined,
+            metaTitle: fileMeta.title || undefined,
+          };
+          result = applyLyricsLlmMeta(
+            result,
+            unified.llmPurpose || "lyrics find + translate",
+            unified.llmModel,
+            unified.llmHost
+          );
+          result = await finalizeWithLlmSongMeaning(result, fileMeta, displayName, signal);
+          if (opts?.saveToCache !== false) {
+            await saveLocalMp3LyricsResultToCache(trackId, result);
+          }
+          return result;
+        }
+      } catch {
+        /* use the normal no-lyrics result below */
+      }
+    }
     return {
       pairs: [],
       headline: "No lyrics found",
@@ -326,6 +495,8 @@ export async function fetchBilingualLyricsForLocalMp3(
 
   result = await finalizeWithLlmSongMeaning(result, fileMeta, displayName, signal);
 
-  await saveLyricsCache(trackId, result);
+  if (opts?.saveToCache !== false) {
+    await saveLocalMp3LyricsResultToCache(trackId, result);
+  }
   return result;
 }

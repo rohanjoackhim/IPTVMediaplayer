@@ -28,6 +28,15 @@
   border-color: rgba(255, 255, 255, 0.12);
 }
 
+.lyrics-chat-translate-summary--app-key {
+  color: var(--text);
+  border-color: rgba(74, 222, 128, 0.5);
+  background:
+    linear-gradient(135deg, rgba(34, 197, 94, 0.18), rgba(18, 22, 28, 0.88) 58%),
+    rgba(18, 22, 28, 0.85);
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.16), 0 0 18px rgba(34, 197, 94, 0.18);
+}
+
 .lyrics-chat-translate-badge {
   margin-left: auto;
   font-size: 0.625rem;
@@ -40,8 +49,40 @@
   color: var(--text-muted);
 }
 
+.lyrics-chat-translate-badge--app-key {
+  border-color: rgba(74, 222, 128, 0.72);
+  background: rgba(34, 197, 94, 0.18);
+  color: #bbf7d0;
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.26);
+}
+
 .lyrics-chat-translate-body {
   margin-top: 10px;
+}
+
+.lyrics-chat-translate-provider-row {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.lyrics-chat-translate-provider {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(12, 14, 18, 0.86);
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: default;
+}
+
+.lyrics-chat-translate-provider--active {
+  border-color: rgba(74, 222, 128, 0.72);
+  background: rgba(34, 197, 94, 0.18);
+  color: #bbf7d0;
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.28);
 }
 
 .lyrics-chat-translate-hint {
@@ -62,6 +103,15 @@
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.lyrics-chat-translate-section-title {
+  margin: 12px 0 8px;
+  font-size: 0.6875rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
 }
 
 .lyrics-chat-translate-input {

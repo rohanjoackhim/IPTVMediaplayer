@@ -23,7 +23,8 @@ function mimeFromFileName(fileName: string): string | undefined {
 const DB_NAME = "iptv-local-audio-v2";
 const STORE = "tracks";
 const LYRICS_STORE = "lyrics";
-const DB_VERSION = 2;
+const EBOOK_STORE = "ebooks";
+const DB_VERSION = 4;
 
 export interface StoredAudioTrack {
   id: string;
@@ -41,6 +42,29 @@ export interface StoredAudioTrack {
   coverArtMime?: string;
 }
 
+export interface StoredEbook {
+  id: string;
+  title: string;
+  text: string;
+  pages?: string[];
+  format?: "pdf" | "epub" | "html" | "text";
+  blob?: Blob;
+  size: number;
+  lastModified: number;
+  addedAt: number;
+  sourceFileName: string;
+  contentType?: string;
+}
+
+function ebookFormatFromFileName(fileName: string, mime?: string): StoredEbook["format"] {
+  const lower = fileName.toLowerCase();
+  const m = (mime ?? "").toLowerCase();
+  if (lower.endsWith(".pdf") || m === "application/pdf") return "pdf";
+  if (lower.endsWith(".epub") || m.includes("epub")) return "epub";
+  if (/\.(html|htm|xhtml)$/i.test(lower) || m.includes("html")) return "html";
+  return "text";
+}
+
 /** Cached lyrics for a library track (same `id` as `StoredAudioTrack`). */
 export interface LibraryLyricsCacheRow {
   trackId: string;
@@ -51,8 +75,22 @@ export interface LibraryLyricsCacheRow {
   lrclibTrack?: string;
   /** LLM explanation of what the song is about (shown after lyrics). */
   songMeaning?: string;
+  lyricsLlmPurpose?: string;
+  lyricsLlmModel?: string;
+  lyricsLlmHost?: string;
+  songMeaningLlmPurpose?: string;
+  songMeaningLlmModel?: string;
+  songMeaningLlmHost?: string;
+  /** Optional per-language translations from the lyrics Translate menu. */
+  translatedTargets?: Record<string, LibraryLyricsTargetTranslation>;
   metaArtist?: string;
   metaTitle?: string;
+  lyricsMatchVersion?: number;
+}
+
+export interface LibraryLyricsTargetTranslation {
+  savedAt: number;
+  pairs: { orig: string; en: string }[];
 }
 
 /** Payload from Electron `iptv-pick-local-audio-files` (file read in main process). */
@@ -115,6 +153,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(LYRICS_STORE)) {
         db.createObjectStore(LYRICS_STORE, { keyPath: "trackId" });
+      }
+      if (!db.objectStoreNames.contains(EBOOK_STORE)) {
+        db.createObjectStore(EBOOK_STORE, { keyPath: "id" });
       }
     };
   });
@@ -197,6 +238,24 @@ export function normalizeStoredTrackRow(track: StoredAudioTrack): StoredAudioTra
   };
 }
 
+function normalizeStoredEbookRow(row: StoredEbook): StoredEbook | null {
+  if (!row?.id) return null;
+  const blob = normalizeBlobField(row.blob, row.contentType);
+  const format = row.format ?? ebookFormatFromFileName(row.sourceFileName ?? "", row.contentType);
+  const pages = Array.isArray(row.pages)
+    ? row.pages.filter((page) => typeof page === "string" && page.trim())
+    : undefined;
+  const text = typeof row.text === "string" ? row.text : pages?.join("\n\n") ?? "";
+  if (!text.trim() && !(blob instanceof Blob)) return null;
+  return {
+    ...row,
+    text,
+    pages,
+    format,
+    blob,
+  };
+}
+
 function trackHasCover(track: StoredAudioTrack): boolean {
   const c = normalizeBlobField(track.coverArt, track.coverArtMime);
   return c instanceof Blob && c.size > 0;
@@ -253,8 +312,16 @@ function readWriteTracksAndLyricsTx(db: IDBDatabase): IDBTransaction {
   return db.transaction([STORE, LYRICS_STORE], "readwrite");
 }
 
+function readWriteAllLibraryTx(db: IDBDatabase): IDBTransaction {
+  return db.transaction([STORE, LYRICS_STORE, EBOOK_STORE], "readwrite");
+}
+
 function readOnlyTx(db: IDBDatabase): IDBTransaction {
   return db.transaction(STORE, "readonly");
+}
+
+function readOnlyEbooksTx(db: IDBDatabase): IDBTransaction {
+  return db.transaction(EBOOK_STORE, "readonly");
 }
 
 export async function listAudioLibraryTracks(): Promise<StoredAudioTrack[]> {
@@ -361,12 +428,64 @@ export async function putAudioLibraryFile(file: File): Promise<StoredAudioTrack>
   return row;
 }
 
+export async function listEbookLibraryItems(): Promise<StoredEbook[]> {
+  const db = await openDb();
+  let tx: IDBTransaction;
+  try {
+    tx = readOnlyEbooksTx(db);
+  } catch (e) {
+    closeDb(db);
+    throw e instanceof Error ? e : new Error(`Cannot open ebook library: ${String(e)}`);
+  }
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => {
+      closeDb(db);
+      reject(tx.error ?? new Error("ebook read transaction failed"));
+    };
+    tx.oncomplete = () => closeDb(db);
+    const q = tx.objectStore(EBOOK_STORE).getAll();
+    q.onerror = () => {
+      closeDb(db);
+      reject(q.error ?? new Error("ebook getAll failed"));
+    };
+    q.onsuccess = () => {
+      const rows = ((q.result as StoredEbook[]) ?? [])
+        .map(normalizeStoredEbookRow)
+        .filter((r): r is StoredEbook => r != null);
+      rows.sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+      resolve(rows);
+    };
+  });
+}
+
+export async function persistEbookLibraryItem(row: StoredEbook): Promise<void> {
+  const db = await openDb();
+  let tx: IDBTransaction;
+  try {
+    tx = db.transaction(EBOOK_STORE, "readwrite");
+  } catch (e) {
+    closeDb(db);
+    throw e instanceof Error ? e : new Error(`Cannot save ebook library: ${String(e)}`);
+  }
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => {
+      closeDb(db);
+      reject(tx.error ?? new Error("IndexedDB could not save the ebook."));
+    };
+    tx.oncomplete = () => {
+      closeDb(db);
+      resolve();
+    };
+    tx.objectStore(EBOOK_STORE).put(row);
+  });
+}
+
 /** Remove every track and cached lyrics from the local audio library. */
 export async function clearAudioLibrary(): Promise<void> {
   const db = await openDb();
   let tx: IDBTransaction;
   try {
-    tx = readWriteTracksAndLyricsTx(db);
+    tx = readWriteAllLibraryTx(db);
   } catch (e) {
     closeDb(db);
     throw e instanceof Error ? e : new Error(`Cannot clear audio library: ${String(e)}`);
@@ -386,6 +505,33 @@ export async function clearAudioLibrary(): Promise<void> {
     } catch {
       /* lyrics store may be absent on very old DBs */
     }
+    try {
+      tx.objectStore(EBOOK_STORE).clear();
+    } catch {
+      /* ebook store may be absent on very old DBs */
+    }
+  });
+}
+
+export async function removeEbookLibraryItem(id: string): Promise<void> {
+  const db = await openDb();
+  let tx: IDBTransaction;
+  try {
+    tx = db.transaction(EBOOK_STORE, "readwrite");
+  } catch (e) {
+    closeDb(db);
+    throw e instanceof Error ? e : new Error(`Cannot remove ebook: ${String(e)}`);
+  }
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => {
+      closeDb(db);
+      reject(tx.error ?? new Error("IndexedDB could not remove the ebook."));
+    };
+    tx.oncomplete = () => {
+      closeDb(db);
+      resolve();
+    };
+    tx.objectStore(EBOOK_STORE).delete(id);
   });
 }
 
@@ -429,6 +575,33 @@ function isValidLyricsRow(row: unknown): row is LibraryLyricsCacheRow {
   return typeof o.headline === "string" && o.headline.trim().length > 0 && typeof o.detectedFranc3 === "string";
 }
 
+function isValidLyricPairs(value: unknown): value is { orig: string; en: string }[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((p) => {
+    if (!p || typeof p !== "object") return false;
+    const q = p as Record<string, unknown>;
+    return typeof q.orig === "string" && typeof q.en === "string";
+  });
+}
+
+function validTranslatedTargets(
+  value: unknown
+): Record<string, LibraryLyricsTargetTranslation> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const out: Record<string, LibraryLyricsTargetTranslation> = {};
+  for (const [rawCode, rawEntry] of Object.entries(value as Record<string, unknown>)) {
+    const code = rawCode.trim().toLowerCase();
+    if (!code || !rawEntry || typeof rawEntry !== "object") continue;
+    const entry = rawEntry as Record<string, unknown>;
+    if (!isValidLyricPairs(entry.pairs)) continue;
+    const savedAt = typeof entry.savedAt === "number" && Number.isFinite(entry.savedAt)
+      ? entry.savedAt
+      : Date.now();
+    out[code] = { savedAt, pairs: entry.pairs };
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** Load saved lyrics for this library track id (same id as `StoredAudioTrack.id`). */
 export async function getLibraryLyricsCache(trackId: string): Promise<LibraryLyricsCacheRow | null> {
   const id = String(trackId ?? "").trim();
@@ -458,9 +631,26 @@ export async function getLibraryLyricsCache(trackId: string): Promise<LibraryLyr
     };
     q.onsuccess = () => {
       const row = q.result;
-      resolve(isValidLyricsRow(row) ? row : null);
+      if (!isValidLyricsRow(row)) {
+        resolve(null);
+        return;
+      }
+      resolve({
+        ...row,
+        translatedTargets: validTranslatedTargets(row.translatedTargets),
+      });
     };
   });
+}
+
+export async function getLibraryLyricsTranslationCache(
+  trackId: string,
+  targetCode: string
+): Promise<LibraryLyricsTargetTranslation | null> {
+  const code = String(targetCode ?? "").trim().toLowerCase();
+  if (!code) return null;
+  const row = await getLibraryLyricsCache(trackId);
+  return row?.translatedTargets?.[code] ?? null;
 }
 
 /**
@@ -481,17 +671,6 @@ export async function putLibraryLyricsCache(
     closeDb(db);
     throw e instanceof Error ? e : new Error(`Cannot save lyrics cache: ${String(e)}`);
   }
-  const row: LibraryLyricsCacheRow = {
-    trackId: id,
-    savedAt: Date.now(),
-    pairs: payload.pairs,
-    headline: payload.headline,
-    detectedFranc3: payload.detectedFranc3,
-    lrclibTrack: payload.lrclibTrack,
-    songMeaning: payload.songMeaning?.trim() || undefined,
-    metaArtist: payload.metaArtist?.trim() || undefined,
-    metaTitle: payload.metaTitle?.trim() || undefined,
-  };
   return new Promise((resolve, reject) => {
     tx.onerror = () => {
       closeDb(db);
@@ -501,7 +680,74 @@ export async function putLibraryLyricsCache(
       closeDb(db);
       resolve();
     };
-    tx.objectStore(LYRICS_STORE).put(row);
+    const store = tx.objectStore(LYRICS_STORE);
+    const q = store.get(id);
+    q.onerror = () => reject(q.error ?? new Error("lyrics get failed"));
+    q.onsuccess = () => {
+      const existingTargets = isValidLyricsRow(q.result)
+        ? validTranslatedTargets(q.result.translatedTargets)
+        : undefined;
+      const row: LibraryLyricsCacheRow = {
+        trackId: id,
+        savedAt: Date.now(),
+        pairs: payload.pairs,
+        headline: payload.headline,
+        detectedFranc3: payload.detectedFranc3,
+        lrclibTrack: payload.lrclibTrack,
+        songMeaning: payload.songMeaning?.trim() || undefined,
+        lyricsLlmPurpose: payload.lyricsLlmPurpose?.trim() || undefined,
+        lyricsLlmModel: payload.lyricsLlmModel?.trim() || undefined,
+        lyricsLlmHost: payload.lyricsLlmHost?.trim() || undefined,
+        songMeaningLlmPurpose: payload.songMeaningLlmPurpose?.trim() || undefined,
+        songMeaningLlmModel: payload.songMeaningLlmModel?.trim() || undefined,
+        songMeaningLlmHost: payload.songMeaningLlmHost?.trim() || undefined,
+        translatedTargets:
+          validTranslatedTargets((payload as LibraryLyricsCacheRow).translatedTargets) ?? existingTargets,
+        metaArtist: payload.metaArtist?.trim() || undefined,
+        metaTitle: payload.metaTitle?.trim() || undefined,
+      };
+      store.put(row);
+    };
+  });
+}
+
+export async function putLibraryLyricsTranslationCache(
+  trackId: string,
+  targetCode: string,
+  pairs: { orig: string; en: string }[]
+): Promise<void> {
+  const id = String(trackId ?? "").trim();
+  const code = String(targetCode ?? "").trim().toLowerCase();
+  if (!id || !code || !isValidLyricPairs(pairs)) return;
+  const db = await openDb();
+  let tx: IDBTransaction;
+  try {
+    tx = db.transaction(LYRICS_STORE, "readwrite");
+  } catch (e) {
+    closeDb(db);
+    throw e instanceof Error ? e : new Error(`Cannot save lyrics translation cache: ${String(e)}`);
+  }
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => {
+      closeDb(db);
+      reject(tx.error ?? new Error("IndexedDB could not save lyrics translation."));
+    };
+    tx.oncomplete = () => {
+      closeDb(db);
+      resolve();
+    };
+    const store = tx.objectStore(LYRICS_STORE);
+    const q = store.get(id);
+    q.onerror = () => reject(q.error ?? new Error("lyrics get failed"));
+    q.onsuccess = () => {
+      if (!isValidLyricsRow(q.result)) return;
+      const existing = q.result;
+      const translatedTargets = {
+        ...(validTranslatedTargets(existing.translatedTargets) ?? {}),
+        [code]: { savedAt: Date.now(), pairs },
+      };
+      store.put({ ...existing, translatedTargets });
+    };
   });
 }
 

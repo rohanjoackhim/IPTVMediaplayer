@@ -24,18 +24,48 @@ declare global {
         /** True if OpenAI-compatible env/settings key OR `GEMINI_*` in main `.env` (song meaning). */
         hasSongMeaningKey?: boolean;
         hasGeminiFromEnv?: boolean;
+        hasGeminiKey?: boolean;
+        geminiKeyPreview?: string;
+        geminiKeySource?: "env" | "app" | "";
+        geminiModelPreview?: string;
+        /** Safe preview only, e.g. `abcxxxxxyz`; never the full API key. */
+        keyPreview?: string;
+        /** Current OpenAI-compatible key source. */
+        keySource?: "env" | "app" | "";
         apiBasePreview: string;
         modelPreview: string;
       }>;
       setLyricsChatTranslateCredentials: (payload: {
-        key: string;
+        key?: string;
         baseUrl?: string;
         model?: string;
-      }) => Promise<{ ok: boolean; hasKey: boolean; apiBasePreview: string; modelPreview: string }>;
+        geminiKey?: string;
+        geminiModel?: string;
+      }) => Promise<{
+        ok: boolean;
+        hasKey: boolean;
+        hasSongMeaningKey?: boolean;
+        hasGeminiKey?: boolean;
+        geminiKeyPreview?: string;
+        geminiKeySource?: "env" | "app" | "";
+        geminiModelPreview?: string;
+        keyPreview?: string;
+        keySource?: "env" | "app" | "";
+        apiBasePreview: string;
+        modelPreview: string;
+      }>;
       /** Desktop: OpenAI-compatible chat translation; returns `{ translatedText }`. */
       lyricsChatTranslate: (payload: { q: string; source: string; target?: string }) => Promise<unknown>;
       /** Desktop: one-shot lyrics find + translate JSON (`ok`, `pairs`, `headline`, …). Same API key as `lyricsChatTranslate`. */
       lyricsLlmUnifiedFetch: (payload: {
+        displayName: string;
+        durationSec: number | null;
+        metaArtist?: string;
+        metaTitle?: string;
+        metaAlbum?: string;
+      }) => Promise<unknown>;
+      /** Desktop: one-shot Gemini lyrics + meaning JSON. */
+      lyricsGeminiUnifiedFetch: (payload: {
         displayName: string;
         durationSec: number | null;
         metaArtist?: string;
@@ -48,6 +78,7 @@ declare global {
         title: string;
         album?: string;
         displayName?: string;
+        forceOpenAiCompatible?: boolean;
       }) => Promise<{
         ok: boolean;
         meaning?: string;
@@ -87,6 +118,7 @@ declare global {
         outDir: string;
         filenameExt?: string;
         tapContentType?: string;
+        recordMode?: "hls" | "mpegts" | "raw";
       }) => Promise<{
         ok: true;
         id: string;
@@ -94,6 +126,50 @@ declare global {
         playbackUrl?: string | null;
       }>;
       stopStreamRecord: (id: string) => Promise<{ ok: boolean; filePath?: string }>;
+      /** Desktop: Kokoro ONNX neural TTS voice list. */
+      listNeuralTtsVoices: () => Promise<{
+        ok: boolean;
+        engine: string;
+        model: string;
+        modelCacheDir: string;
+        audioCacheDir: string;
+        piperVoicePacksDir?: string;
+        voices: Array<{
+          id: string;
+          name: string;
+          language: string;
+          gender: string;
+          accent: string;
+          grade: string;
+          engine?: "kokoro-js" | "piper-vits";
+        }>;
+      }>;
+      /** Desktop: load the neural TTS model in the background before playback. */
+      warmupNeuralTts: () => Promise<{
+        ok: boolean;
+        engine: string;
+        model: string;
+      }>;
+      /** Desktop: synthesize one neural TTS chunk to a local WAV file. */
+      synthesizeNeuralTts: (payload: {
+        text: string;
+        voice: string;
+        speed?: number;
+        style?: string;
+        prefetch?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        canceled?: boolean;
+        skipped?: boolean;
+        reason?: string;
+        engine?: string;
+        cached?: boolean;
+        path?: string;
+        url?: string;
+        durationMs?: number | null;
+      }>;
+      /** Desktop: cancel/supersede pending neural TTS synthesis. */
+      cancelNeuralTts: () => Promise<{ ok: boolean }>;
       /** Desktop: open File Explorer with this file selected. */
       showRecordInFolder: (filePath: string) => Promise<{ ok: true }>;
     };

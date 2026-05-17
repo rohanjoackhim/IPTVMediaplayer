@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   fileToStoredTrack,
   getLibraryLyricsCache,
+  getLibraryLyricsTranslationCache,
   listAudioLibraryTracks,
   persistStoredTrack,
   putLibraryLyricsCache,
+  putLibraryLyricsTranslationCache,
   removeAudioLibraryTrack,
   trackFromDesktopPick,
 } from "./audioLibraryDb";
@@ -72,6 +74,31 @@ describe("audioLibraryDb", () => {
     await removeAudioLibraryTrack(row.id);
     expect(await getLibraryLyricsCache(row.id)).toBeNull();
     expect(await listAudioLibraryTracks()).toHaveLength(0);
+  });
+
+  it("caches per-language lyrics translations and preserves them when meaning is saved", async () => {
+    const row = fileToStoredTrack(new File([new Uint8Array([10])], "translated.mp3", { type: "audio/mpeg" }));
+    await persistStoredTrack(row);
+    await putLibraryLyricsCache(row.id, {
+      pairs: [{ orig: "Hola", en: "Hello" }],
+      headline: "Cached Artist — Cached Song",
+      detectedFranc3: "spa",
+    });
+    await putLibraryLyricsTranslationCache(row.id, "fr", [{ orig: "Hola", en: "Bonjour" }]);
+
+    const cachedFr = await getLibraryLyricsTranslationCache(row.id, "fr");
+    expect(cachedFr?.pairs[0]?.en).toBe("Bonjour");
+
+    await putLibraryLyricsCache(row.id, {
+      pairs: [{ orig: "Hola", en: "Hello" }],
+      headline: "Cached Artist — Cached Song",
+      detectedFranc3: "spa",
+      songMeaning: "A greeting song.",
+    });
+
+    const afterMeaning = await getLibraryLyricsCache(row.id);
+    expect(afterMeaning?.songMeaning).toBe("A greeting song.");
+    expect(afterMeaning?.translatedTargets?.fr?.pairs[0]?.en).toBe("Bonjour");
   });
 
   it("trackFromDesktopPick uses the same id as fileToStoredTrack when fileName + size + mtime match", () => {

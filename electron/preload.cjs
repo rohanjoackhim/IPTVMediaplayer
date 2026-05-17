@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld("iptv", {
   /** Desktop: one LLM JSON response — find lyrics + English in one step (same key as lyricsChatTranslate). */
   lyricsLlmUnifiedFetch: (payload) => ipcRenderer.invoke("iptv-lyrics-llm-unified-fetch", payload),
 
+  /** Desktop: Gemini JSON response — find lyrics + English + song meaning in one step. */
+  lyricsGeminiUnifiedFetch: (payload) => ipcRenderer.invoke("iptv-lyrics-gemini-unified-fetch", payload),
+
   /** Desktop: LLM explanation of what a song is about (artist/title from file tags). */
   lyricsSongMeaningFetch: (payload) => ipcRenderer.invoke("iptv-lyrics-song-meaning-fetch", payload),
 
@@ -56,6 +59,15 @@ contextBridge.exposeInMainWorld("iptv", {
   startStreamRecord: (payload) => ipcRenderer.invoke("iptv-start-stream-record", payload),
 
   stopStreamRecord: (id) => ipcRenderer.invoke("iptv-stop-stream-record", id),
+
+  /** Desktop: local neural TTS voices and synthesis (Piper packs when installed, Kokoro built in). */
+  listNeuralTtsVoices: () => ipcRenderer.invoke("iptv-neural-tts-voices"),
+
+  warmupNeuralTts: () => ipcRenderer.invoke("iptv-neural-tts-warmup"),
+
+  synthesizeNeuralTts: (payload) => ipcRenderer.invoke("iptv-neural-tts-synthesize", payload),
+
+  cancelNeuralTts: () => ipcRenderer.invoke("iptv-neural-tts-cancel"),
 
   /** Desktop: reveal the saved recording in File Explorer. */
   showRecordInFolder: (filePath) => ipcRenderer.invoke("iptv-show-record-in-folder", filePath),

@@ -3,6 +3,7 @@ export interface SongMeaningRequest {
   title: string;
   album?: string;
   displayName?: string;
+  forceOpenAiCompatible?: boolean;
 }
 
 export interface SongMeaningResult {
@@ -42,6 +43,7 @@ export async function fetchSongMeaningFromLlm(
       title: req.title.trim(),
       album: req.album?.trim() || undefined,
       displayName: req.displayName?.trim() || undefined,
+      forceOpenAiCompatible: req.forceOpenAiCompatible === true,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

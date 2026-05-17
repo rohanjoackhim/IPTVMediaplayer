@@ -153,6 +153,7 @@ export default function App() {
   const [audioLibraryContinuous, setAudioLibraryContinuous] = useState(
     () => loadUiSession().audioLibraryContinuous
   );
+  const [sidebarMode, setSidebarMode] = useState(() => loadUiSession().sidebarMode);
   /** Electron: two localhost origins (different ports) so left/right streams do not share one connection pool. */
   const [streamProxyOrigins, setStreamProxyOrigins] = useState<[string, string] | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => fitSidebarToViewport(loadUiSession().sidebarWidthPx));
@@ -180,8 +181,8 @@ export default function App() {
   }, [channels]);
 
   useEffect(() => {
-    saveUiSession({ audioLibraryShuffle, audioLibraryContinuous });
-  }, [audioLibraryShuffle, audioLibraryContinuous]);
+    saveUiSession({ audioLibraryShuffle, audioLibraryContinuous, sidebarMode });
+  }, [audioLibraryShuffle, audioLibraryContinuous, sidebarMode]);
 
   useEffect(() => {
     saveFavoriteUrls(favoriteUrls);
@@ -272,9 +273,8 @@ export default function App() {
 
   const handleSelectChannel = useCallback(
     (c: Channel) => {
-      if (c.libraryTrackId?.trim()) {
-        setSplitView(true);
-        setChannelRight(c);
+      if (c.ebookId) {
+        setActive(c);
         return;
       }
       if (!splitView) {
@@ -286,6 +286,24 @@ export default function App() {
     },
     [splitView, assignTarget]
   );
+
+  const canResetTelevisionStream = useMemo(() => {
+    const target = splitView && assignTarget === "R" ? channelRight : active;
+    return !!target?.url?.trim() && !target.ebookId && !target.libraryTrackId;
+  }, [active, assignTarget, channelRight, splitView]);
+
+  const handleResetTelevisionStream = useCallback(() => {
+    const bump = (c: Channel | null): Channel | null => {
+      if (!c?.url?.trim() || c.ebookId || c.libraryTrackId) return c;
+      return { ...c, streamResetNonce: Date.now() };
+    };
+    if (splitView && assignTarget === "R") {
+      setChannelRight((cur) => bump(cur));
+    } else {
+      setActive((cur) => bump(cur));
+    }
+    setParseMessage("Reset local stream session for the selected player. Provider-side blocks still require a valid provider/account connection.");
+  }, [assignTarget, splitView]);
 
   const onLoadM3U = useCallback((text: string, replace: boolean) => {
     const { channels: next, errors } = parseM3U(text);
@@ -331,13 +349,18 @@ export default function App() {
   const onAddLocalVideoChannels = useCallback((incoming: Channel[]) => {
     if (!incoming.length) return;
     setChannels((prev) => [...incoming, ...prev]);
+    const webVideoCount = incoming.filter((c) => !!c.youtubeVideoId || !!c.webVideoPageUrl).length;
+    if (webVideoCount > 0) {
+      setParseMessage(
+        `Added ${webVideoCount} web video${webVideoCount === 1 ? "" : "s"} at the top of the Television list. Website pages play only when the site allows embedded playback.`
+      );
+      return;
+    }
     setSplitView(true);
     setParseMessage(
       `Added ${incoming.length} local video file(s) at the top of the list (see the Local videos tab). Playback position is saved per file. Turn on Split view if it was off, then use Next click plays on to put IPTV on one player and a local file on the other.`
     );
   }, []);
-
-  const channelCount = useMemo(() => channels.length, [channels]);
 
   const libraryAudioChannels = useMemo(
     () => channels.filter((c) => !!c.libraryTrackId?.trim() && !c.localVideoFile),
@@ -430,7 +453,6 @@ export default function App() {
       <aside className="browser-pane">
         <ChannelBrowser
           channels={channels}
-          channelCount={channelCount}
           activeLeftId={active?.id ?? null}
           activeRightId={splitView ? channelRight?.id ?? null : null}
           splitView={splitView}
@@ -438,6 +460,8 @@ export default function App() {
           assignTarget={assignTarget}
           onAssignTargetChange={setAssignTarget}
           onSelectChannel={handleSelectChannel}
+          onResetTelevisionStream={handleResetTelevisionStream}
+          resetTelevisionStreamDisabled={!canResetTelevisionStream}
           onLoadM3U={onLoadM3U}
           onClearList={onClearList}
           onAddLocalVideoChannels={onAddLocalVideoChannels}
@@ -449,6 +473,8 @@ export default function App() {
           audioLibraryContinuous={audioLibraryContinuous}
           onAudioLibraryShuffleChange={setAudioLibraryShuffle}
           onAudioLibraryContinuousChange={setAudioLibraryContinuous}
+          sidebarMode={sidebarMode}
+          onSidebarModeChange={setSidebarMode}
           onIndexedLibraryChannelsChange={handleIndexedLibraryChannelsChange}
         />
       </aside>
@@ -478,6 +504,7 @@ export default function App() {
                 splitIsolateNetwork={splitView}
                 streamProxyOrigin={splitView && streamProxyOrigins ? streamProxyOrigins[0] : undefined}
                 playbackPane="L"
+                inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
               />
               <VideoPlayer
@@ -489,6 +516,7 @@ export default function App() {
                 splitIsolateNetwork={splitView}
                 streamProxyOrigin={splitView && streamProxyOrigins ? streamProxyOrigins[1] : undefined}
                 playbackPane="R"
+                inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
               />
             </div>

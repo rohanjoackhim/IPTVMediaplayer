@@ -1,5 +1,5 @@
 /**
- * RJ IPTV and Online Radio Player — Electron shell.
+ * Smart Media player — Electron shell.
  * Serves the Vite `dist` folder over http://127.0.0.1 so playlist/stream fetches behave like a normal web origin
  * (avoids file:// + CORS issues). Uses a **stable port** when possible so `localStorage` (channels, favorites, settings)
  * stays on the same origin across restarts. Desktop targets: recent Windows (x64), macOS (arm64 / Intel per build).
@@ -426,18 +426,37 @@ async function fetchGoogleGtxTranslated(q, sl, tl = "en") {
 const LYRICS_CHAT_KEY_PATH = () => path.join(app.getPath("userData"), "lyrics-chat-translate-api-key.txt");
 const LYRICS_CHAT_BASE_URL_PATH = () => path.join(app.getPath("userData"), "lyrics-chat-translate-base-url.txt");
 const LYRICS_CHAT_MODEL_PATH = () => path.join(app.getPath("userData"), "lyrics-chat-translate-model.txt");
+const GEMINI_KEY_PATH = () => path.join(app.getPath("userData"), "gemini-api-key.txt");
+const GEMINI_MODEL_PATH = () => path.join(app.getPath("userData"), "gemini-model.txt");
 
 function getLyricsChatTranslateApiKey() {
-  // Priority: `.env` / shell env (see dotenv at top of this file) → saved Settings file.
-  const fromEnv = String(
+  // Priority: saved Settings file → `.env` / shell env. This lets users test an in-app key
+  // without restarting Electron after editing `.env`.
+  const saved = getSavedLyricsChatTranslateApiKey();
+  if (saved) return saved;
+  return getLyricsChatTranslateEnvApiKey();
+}
+
+function getLyricsChatTranslateEnvApiKey() {
+  return String(
     process.env.DEEPSEEK_API_KEY ??
       process.env.OPENAI_API_KEY ??
       process.env.OPENAI_COMPATIBLE_LYRICS_API_KEY ??
       ""
   ).trim();
-  if (fromEnv) return fromEnv;
+}
+
+function getSavedLyricsChatTranslateApiKey() {
+  return readSavedLyricsChatText(LYRICS_CHAT_KEY_PATH);
+}
+
+function getSavedGeminiApiKey() {
+  return readSavedLyricsChatText(GEMINI_KEY_PATH);
+}
+
+function readSavedLyricsChatText(pathFn) {
   try {
-    const p = LYRICS_CHAT_KEY_PATH();
+    const p = pathFn();
     if (fs.existsSync(p)) {
       const t = String(fs.readFileSync(p, "utf8") ?? "").trim();
       if (t) return t;
@@ -446,36 +465,81 @@ function getLyricsChatTranslateApiKey() {
     /* noop */
   }
   return "";
+}
+
+function maskApiKeyForPreview(raw) {
+  const key = String(raw ?? "").trim();
+  if (!key) return "";
+  if (key.length <= 6) return "x".repeat(key.length);
+  return `${key.slice(0, 3)}${"x".repeat(Math.max(4, key.length - 6))}${key.slice(-3)}`;
+}
+
+function getLyricsChatTranslateKeyStatusDetails() {
+  const envKey = getLyricsChatTranslateEnvApiKey();
+  const savedKey = getSavedLyricsChatTranslateApiKey();
+  const activeKey = savedKey || envKey;
+  return {
+    key: activeKey,
+    keySource: savedKey ? "app" : envKey ? "env" : "",
+    keyPreview: maskApiKeyForPreview(activeKey),
+  };
+}
+
+function getGeminiApiKeyFromEnv() {
+  return String(
+    process.env.GEMINI_API_KEY ??
+      process.env.GOOGLE_AI_API_KEY ??
+      process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
+      ""
+  ).trim();
+}
+
+function getGeminiApiKey() {
+  const saved = getSavedGeminiApiKey();
+  if (saved) return saved;
+  return getGeminiApiKeyFromEnv();
+}
+
+function getGeminiKeyStatusDetails() {
+  const envKey = getGeminiApiKeyFromEnv();
+  const savedKey = getSavedGeminiApiKey();
+  const activeKey = savedKey || envKey;
+  return {
+    key: activeKey,
+    keySource: savedKey ? "app" : envKey ? "env" : "",
+    keyPreview: maskApiKeyForPreview(activeKey),
+  };
 }
 
 function getLyricsChatTranslateBaseUrlRaw() {
+  if (getSavedLyricsChatTranslateApiKey()) {
+    return readSavedLyricsChatText(LYRICS_CHAT_BASE_URL_PATH);
+  }
   const fromEnv = String(process.env.OPENAI_COMPATIBLE_LYRICS_BASE_URL ?? "").trim();
   if (fromEnv) return fromEnv;
-  try {
-    const p = LYRICS_CHAT_BASE_URL_PATH();
-    if (fs.existsSync(p)) {
-      const t = String(fs.readFileSync(p, "utf8") ?? "").trim();
-      if (t) return t;
-    }
-  } catch {
-    /* noop */
-  }
-  return "";
+  return readSavedLyricsChatText(LYRICS_CHAT_BASE_URL_PATH);
 }
 
 function getLyricsChatTranslateModelRaw() {
+  if (getSavedLyricsChatTranslateApiKey()) {
+    return readSavedLyricsChatText(LYRICS_CHAT_MODEL_PATH);
+  }
   const fromEnv = String(process.env.OPENAI_COMPATIBLE_LYRICS_MODEL ?? "").trim();
   if (fromEnv) return fromEnv;
-  try {
-    const p = LYRICS_CHAT_MODEL_PATH();
-    if (fs.existsSync(p)) {
-      const t = String(fs.readFileSync(p, "utf8") ?? "").trim();
-      if (t) return t;
-    }
-  } catch {
-    /* noop */
+  return readSavedLyricsChatText(LYRICS_CHAT_MODEL_PATH);
+}
+
+function getGeminiModelRaw() {
+  const savedKey = getSavedGeminiApiKey();
+  const raw = savedKey
+    ? readSavedLyricsChatText(GEMINI_MODEL_PATH)
+    : String(process.env.GEMINI_MODEL ?? process.env.GOOGLE_AI_MODEL ?? "").trim() ||
+      readSavedLyricsChatText(GEMINI_MODEL_PATH);
+  const core = (raw || "gemini-2.5-flash").replace(/^models\//, "");
+  if (core.length > 96 || !/^[a-zA-Z0-9._-]+$/.test(core)) {
+    throw new Error("Invalid Gemini model id.");
   }
-  return "";
+  return core;
 }
 
 function assertLyricsChatApiKeyInput(raw) {
@@ -682,34 +746,123 @@ function parseLlmUnifiedLyricsJsonText(text, displayName) {
   return { ok: true, error: "", pairs, detectedFranc3: detected, headline, lrclibTrack };
 }
 
-ipcMain.handle("iptv-lyrics-chat-translate-key-status", async () => {
-  const hasKey = !!getLyricsChatTranslateApiKey();
-  const geminiFromEnv = !!getGeminiApiKeyFromEnv();
-  const hasSongMeaningKey = hasKey || geminiFromEnv;
-  const base = getLyricsChatTranslateBaseUrlRaw();
-  const model = getLyricsChatTranslateModelRaw();
-  let apiBasePreview = "";
+function parseGeminiLyricsMeaningJsonText(text, displayName) {
+  let obj;
+  const raw = stripLlmMarkdownFences(text);
   try {
-    if (base) {
-      const u = new URL(base);
-      apiBasePreview = u.host;
-    } else {
-      apiBasePreview = "api.deepseek.com (default)";
+    obj = JSON.parse(raw);
+  } catch (firstErr) {
+    const i = raw.indexOf("{");
+    const j = raw.lastIndexOf("}");
+    if (i < 0 || j <= i) {
+      throw new Error("Gemini lyrics: response was not valid JSON.");
     }
-  } catch {
-    apiBasePreview = "(invalid saved URL)";
+    try {
+      obj = JSON.parse(raw.slice(i, j + 1));
+    } catch {
+      const detail = firstErr instanceof Error ? firstErr.message : String(firstErr);
+      throw new Error(`Gemini lyrics: response JSON was malformed (${detail}). Try Gemini lyrics again.`);
+    }
   }
+  const parsed = parseLlmUnifiedLyricsJsonText(JSON.stringify(obj), displayName);
+  const meaning =
+    obj && typeof obj === "object" && typeof obj.meaning === "string"
+      ? obj.meaning.trim().slice(0, 6000)
+      : "";
+  return { ...parsed, meaning };
+}
+
+function previewLyricsChatBaseHost() {
+  const base = getLyricsChatTranslateBaseUrlRaw();
+  try {
+    if (base) return new URL(base).host;
+    return "api.deepseek.com (default)";
+  } catch {
+    return "(invalid saved URL)";
+  }
+}
+
+function previewGeminiModel(hasGeminiKey) {
+  if (!hasGeminiKey) return "";
+  try {
+    return getGeminiModelRaw();
+  } catch {
+    return "(invalid model)";
+  }
+}
+
+ipcMain.handle("iptv-lyrics-chat-translate-key-status", async () => {
+  const keyStatus = getLyricsChatTranslateKeyStatusDetails();
+  const hasKey = !!keyStatus.key;
+  const geminiStatus = getGeminiKeyStatusDetails();
+  const hasGeminiKey = !!geminiStatus.key;
+  const hasSongMeaningKey = hasKey || hasGeminiKey;
+  const model = getLyricsChatTranslateModelRaw();
   return {
     hasKey,
     hasSongMeaningKey,
-    hasGeminiFromEnv: geminiFromEnv,
-    apiBasePreview,
+    hasGeminiFromEnv: geminiStatus.keySource === "env",
+    hasGeminiKey,
+    geminiKeyPreview: geminiStatus.keyPreview,
+    geminiKeySource: geminiStatus.keySource,
+    geminiModelPreview: previewGeminiModel(hasGeminiKey),
+    keyPreview: keyStatus.keyPreview,
+    keySource: keyStatus.keySource,
+    apiBasePreview: previewLyricsChatBaseHost(),
     modelPreview: model || "deepseek-chat (default)",
   };
 });
 
 ipcMain.handle("iptv-lyrics-chat-translate-save-credentials", async (_evt, raw) => {
   const p = raw && typeof raw === "object" ? raw : {};
+  const hasOpenAiPayload =
+    Object.prototype.hasOwnProperty.call(p, "key") ||
+    Object.prototype.hasOwnProperty.call(p, "baseUrl") ||
+    Object.prototype.hasOwnProperty.call(p, "model");
+  const hasGeminiPayload =
+    Object.prototype.hasOwnProperty.call(p, "geminiKey") ||
+    Object.prototype.hasOwnProperty.call(p, "geminiModel");
+  if (hasGeminiPayload && !hasOpenAiPayload) {
+    const geminiKey = assertLyricsChatApiKeyInput(typeof p.geminiKey === "string" ? p.geminiKey : "");
+    const geminiModel = assertLyricsChatModelInput(typeof p.geminiModel === "string" ? p.geminiModel : "");
+    if (!geminiKey) {
+      try {
+        fs.unlinkSync(GEMINI_KEY_PATH());
+      } catch {
+        /* missing */
+      }
+      try {
+        fs.unlinkSync(GEMINI_MODEL_PATH());
+      } catch {
+        /* missing */
+      }
+    } else {
+      fs.writeFileSync(GEMINI_KEY_PATH(), geminiKey, "utf8");
+      if (geminiModel) fs.writeFileSync(GEMINI_MODEL_PATH(), geminiModel, "utf8");
+      else {
+        try {
+          fs.unlinkSync(GEMINI_MODEL_PATH());
+        } catch {
+          /* missing */
+        }
+      }
+    }
+    const openAi = getLyricsChatTranslateKeyStatusDetails();
+    const gemini = getGeminiKeyStatusDetails();
+    return {
+      ok: true,
+      hasKey: !!openAi.key,
+      keyPreview: openAi.keyPreview,
+      keySource: openAi.keySource,
+      apiBasePreview: previewLyricsChatBaseHost(),
+      modelPreview: getLyricsChatTranslateModelRaw() || "deepseek-chat (default)",
+      hasSongMeaningKey: !!openAi.key || !!gemini.key,
+      hasGeminiKey: !!gemini.key,
+      geminiKeyPreview: gemini.keyPreview,
+      geminiKeySource: gemini.keySource,
+      geminiModelPreview: previewGeminiModel(!!gemini.key),
+    };
+  }
   const key = assertLyricsChatApiKeyInput(typeof p.key === "string" ? p.key : "");
   const baseUrl = assertLyricsChatBaseUrlInput(typeof p.baseUrl === "string" ? p.baseUrl : "");
   const model = assertLyricsChatModelInput(typeof p.model === "string" ? p.model : "");
@@ -732,7 +885,33 @@ ipcMain.handle("iptv-lyrics-chat-translate-save-credentials", async (_evt, raw) 
     } catch {
       /* missing */
     }
-    return { ok: true, hasKey: false, apiBasePreview: "", modelPreview: "" };
+    const active = getLyricsChatTranslateKeyStatusDetails();
+    const gemini = getGeminiKeyStatusDetails();
+    const base = getLyricsChatTranslateBaseUrlRaw();
+    const modelAfterClear = getLyricsChatTranslateModelRaw();
+    let apiBasePreviewAfterClear = "";
+    try {
+      if (base) {
+        apiBasePreviewAfterClear = new URL(base).host;
+      } else if (active.key) {
+        apiBasePreviewAfterClear = "api.deepseek.com (default)";
+      }
+    } catch {
+      apiBasePreviewAfterClear = "(invalid saved URL)";
+    }
+    return {
+      ok: true,
+      hasKey: !!active.key,
+      keyPreview: active.keyPreview,
+      keySource: active.keySource,
+      hasSongMeaningKey: !!active.key || !!gemini.key,
+      hasGeminiKey: !!gemini.key,
+      geminiKeyPreview: gemini.keyPreview,
+      geminiKeySource: gemini.keySource,
+      geminiModelPreview: previewGeminiModel(!!gemini.key),
+      apiBasePreview: apiBasePreviewAfterClear,
+      modelPreview: active.key ? modelAfterClear || "deepseek-chat (default)" : "",
+    };
   }
   fs.writeFileSync(keyPath, key, "utf8");
   if (baseUrl) {
@@ -753,7 +932,8 @@ ipcMain.handle("iptv-lyrics-chat-translate-save-credentials", async (_evt, raw) 
       /* missing */
     }
   }
-  const hasKey = true;
+  const active = getLyricsChatTranslateKeyStatusDetails();
+  const gemini = getGeminiKeyStatusDetails();
   let apiBasePreview = "";
   try {
     const u = new URL(baseUrl || "https://api.deepseek.com");
@@ -763,7 +943,14 @@ ipcMain.handle("iptv-lyrics-chat-translate-save-credentials", async (_evt, raw) 
   }
   return {
     ok: true,
-    hasKey,
+    hasKey: !!active.key,
+    keyPreview: active.keyPreview,
+    keySource: active.keySource,
+    hasSongMeaningKey: !!active.key || !!gemini.key,
+    hasGeminiKey: !!gemini.key,
+    geminiKeyPreview: gemini.keyPreview,
+    geminiKeySource: gemini.keySource,
+    geminiModelPreview: previewGeminiModel(!!gemini.key),
     apiBasePreview,
     modelPreview: model || "deepseek-chat (default)",
   };
@@ -845,30 +1032,11 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
   }
 });
 
-/** Google Gemini (Google AI / AI Studio API key): used for song-meaning when `GEMINI_API_KEY` etc. are set. */
-function getGeminiApiKeyFromEnv() {
-  return String(
-    process.env.GEMINI_API_KEY ??
-      process.env.GOOGLE_AI_API_KEY ??
-      process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
-      ""
-  ).trim();
-}
-
-function getGeminiModelRaw() {
-  const m = String(process.env.GEMINI_MODEL ?? process.env.GOOGLE_AI_MODEL ?? "").trim();
-  const core = (m || "gemini-2.5-flash").replace(/^models\//, "");
-  if (core.length > 96 || !/^[a-zA-Z0-9._-]+$/.test(core)) {
-    throw new Error("Invalid GEMINI_MODEL / GOOGLE_AI_MODEL.");
-  }
-  return core;
-}
-
 /**
  * @returns `{ text }` — throws on HTTP / empty model output
  */
-async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
-  const apiKey = getGeminiApiKeyFromEnv();
+async function postGeminiGenerateContent(systemPrompt, userPrompt, purpose, generationConfig = {}) {
+  const apiKey = getGeminiApiKey();
   if (!apiKey) {
     throw new Error("IPTV_GEMINI_NO_KEY");
   }
@@ -890,6 +1058,7 @@ async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
     generationConfig: {
       temperature: 0.35,
       maxOutputTokens: 1024,
+      ...generationConfig,
     },
   };
 
@@ -917,7 +1086,7 @@ async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
       data && typeof data === "object" && data.error && typeof data.error.message === "string"
         ? data.error.message
         : bodyText.slice(0, 240).replace(/\s+/g, " ");
-    throw new Error(`Gemini (song meaning): ${gm || `HTTP ${res.status}`} [model: ${modelId} @ generativelanguage.googleapis.com]`);
+    throw new Error(`Gemini (${purpose}): ${gm || `HTTP ${res.status}`} [model: ${modelId} @ generativelanguage.googleapis.com]`);
   }
 
   const cand = Array.isArray(data?.candidates) && data.candidates.length ? data.candidates[0] : null;
@@ -930,11 +1099,115 @@ async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
   const combined = texts.join("\n").trim();
   if (!combined) {
     throw new Error(
-      `Gemini (song meaning): empty or blocked response [model: ${modelId} @ generativelanguage.googleapis.com]`
+      `Gemini (${purpose}): empty or blocked response [model: ${modelId} @ generativelanguage.googleapis.com]`
     );
   }
   return stripLlmMarkdownFences(combined);
 }
+
+async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
+  return postGeminiGenerateContent(systemPrompt, userPrompt, "song meaning", {
+    temperature: 0.35,
+    maxOutputTokens: 1024,
+  });
+}
+
+ipcMain.handle("iptv-lyrics-gemini-unified-fetch", async (_evt, rawPayload) => {
+  const p = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const displayName = typeof p.displayName === "string" ? p.displayName.trim() : "";
+  if (!displayName || displayName.length > 400) {
+    throw new Error("Invalid display name for Gemini lyrics.");
+  }
+  const durationSec =
+    typeof p.durationSec === "number" && Number.isFinite(p.durationSec) && p.durationSec >= 0
+      ? Math.floor(p.durationSec)
+      : null;
+  const metaArtist = typeof p.metaArtist === "string" ? p.metaArtist.trim().slice(0, 200) : "";
+  const metaTitle = typeof p.metaTitle === "string" ? p.metaTitle.trim().slice(0, 200) : "";
+  const metaAlbum = typeof p.metaAlbum === "string" ? p.metaAlbum.trim().slice(0, 200) : "";
+  const system = [
+    "You help a music player show bilingual song lyrics and a short song meaning.",
+    "You must respond with ONLY a single JSON object (no markdown fences, no commentary before or after).",
+    'Success shape: {"ok":true,"detectedFranc3":"spa","lrclibTrack":"Artist — Title","headline":"short label","pairs":[{"orig":"line in original language","en":"English line"},...],"meaning":"2-4 short English paragraphs explaining the song"}',
+    'Failure shape: {"ok":false,"message":"one short reason","pairs":[],"meaning":""}',
+    "detectedFranc3 must be ISO 639-3 (three lowercase letters) when you can infer language, else use \"und\".",
+    "pairs: each object needs \"orig\" and \"en\" strings; same number of logical lines; no empty orig.",
+    "If you are not confident you have the correct official lyrics, set ok:false.",
+    "Do not exceed 120 pairs. No LRC timestamps in strings. Do not quote or invent full extra lyrics in meaning.",
+  ].join(" ");
+  const user = [
+    `Library display name: ${displayName}`,
+    `Artist from file tags (ID3 / FLAC Vorbis / MP4): ${metaArtist || "unknown"}`,
+    `Title from file tags: ${metaTitle || "unknown"}`,
+    metaAlbum ? `Album from file tags: ${metaAlbum}` : "",
+    `Approximate duration (seconds): ${durationSec != null ? String(durationSec) : "unknown"}`,
+    "",
+    "Use ONLY the tagged artist and title above to identify the song (do not invent a different artist or track from the filename alone).",
+    "Find the best-matching official lyrics, translate each line to English, and include a concise explanation of what the song is about.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const purpose = "lyrics find + translate + meaning (Google Gemini)";
+  try {
+    const rawText = await postGeminiGenerateContent(system, user, purpose, {
+      temperature: 0.2,
+      maxOutputTokens: 8192,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          ok: { type: "BOOLEAN" },
+          detectedFranc3: { type: "STRING" },
+          lrclibTrack: { type: "STRING" },
+          headline: { type: "STRING" },
+          pairs: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                orig: { type: "STRING" },
+                en: { type: "STRING" },
+              },
+              required: ["orig", "en"],
+            },
+          },
+          meaning: { type: "STRING" },
+          message: { type: "STRING" },
+        },
+        required: ["ok", "pairs"],
+      },
+    });
+    const parsed = parseGeminiLyricsMeaningJsonText(rawText, displayName);
+    const model = getGeminiModelRaw();
+    return {
+      ...parsed,
+      llmPurpose: "lyrics find + translate (Google Gemini)",
+      llmModel: model,
+      llmHost: "generativelanguage.googleapis.com",
+      songMeaningLlmPurpose: "song meaning (Google Gemini)",
+      songMeaningLlmModel: model,
+      songMeaningLlmHost: "generativelanguage.googleapis.com",
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("IPTV_GEMINI_NO_KEY")) throw e;
+    return {
+      ok: false,
+      error: msg.slice(0, 440),
+      pairs: [],
+      detectedFranc3: "und",
+      headline: "",
+      lrclibTrack: "",
+      meaning: "",
+      llmPurpose: "lyrics find + translate (Google Gemini)",
+      llmModel: previewGeminiModel(true),
+      llmHost: "generativelanguage.googleapis.com",
+      songMeaningLlmPurpose: "song meaning (Google Gemini)",
+      songMeaningLlmModel: previewGeminiModel(true),
+      songMeaningLlmHost: "generativelanguage.googleapis.com",
+    };
+  }
+});
 
 ipcMain.handle("iptv-lyrics-song-meaning-fetch", async (_evt, rawPayload) => {
   const p = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
@@ -942,6 +1215,7 @@ ipcMain.handle("iptv-lyrics-song-meaning-fetch", async (_evt, rawPayload) => {
   const title = typeof p.title === "string" ? p.title.trim().slice(0, 200) : "";
   const album = typeof p.album === "string" ? p.album.trim().slice(0, 200) : "";
   const displayName = typeof p.displayName === "string" ? p.displayName.trim().slice(0, 400) : "";
+  const forceOpenAiCompatible = p.forceOpenAiCompatible === true;
   if (!title && !artist && !displayName) {
     return { ok: false, meaning: "", error: "No song title or artist to look up." };
   }
@@ -970,8 +1244,8 @@ ipcMain.handle("iptv-lyrics-song-meaning-fetch", async (_evt, rawPayload) => {
     .join("\n");
 
   const geminiPurpose = "song meaning (Google Gemini)";
-  const geminiKey = getGeminiApiKeyFromEnv();
-  if (geminiKey) {
+  const geminiKey = getGeminiApiKey();
+  if (geminiKey && !forceOpenAiCompatible) {
     try {
       let modelHost = "";
       try {
@@ -1200,6 +1474,10 @@ function isLikelyHlsRecordUrl(url) {
 
 const ALLOW_RECORD_TAP_TYPES = new Set([
   "video/mp2t",
+  "video/mp4",
+  "video/webm",
+  "video/ogg",
+  "video/quicktime",
   "audio/mpeg",
   "audio/aac",
   "audio/ogg",
@@ -1213,8 +1491,15 @@ function normalizeRecordTapMime(raw) {
 
 function normalizeRecordFilenameExt(raw) {
   const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  if (/^\.(mpeg|mp3|aac|ogg|opus|bin)$/.test(s)) return s;
+  if (/^\.(mp4|m4v|webm|ogv|mov|mpeg|mp3|aac|ogg|opus|bin)$/.test(s)) return s;
   return ".mpeg";
+}
+
+function normalizeRecordMode(raw, url, tapMime) {
+  const s = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (s === "hls" || s === "mpegts" || s === "raw") return s;
+  if (isLikelyHlsRecordUrl(url)) return "hls";
+  return tapMime === "video/mp2t" ? "mpegts" : "raw";
 }
 
 ipcMain.handle("iptv-get-stream-proxy-origins", () => streamProxyOriginsForIpc ?? []);
@@ -1223,7 +1508,8 @@ ipcMain.handle("iptv-pick-record-dir", async () => {
   const { dialog } = require("electron");
   const r = await dialog.showOpenDialog({
     properties: ["openDirectory", "createDirectory"],
-    title: "RJ IPTV and Online Radio Player — folder for recordings",
+    title: "Smart Media player — folder for recordings",
+    buttonLabel: "Save",
   });
   if (r.canceled || !r.filePaths?.[0]) return null;
   return r.filePaths[0];
@@ -1257,7 +1543,7 @@ ipcMain.handle("iptv-pick-local-audio-files", async () => {
       },
       { name: "All files", extensions: ["*"] },
     ],
-    title: "RJ IPTV — add MP3 or audiobook files",
+    title: "Smart Media player — add MP3 or audiobook files",
   });
   if (r.canceled || !r.filePaths?.length) return [];
   const out = [];
@@ -1340,7 +1626,7 @@ ipcMain.handle("iptv-pick-local-video-files", async () => {
       },
       { name: "All files", extensions: ["*"] },
     ],
-    title: "RJ IPTV — add local video files",
+    title: "Smart Media player — add local video files",
   });
   if (r.canceled || !r.filePaths?.length) return [];
   const fsp = fs.promises;
@@ -1539,8 +1825,148 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
   return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
 });
 
-function attachRecordingFanout(id, upstream, ws, filePath, tapMime) {
-  const handle = { upstream, ws, filePath, tapRes: null, tapMime: tapMime || "video/mp2t" };
+function createRecordingOutput(filePath, tapMime) {
+  if (tapMime !== "video/mp2t") {
+    const ws = fs.createWriteStream(filePath, { flags: "w", highWaterMark: 4 * 1024 * 1024 });
+    const done = new Promise((resolve, reject) => {
+      ws.once("finish", resolve);
+      ws.once("error", reject);
+    });
+    done.catch(() => {});
+    return { writable: ws, done, kind: "raw" };
+  }
+
+  const ffmpegPath = getBundledFfmpegPath();
+  if (!ffmpegPath) {
+    throw new Error("FFmpeg is required to save IPTV video recordings as MP4.");
+  }
+  const tmpPath = `${filePath}.recording.ts`;
+  const ws = fs.createWriteStream(tmpPath, { flags: "w", highWaterMark: 16 * 1024 * 1024 });
+  const done = new Promise((resolve, reject) => {
+    ws.once("error", reject);
+    ws.once("finish", () => {
+      runFfmpeg(ffmpegPath, [
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-fflags",
+        "+genpts",
+        "-i",
+        tmpPath,
+        "-map",
+        "0:v:0?",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-max_muxing_queue_size",
+        "2048",
+        "-movflags",
+        "+faststart",
+        filePath,
+      ])
+        .then(() => {
+          try {
+            fs.unlinkSync(tmpPath);
+          } catch {
+            /* noop */
+          }
+          resolve();
+        })
+        .catch(reject);
+    });
+  });
+  done.catch(() => {});
+  return { writable: ws, done, kind: "mp4", tmpPath };
+}
+
+function ffmpegHeaderLinesForUrl(url) {
+  const headers = streamRecordHeaders(url);
+  return Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\r\n");
+}
+
+function startFfmpegHlsRecording(id, url, filePath) {
+  const ffmpegPath = getBundledFfmpegPath();
+  if (!ffmpegPath) {
+    throw new Error("FFmpeg is required to record HLS (.m3u8) streams.");
+  }
+  const headerLines = ffmpegHeaderLinesForUrl(url);
+  const args = [
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-y",
+    "-headers",
+    headerLines,
+    "-i",
+    url,
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "copy",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-max_muxing_queue_size",
+    "2048",
+    "-movflags",
+    "+faststart",
+    filePath,
+  ];
+  const child = spawn(ffmpegPath, args, { windowsHide: process.platform === "win32" });
+  const stderrChunks = [];
+  child.stderr?.on("data", (d) => {
+    stderrChunks.push(d);
+    while (stderrChunks.length > 32) stderrChunks.shift();
+  });
+  const done = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      streamRecordings.delete(id);
+      if (code === 0 || code === 255 || signal === "SIGINT" || signal === "SIGTERM") {
+        resolve();
+        return;
+      }
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim().slice(-1200);
+      reject(new Error(stderr || `FFmpeg exited with code ${code ?? "unknown"}.`));
+    });
+  });
+  done.catch(() => {});
+  streamRecordings.set(id, {
+    child,
+    filePath,
+    done,
+    tapRes: null,
+    tapMime: "application/octet-stream",
+    tmpPath: null,
+    upstream: null,
+    ws: null,
+  });
+  return { ok: true, id, filePath, playbackUrl: null };
+}
+
+function attachRecordingFanout(id, upstream, recordOutput, filePath, tapMime) {
+  const ws = recordOutput.writable;
+  const handle = {
+    upstream,
+    ws,
+    filePath,
+    tapRes: null,
+    tapMime: tapMime || "video/mp2t",
+    done: recordOutput.done,
+    ffmpeg: recordOutput.child || null,
+    tmpPath: recordOutput.tmpPath || null,
+  };
   const bp = { fileOk: true, tapOk: true };
 
   const resumeIfReady = () => {
@@ -1570,7 +1996,7 @@ function attachRecordingFanout(id, upstream, ws, filePath, tapMime) {
     } else {
       bp.tapOk = true;
     }
-    if (!bp.fileOk || !bp.tapOk) upstream.pause();
+    if (!bp.tapOk || (!handle.tapRes && !bp.fileOk)) upstream.pause();
   });
 
   upstream.on("error", fail);
@@ -1610,12 +2036,26 @@ function teardownRecording(id, removeMap) {
   const h = streamRecordings.get(id);
   if (!h) return;
   try {
-    h.upstream.destroy();
+    h.upstream?.destroy();
   } catch {
     /* noop */
   }
   try {
-    h.ws.end();
+    h.ws?.end();
+  } catch {
+    /* noop */
+  }
+  try {
+    if (h.child && !h.child.killed) {
+      h.child.kill("SIGINT");
+      setTimeout(() => {
+        try {
+          if (!h.child.killed) h.child.kill("SIGTERM");
+        } catch {
+          /* noop */
+        }
+      }, 3500);
+    }
   } catch {
     /* noop */
   }
@@ -1634,56 +2074,497 @@ ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
   const outDir = typeof payload?.outDir === "string" ? payload.outDir.trim() : "";
   if (!outDir) throw new Error("No output folder.");
   const url = assertPlaylistUrlForMain(payload?.url);
-  if (isLikelyHlsRecordUrl(url)) {
-    throw new Error(
-      "HLS (.m3u8) cannot be saved as one raw .mpeg file from this app. Use a continuous TS-style URL or record with ffmpeg/VLC."
-    );
-  }
   const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const tapMime = normalizeRecordTapMime(payload?.tapContentType);
-  const filenameExt = normalizeRecordFilenameExt(payload?.filenameExt);
+  const recordMode = normalizeRecordMode(payload?.recordMode, url, tapMime);
+  const requestedFilenameExt = normalizeRecordFilenameExt(payload?.filenameExt);
+  const filenameExt = recordMode === "hls" || recordMode === "mpegts" ? ".mp4" : requestedFilenameExt;
   const d = new Date();
   const pad = (n, l = 2) => String(n).padStart(l, "0");
   const name = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}_${pad(d.getMilliseconds(), 3)}${filenameExt}`;
   const filePath = path.join(outDir, name);
-  const ws = fs.createWriteStream(filePath, { flags: "w", highWaterMark: 4 * 1024 * 1024 });
+  if (recordMode === "hls") {
+    return startFfmpegHlsRecording(id, url, filePath);
+  }
+  const recordOutput = createRecordingOutput(filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
   let res;
   try {
     res = await net.fetch(url, { headers: streamRecordHeaders(url) });
   } catch (e) {
-    ws.destroy();
+    recordOutput.writable.destroy();
     try {
       fs.unlinkSync(filePath);
+    } catch {
+      /* noop */
+    }
+    try {
+      if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
     } catch {
       /* noop */
     }
     throw new Error(e instanceof Error ? e.message : "Network error");
   }
   if (!res.ok) {
-    ws.destroy();
+    recordOutput.writable.destroy();
     try {
       fs.unlinkSync(filePath);
+    } catch {
+      /* noop */
+    }
+    try {
+      if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
     } catch {
       /* noop */
     }
     throw new Error(`HTTP ${res.status}`);
   }
   if (!res.body) {
-    ws.end();
+    recordOutput.writable.end();
     return { ok: true, id, filePath, playbackUrl: null };
   }
   const upstream = Readable.fromWeb(res.body);
-  attachRecordingFanout(id, upstream, ws, filePath, tapMime);
+  attachRecordingFanout(id, upstream, recordOutput, filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
   const playbackUrl =
-    rendererOrigin != null ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}` : null;
+    rendererOrigin != null && recordMode !== "mpegts"
+      ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}`
+      : null;
   return { ok: true, id, filePath, playbackUrl };
 });
 
 ipcMain.handle("iptv-stop-stream-record", async (_evt, id) => {
   const h = streamRecordings.get(id);
   if (!h) return { ok: true };
+  const done = h.done;
+  const filePath = h.filePath;
   teardownRecording(id, true);
-  return { ok: true, filePath: h.filePath };
+  if (done) {
+    await Promise.race([
+      done,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Recording is still finalizing. Try opening the folder in a moment.")), 120_000)
+      ),
+    ]);
+  }
+  return { ok: true, filePath };
+});
+
+const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_DTYPE = "q8";
+const KOKORO_VOICES = [
+  { id: "af_heart", name: "Heart", language: "en-US", gender: "female", accent: "American", grade: "A" },
+  { id: "af_bella", name: "Bella", language: "en-US", gender: "female", accent: "American", grade: "A-" },
+  { id: "af_nicole", name: "Nicole", language: "en-US", gender: "female", accent: "American", grade: "B-" },
+  { id: "af_sarah", name: "Sarah", language: "en-US", gender: "female", accent: "American", grade: "C+" },
+  { id: "am_michael", name: "Michael", language: "en-US", gender: "male", accent: "American", grade: "C+" },
+  { id: "am_fenrir", name: "Fenrir", language: "en-US", gender: "male", accent: "American", grade: "C+" },
+  { id: "am_puck", name: "Puck", language: "en-US", gender: "male", accent: "American", grade: "C+" },
+  { id: "bf_emma", name: "Emma", language: "en-GB", gender: "female", accent: "British", grade: "B-" },
+  { id: "bf_isabella", name: "Isabella", language: "en-GB", gender: "female", accent: "British", grade: "C" },
+  { id: "bm_george", name: "George", language: "en-GB", gender: "male", accent: "British", grade: "C" },
+  { id: "bm_fable", name: "Fable", language: "en-GB", gender: "male", accent: "British", grade: "C" },
+];
+const KOKORO_VOICE_IDS = new Set(KOKORO_VOICES.map((v) => v.id));
+const NEURAL_TTS_MAX_TEXT_CHARS = 640;
+const NEURAL_TTS_MAX_CACHE_BYTES = 256 * 1024 * 1024;
+const PIPER_VOICE_ID_PREFIX = "piper:";
+let kokoroTtsPromise = null;
+const neuralTtsInFlight = new Map();
+let neuralTtsQueue = Promise.resolve();
+let neuralTtsGeneration = 0;
+let neuralTtsCleanupPromise = null;
+let kokoroUnloadTimer = null;
+let piperRuntimeProbePromise = null;
+
+function neuralTtsCacheDir() {
+  return path.join(app.getPath("userData"), "neural-tts-cache");
+}
+
+function neuralTtsModelCacheDir() {
+  return path.join(app.getPath("userData"), "neural-tts-models");
+}
+
+function piperVoicePacksDir() {
+  return path.join(app.getPath("userData"), "voice-packs");
+}
+
+function normalizeNeuralTtsText(raw) {
+  return String(raw ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, NEURAL_TTS_MAX_TEXT_CHARS);
+}
+
+function neuralTtsCacheKey({ text, voice, speed, style, engine = "kokoro-js", model = KOKORO_MODEL_ID }) {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ engine, model, dtype: engine === "kokoro-js" ? KOKORO_DTYPE : "external", voice, speed, style, text }))
+    .digest("hex")
+    .slice(0, 48);
+}
+
+async function loadKokoroTts() {
+  if (kokoroUnloadTimer) {
+    clearTimeout(kokoroUnloadTimer);
+    kokoroUnloadTimer = null;
+  }
+  if (!kokoroTtsPromise) {
+    kokoroTtsPromise = (async () => {
+      process.env.OMP_NUM_THREADS ||= "1";
+      process.env.ORT_NUM_THREADS ||= "1";
+      const transformers = await import("@huggingface/transformers");
+      transformers.env.cacheDir = neuralTtsModelCacheDir();
+      transformers.env.allowLocalModels = true;
+      transformers.env.allowRemoteModels = true;
+      transformers.env.useFS = true;
+      transformers.env.useFSCache = true;
+      const { KokoroTTS } = await import("kokoro-js");
+      return KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
+        dtype: KOKORO_DTYPE,
+        device: "cpu",
+        session_options: {
+          interOpNumThreads: 1,
+          intraOpNumThreads: 1,
+          executionMode: "sequential",
+        },
+      });
+    })().catch((err) => {
+      kokoroTtsPromise = null;
+      throw err;
+    });
+  }
+  return kokoroTtsPromise;
+}
+
+function scheduleKokoroUnload(delayMs = 180_000) {
+  if (kokoroUnloadTimer) clearTimeout(kokoroUnloadTimer);
+  kokoroUnloadTimer = setTimeout(() => {
+    if (neuralTtsInFlight.size > 0) {
+      scheduleKokoroUnload(delayMs);
+      return;
+    }
+    kokoroTtsPromise = null;
+    kokoroUnloadTimer = null;
+    if (typeof global.gc === "function") {
+      try {
+        global.gc();
+      } catch {
+        /* gc is not normally exposed; ignore */
+      }
+    }
+  }, delayMs);
+}
+
+async function cleanupNeuralTtsCache() {
+  if (neuralTtsCleanupPromise) return neuralTtsCleanupPromise;
+  neuralTtsCleanupPromise = (async () => {
+    const dir = neuralTtsCacheDir();
+    let entries;
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".wav")) continue;
+      const fp = path.join(dir, entry.name);
+      try {
+        const st = await fs.promises.stat(fp);
+        files.push({ fp, size: st.size, mtimeMs: st.mtimeMs });
+      } catch {
+        /* ignore missing cache files */
+      }
+    }
+    let total = files.reduce((sum, file) => sum + file.size, 0);
+    if (total <= NEURAL_TTS_MAX_CACHE_BYTES) return;
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const file of files) {
+      if (total <= NEURAL_TTS_MAX_CACHE_BYTES * 0.8) break;
+      try {
+        await fs.promises.unlink(file.fp);
+        total -= file.size;
+      } catch {
+        /* best-effort cache cleanup */
+      }
+    }
+  })().finally(() => {
+    neuralTtsCleanupPromise = null;
+  });
+  return neuralTtsCleanupPromise;
+}
+
+function enqueueNeuralTtsWork(work) {
+  const run = neuralTtsQueue.catch(() => undefined).then(work);
+  neuralTtsQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function fileExists(fp) {
+  try {
+    await fs.promises.access(fp, fs.constants.F_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePiperExecutable() {
+  const envPath = String(process.env.PIPER_BINARY_PATH || "").trim();
+  const candidates = [
+    envPath,
+    process.resourcesPath ? path.join(process.resourcesPath, "piper", process.platform === "win32" ? "piper.exe" : "piper") : "",
+    path.join(__dirname, "piper", process.platform === "win32" ? "piper.exe" : "piper"),
+    path.join(process.cwd(), "piper", process.platform === "win32" ? "piper.exe" : "piper"),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (await fileExists(candidate)) return candidate;
+  }
+  return "piper";
+}
+
+function runProcessCapture(command, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const { stdin, timeoutMs, ...spawnOpts } = opts;
+    const child = spawn(command, args, { windowsHide: process.platform === "win32", ...spawnOpts });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let settled = false;
+    const timeout = Number(timeoutMs ?? 0);
+    const timer =
+      timeout > 0
+        ? setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            try {
+              child.kill("SIGTERM");
+            } catch {
+              /* noop */
+            }
+            reject(new Error(`${path.basename(command)} timed out.`));
+          }, timeout)
+        : null;
+    child.stdout?.on("data", (d) => stdoutChunks.push(d));
+    child.stderr?.on("data", (d) => stderrChunks.push(d));
+    child.once("error", (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      reject(err);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(stderr.trim() || stdout.trim() || `${path.basename(command)} exited with code ${code}.`));
+    });
+    if (stdin != null) {
+      child.stdin?.end(String(stdin));
+    }
+  });
+}
+
+async function hasPiperRuntime() {
+  if (piperRuntimeProbePromise) return piperRuntimeProbePromise;
+  piperRuntimeProbePromise = (async () => {
+    const exe = await resolvePiperExecutable();
+    await runProcessCapture(exe, ["--help"], { timeoutMs: 2500 });
+    return true;
+  })().catch(() => false);
+  return piperRuntimeProbePromise;
+}
+
+async function requirePiperRuntime() {
+  const exe = await resolvePiperExecutable();
+  try {
+    await runProcessCapture(exe, ["--help"], { timeoutMs: 2500 });
+    return exe;
+  } catch (err) {
+    throw new Error(
+      `Piper runtime is not available. Install Piper, add it to PATH, set PIPER_BINARY_PATH, or place the binary in the app's piper folder. ${err.message}`
+    );
+  }
+}
+
+async function listPiperVoicePacks({ requireRuntime = true } = {}) {
+  if (requireRuntime && !(await hasPiperRuntime())) return [];
+  let entries;
+  try {
+    entries = await fs.promises.readdir(piperVoicePacksDir(), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const packs = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(piperVoicePacksDir(), entry.name);
+    const manifestPath = path.join(dir, "manifest.json");
+    try {
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, "utf8"));
+      if (manifest?.engine !== "piper-vits") continue;
+      const modelPath = path.join(dir, "model.onnx");
+      const configPath = path.join(dir, "piper.onnx.json");
+      if (!(await fileExists(modelPath)) || !(await fileExists(configPath))) continue;
+      const packId = String(manifest.id || entry.name).replace(/[^a-zA-Z0-9._-]/g, "-");
+      packs.push({
+        id: `${PIPER_VOICE_ID_PREFIX}${packId}`,
+        name: String(manifest.displayName || entry.name),
+        language: String(manifest.language || "unknown"),
+        gender: String(manifest.gender || "unknown"),
+        accent: String(manifest.accent || "custom"),
+        grade: "custom",
+        engine: "piper-vits",
+        model: modelPath,
+        config: configPath,
+        packDir: dir,
+        recommendedSpeed:
+          typeof manifest.recommendedSpeed === "number" && Number.isFinite(manifest.recommendedSpeed)
+            ? manifest.recommendedSpeed
+            : undefined,
+      });
+    } catch {
+      /* ignore malformed packs */
+    }
+  }
+  return packs;
+}
+
+async function synthesizePiperTts({ voiceId, text, speed, style, requestGeneration, prefetch }) {
+  const packs = await listPiperVoicePacks({ requireRuntime: true });
+  const pack = packs.find((v) => v.id === voiceId);
+  if (!pack) throw new Error(`Piper voice pack not found. Put packs in ${piperVoicePacksDir()}.`);
+  const dir = neuralTtsCacheDir();
+  await fs.promises.mkdir(dir, { recursive: true });
+  const piperSpeed = Math.min(1.7, Math.max(0.45, speed));
+  const lengthScale = Math.min(2.2, Math.max(0.45, 1 / piperSpeed));
+  const key = neuralTtsCacheKey({ text, voice: voiceId, speed: piperSpeed, style, engine: "piper-vits", model: pack.model });
+  const outPath = path.join(dir, `${key}.wav`);
+  const inFlightKey = `${key}:${requestGeneration}`;
+  try {
+    const st = await fs.promises.stat(outPath);
+    if (st.isFile() && st.size > 44) {
+      return { ok: true, engine: "piper-vits", cached: true, path: outPath, url: pathToFileURL(outPath).toString(), durationMs: null };
+    }
+  } catch {
+    /* synthesize below */
+  }
+  if (prefetch && neuralTtsInFlight.size > 0) {
+    return { ok: false, skipped: true, reason: "busy" };
+  }
+  if (!neuralTtsInFlight.has(inFlightKey)) {
+    neuralTtsInFlight.set(
+      inFlightKey,
+      enqueueNeuralTtsWork(async () => {
+        if (requestGeneration !== neuralTtsGeneration) return { ok: false, canceled: true };
+        const exe = await requirePiperRuntime();
+        await runProcessCapture(
+          exe,
+          ["--model", pack.model, "--config", pack.config, "--length_scale", String(lengthScale), "--output_file", outPath],
+          { stdin: `${text}\n`, timeoutMs: 60_000 }
+        );
+        if (requestGeneration !== neuralTtsGeneration) return { ok: false, canceled: true };
+        void cleanupNeuralTtsCache();
+        return { ok: true, engine: "piper-vits", cached: false, path: outPath, url: pathToFileURL(outPath).toString(), durationMs: null };
+      }).finally(() => {
+        neuralTtsInFlight.delete(inFlightKey);
+      })
+    );
+  }
+  return await neuralTtsInFlight.get(inFlightKey);
+}
+
+ipcMain.handle("iptv-neural-tts-voices", async () => {
+  const piperVoices = await listPiperVoicePacks({ requireRuntime: true });
+  return {
+    ok: true,
+    engine: piperVoices.length ? "piper-vits+kokoro-js" : "kokoro-js",
+    model: KOKORO_MODEL_ID,
+    modelCacheDir: neuralTtsModelCacheDir(),
+    audioCacheDir: neuralTtsCacheDir(),
+    piperVoicePacksDir: piperVoicePacksDir(),
+    voices: [
+      ...piperVoices.map(({ model, config, packDir, recommendedSpeed, ...voice }) => voice),
+      ...KOKORO_VOICES.map((voice) => ({ ...voice, engine: "kokoro-js" })),
+    ],
+  };
+});
+
+ipcMain.handle("iptv-neural-tts-warmup", async () => {
+  await loadKokoroTts();
+  scheduleKokoroUnload(300_000);
+  return { ok: true, engine: "kokoro-js", model: KOKORO_MODEL_ID };
+});
+
+ipcMain.handle("iptv-neural-tts-cancel", async () => {
+  neuralTtsGeneration += 1;
+  scheduleKokoroUnload(45_000);
+  return { ok: true };
+});
+
+ipcMain.handle("iptv-neural-tts-synthesize", async (_evt, rawPayload) => {
+  const p = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const text = normalizeNeuralTtsText(p.text);
+  if (!text) throw new Error("No text to synthesize.");
+  const rawVoice = typeof p.voice === "string" ? p.voice : "";
+  const speedRaw = Number(p.speed);
+  const speed = Number.isFinite(speedRaw) ? Math.min(1.35, Math.max(0.65, speedRaw)) : 1;
+  const style = typeof p.style === "string" ? p.style.slice(0, 40) : "warm";
+  const prefetch = p.prefetch === true;
+  const requestGeneration = neuralTtsGeneration;
+  if (rawVoice.startsWith(PIPER_VOICE_ID_PREFIX)) {
+    return await synthesizePiperTts({ voiceId: rawVoice, text, speed, style, requestGeneration, prefetch });
+  }
+  const voice = KOKORO_VOICE_IDS.has(rawVoice) ? rawVoice : "af_heart";
+  const dir = neuralTtsCacheDir();
+  await fs.promises.mkdir(dir, { recursive: true });
+  const key = neuralTtsCacheKey({ text, voice, speed, style });
+  const outPath = path.join(dir, `${key}.wav`);
+  const inFlightKey = `${key}:${requestGeneration}`;
+  try {
+    const st = await fs.promises.stat(outPath);
+    if (st.isFile() && st.size > 44) {
+      return { ok: true, engine: "kokoro-js", cached: true, path: outPath, url: pathToFileURL(outPath).toString(), durationMs: null };
+    }
+  } catch {
+    /* synthesize below */
+  }
+  if (prefetch && neuralTtsInFlight.size > 0) {
+    return { ok: false, skipped: true, reason: "busy" };
+  }
+  if (!neuralTtsInFlight.has(inFlightKey)) {
+    neuralTtsInFlight.set(
+      inFlightKey,
+      enqueueNeuralTtsWork(async () => {
+        if (requestGeneration !== neuralTtsGeneration) {
+          return { ok: false, canceled: true };
+        }
+        const tts = await loadKokoroTts();
+        const audio = await tts.generate(text, { voice, speed });
+        if (requestGeneration !== neuralTtsGeneration) {
+          return { ok: false, canceled: true };
+        }
+        await audio.save(outPath);
+        void cleanupNeuralTtsCache();
+        scheduleKokoroUnload();
+        const samples = Number(audio.audio?.length ?? 0);
+        const sampleRate = Number(audio.sampling_rate ?? 0);
+        const durationMs = samples > 0 && sampleRate > 0 ? Math.round((samples / sampleRate) * 1000) : null;
+        return {
+          ok: true,
+          engine: "kokoro-js",
+          cached: false,
+          path: outPath,
+          url: pathToFileURL(outPath).toString(),
+          durationMs,
+        };
+      }).finally(() => {
+        neuralTtsInFlight.delete(inFlightKey);
+      })
+    );
+  }
+  return await neuralTtsInFlight.get(inFlightKey);
 });
 
 /** Reveal the recorded file in Finder / File Explorer / file manager. */
@@ -2283,7 +3164,7 @@ async function createWindow() {
   if (!fs.existsSync(path.join(root, "index.html"))) {
     const { dialog } = require("electron");
     dialog.showErrorBox(
-      "RJ IPTV and Online Radio Player",
+      "Smart Media player",
       "Built UI not found (missing dist/index.html). Run npm run build first, then rebuild the desktop app."
     );
     app.quit();
@@ -2309,7 +3190,7 @@ async function createWindow() {
     y: wb.y,
     minWidth: 900,
     minHeight: 600,
-    title: "RJ IPTV and Online Radio Player",
+    title: "Smart Media player",
     fullscreenable: true,
     webPreferences: {
       preload: preloadPath,

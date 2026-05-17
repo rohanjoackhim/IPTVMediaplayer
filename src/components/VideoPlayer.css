@@ -7,6 +7,35 @@
   background: #000;
 }
 
+.player-root--split {
+  overflow: hidden;
+}
+
+.player-below-video {
+  flex-shrink: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.player-below-video--hidden {
+  display: none;
+}
+
+/* Cap bottom chrome so both split panes reserve the same vertical band for video (local vs IPTV chrome differs). */
+.player-below-video--split {
+  max-height: min(44vh, 520px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex-shrink: 0;
+}
+
+.player-root--split .player-top {
+  flex: 1 1 0%;
+  min-height: 0;
+}
+
 .player-top {
   flex: 1;
   min-height: 0;
@@ -142,6 +171,572 @@
   background: #000;
 }
 
+.video-el--hidden {
+  display: none;
+}
+
+.web-video-embed {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+}
+
+.screen-off-panel {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text);
+  background:
+    radial-gradient(circle at center, rgba(155, 240, 11, 0.08), transparent 34%),
+    #000;
+}
+
+.screen-off-title {
+  font-size: clamp(1.25rem, 2vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.screen-off-subtitle {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.ebook-player {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 18% 0%, rgba(155, 240, 11, 0.14), transparent 34%),
+    radial-gradient(circle at 92% 14%, rgba(59, 130, 246, 0.1), transparent 32%),
+    linear-gradient(135deg, #05070a 0%, #10151f 44%, #040506 100%);
+}
+
+.ebook-player:fullscreen {
+  padding: clamp(6px, 1vw, 16px);
+  background:
+    radial-gradient(circle at 18% 0%, rgba(155, 240, 11, 0.16), transparent 34%),
+    radial-gradient(circle at 92% 14%, rgba(59, 130, 246, 0.12), transparent 32%),
+    linear-gradient(135deg, #030406 0%, #0d121b 44%, #020303 100%);
+}
+
+.ebook-player:fullscreen .ebook-player-page {
+  width: 100%;
+  height: 100%;
+}
+
+.ebook-player-page {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)),
+    rgba(10, 13, 18, 0.92);
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.ebook-player-header {
+  flex-shrink: 0;
+  padding: clamp(10px, 1.6vw, 18px) clamp(14px, 2.4vw, 28px) 10px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ebook-player-header-main {
+  min-width: 0;
+}
+
+.ebook-fullscreen-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--accent-border);
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: var(--accent-muted);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.ebook-fullscreen-btn:hover {
+  background: rgba(155, 240, 11, 0.18);
+}
+
+.ebook-player-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--accent-hover);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ebook-player-title {
+  margin: 0;
+  max-width: 36ch;
+  font-size: clamp(1.05rem, 1.7vw, 1.8rem);
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+}
+
+.ebook-player-meta {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: clamp(0.78rem, 1vw, 0.92rem);
+}
+
+.ebook-player-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(132px, 190px) minmax(0, 1fr);
+}
+
+.ebook-reader-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ebook-page-browser {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.ebook-page-browser-title {
+  flex-shrink: 0;
+  padding: 14px 14px 10px;
+  color: var(--accent-hover);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ebook-page-browser-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 8px 12px;
+  scrollbar-color: rgba(155, 240, 11, 0.35) transparent;
+}
+
+.ebook-page-browser-item {
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ebook-page-browser-item:hover {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.ebook-page-browser-item--current {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+}
+
+.ebook-page-browser-num {
+  color: var(--accent-hover);
+  font-size: 0.72rem;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.ebook-page-browser-preview {
+  min-width: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ebook-player-text {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: clamp(16px, 2.6vw, 30px) clamp(18px, 3vw, 44px) clamp(20px, 3vw, 38px);
+  color: rgba(235, 241, 234, 0.9);
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  font-size: clamp(1.08rem, 1.48vw, 1.42rem);
+  line-height: 1.78;
+  letter-spacing: 0.005em;
+  scrollbar-color: rgba(155, 240, 11, 0.45) rgba(255, 255, 255, 0.08);
+}
+
+.ebook-real-reader {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(132px, 190px) minmax(0, 1fr);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.ebook-real-sidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ebook-real-thumb-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 10px 14px;
+}
+
+.ebook-real-thumb {
+  width: 100%;
+  min-height: 66px;
+  margin: 0 0 7px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.035)),
+    rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ebook-real-thumb:hover,
+.ebook-real-thumb--current {
+  border-color: var(--accent-border);
+  color: var(--text);
+  background: var(--accent-muted);
+}
+
+.ebook-real-thumb-page {
+  color: var(--accent-hover);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+.ebook-real-thumb-lines {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ebook-real-main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ebook-real-toolbar {
+  flex-shrink: 0;
+  padding: 7px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.ebook-real-toolbar--top {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  background: rgba(9, 12, 17, 0.96);
+  backdrop-filter: blur(10px);
+}
+
+.ebook-real-toolbar button {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ebook-real-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ebook-real-status {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  color: var(--accent-hover);
+  background: rgba(155, 240, 11, 0.08);
+  font-size: 0.78rem;
+}
+
+.ebook-pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: start center;
+  padding: clamp(8px, 1.6vw, 20px);
+}
+
+.ebook-pdf-page {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+}
+
+.ebook-pdf-canvas {
+  display: block;
+  max-width: none;
+}
+
+.ebook-pdf-text-layer {
+  position: absolute;
+  inset: 0;
+}
+
+.ebook-pdf-text-span {
+  position: absolute;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 2px;
+  background: transparent;
+  color: transparent;
+  font-family: sans-serif;
+  line-height: 1;
+  text-align: left;
+  white-space: pre;
+  cursor: text;
+}
+
+.ebook-pdf-text-span:hover {
+  background: rgba(155, 240, 11, 0.18);
+}
+
+.ebook-pdf-text-span--highlight {
+  background: rgba(216, 255, 122, 0.5);
+  box-shadow: 0 0 0 2px rgba(155, 240, 11, 0.28);
+}
+
+.ebook-epub-page {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: clamp(8px, 1.5vw, 18px);
+  padding: clamp(18px, 3vw, 42px);
+  border-radius: 14px;
+  background: #faf7ef;
+  color: #181510;
+  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  font-size: clamp(1rem, 1.3vw, 1.28rem);
+  line-height: 1.7;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+}
+
+.ebook-epub-page img,
+.ebook-epub-page svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.ebook-epub-media {
+  margin: 0 0 1.4rem;
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+}
+
+.ebook-epub-sync-text {
+  margin: 0;
+}
+
+.ebook-epub-page a {
+  color: #315d00;
+}
+
+.ebook-epub-word {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0.18em;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.ebook-epub-word:hover {
+  color: #315d00;
+  background: rgba(155, 240, 11, 0.18);
+}
+
+.ebook-epub-word--highlight {
+  padding: 0.02em 0.12em 0.06em;
+  color: #071005;
+  background: linear-gradient(180deg, #eaffad, #b8f34a);
+  box-shadow:
+    0 0 0 0.12em rgba(87, 128, 0, 0.18),
+    0 0.24em 0.9em rgba(87, 128, 0, 0.24);
+}
+
+@media (max-width: 900px) {
+  .ebook-player-body {
+    grid-template-columns: 1fr;
+  }
+
+  .ebook-real-reader {
+    grid-template-columns: 1fr;
+  }
+
+  .ebook-real-sidebar {
+    max-height: 150px;
+    border-right: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .ebook-real-thumb-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .ebook-real-thumb {
+    width: 190px;
+    flex: 0 0 190px;
+  }
+
+  .ebook-page-browser {
+    max-height: 136px;
+    border-right: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .ebook-page-browser-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 10px 10px;
+  }
+
+  .ebook-page-browser-item {
+    width: 190px;
+    flex: 0 0 190px;
+  }
+}
+
+.ebook-player-section {
+  max-width: 68ch;
+  margin: 0 auto 2.1em;
+  padding-left: clamp(12px, 2vw, 24px);
+  border-left: 2px solid rgba(255, 255, 255, 0.08);
+}
+
+.ebook-player-section--start {
+  border-left-color: var(--accent);
+}
+
+.ebook-player-section-label {
+  display: block;
+  margin: 0 0 0.65rem;
+  color: var(--text-muted);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ebook-player-paragraph {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+.ebook-player-word-btn {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.ebook-player-word-btn:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.14em;
+}
+
+.ebook-player-word-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 0.18em;
+}
+
+.ebook-player-word {
+  padding: 0.02em 0.12em 0.06em;
+  border-radius: 0.22em;
+  color: #071005;
+  background: linear-gradient(180deg, #d8ff7a, var(--accent));
+  box-shadow:
+    0 0 0 0.12em rgba(155, 240, 11, 0.16),
+    0 0.24em 0.9em rgba(155, 240, 11, 0.22);
+}
+
 /* Chromium / Electron: native controls’ buffering ring can keep animating while paused; hide that shadow panel. */
 .video-el::-webkit-media-controls-loading-panel {
   display: none !important;
@@ -268,6 +863,9 @@
 
 .now-row-actions {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .rec-btn {
@@ -308,6 +906,38 @@
   background: linear-gradient(180deg, #7f1d1d 0%, #450a0a 100%);
   border-color: rgba(127, 29, 29, 0.9);
   animation: rj-rec-pulse 1.4s ease-in-out infinite;
+}
+
+.screen-off-btn {
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.screen-off-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--bg-elevated);
+}
+
+.screen-off-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.screen-off-btn--on {
+  color: var(--accent-hover);
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 @keyframes rj-rec-pulse {
@@ -855,7 +1485,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.record-path--compact,
 .record-err--compact {
   font-size: 0.6875rem;
 }
@@ -876,8 +1505,11 @@
 
 .record-path {
   font-size: 0.75rem;
-  color: var(--accent-hover);
+  color: var(--text-muted);
   word-break: break-all;
+  max-height: 2.4em;
+  overflow: hidden;
+  line-height: 1.35;
 }
 
 button.record-path--link {
@@ -988,21 +1620,17 @@ button.record-path--link:focus-visible {
   gap: 8px;
 }
 
-.mp3-lyrics-panel:fullscreen .mp3-lyrics-track-title,
-.mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-track-title {
-  font-size: clamp(1.05rem, 3.5vmin, 1.95rem);
-}
-
-.mp3-lyrics-panel:fullscreen .mp3-lyrics-track-artist,
-.mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-track-artist {
-  font-size: clamp(0.78rem, 2.2vmin, 1rem);
+.mp3-lyrics-panel:fullscreen .mp3-lyrics-track-line,
+.mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-track-line {
+  font-size: clamp(1rem, 2.9vmin, 1.32rem);
+  line-height: 1.32;
 }
 
 .mp3-lyrics-panel:fullscreen .mp3-lyrics-body,
 .mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-body {
-  font-size: clamp(0.95rem, 2.5vmin, 1.28rem);
-  line-height: 1.52;
-  padding: max(12px, 3vmin) max(14px, 4vmin) max(18px, 5vmin);
+  font-size: clamp(1.08rem, 2.65vmin, 1.42rem);
+  line-height: 1.62;
+  padding: max(16px, 3.2vmin) max(18px, 4.4vmin) max(22px, 5.2vmin);
 }
 
 .mp3-lyrics-panel-head {
@@ -1053,48 +1681,26 @@ button.record-path--link:focus-visible {
   text-align: center;
 }
 
-.mp3-lyrics-track-artist {
-  margin: 0 0 4px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--accent-hover);
-  line-height: 1.3;
-}
-
-.mp3-lyrics-track-title {
+.mp3-lyrics-track-line {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: clamp(0.98rem, 1.25vw, 1.16rem);
   font-weight: 800;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
   color: var(--text);
-  line-height: 1.25;
-}
-
-.mp3-lyrics-track-album {
-  margin: 6px 0 0;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  line-height: 1.3;
-}
-
-.mp3-lyrics-track-source {
-  margin: 6px 0 0;
-  font-size: 0.625rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  opacity: 0.85;
+  line-height: 1.32;
+  word-break: break-word;
 }
 
 .mp3-lyrics-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 8px 12px 12px;
-  font-size: 0.84rem;
-  line-height: 1.5;
+  padding: 14px 16px 18px;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: clamp(1rem, 1.18vw, 1.18rem);
+  line-height: 1.62;
+  letter-spacing: -0.012em;
+  scrollbar-color: rgba(155, 240, 11, 0.42) rgba(255, 255, 255, 0.08);
 }
 
 .mp3-lyrics-empty {
@@ -1104,29 +1710,32 @@ button.record-path--link:focus-visible {
 }
 
 .mp3-lyrics-stanza {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 
 .mp3-lyrics-line {
-  margin: 0;
+  margin: 0 0 0.18rem;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .mp3-lyrics-line--single {
-  color: rgba(235, 240, 250, 0.92);
+  color: rgba(244, 248, 255, 0.96);
+  font-weight: 650;
 }
 
 .mp3-lyrics-line--orig {
-  color: rgba(200, 210, 230, 0.95);
+  color: rgba(244, 248, 255, 0.96);
+  font-weight: 700;
 }
 
 .mp3-lyrics-line--en {
-  color: rgba(150, 200, 255, 0.95);
-  padding-left: 2px;
-  border-left: 2px solid rgba(96, 165, 250, 0.45);
-  margin-top: 2px;
-  padding-top: 2px;
+  color: rgba(174, 215, 255, 0.95);
+  padding-left: 10px;
+  border-left: 3px solid rgba(96, 165, 250, 0.5);
+  margin-top: 4px;
+  padding-top: 1px;
+  font-size: 0.94em;
 }
 
 .mp3-lyrics-meaning {
@@ -1166,8 +1775,8 @@ button.record-path--link:focus-visible {
 
 .mp3-lyrics-meaning-body {
   margin: 0;
-  font-size: 0.82rem;
-  line-height: 1.45;
+  font-size: 0.94rem;
+  line-height: 1.58;
   color: rgba(230, 235, 245, 0.92);
   white-space: pre-wrap;
 }

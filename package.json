@@ -2,7 +2,7 @@
   "name": "iptv-player",
   "private": true,
   "version": "1.0.0",
-  "description": "RJ IPTV and Online Radio Player — M3U / IPTV channels and Radio Browser streams for web, Windows, and macOS (Electron).",
+  "description": "Smart Media player — IPTV, radio, local media, ebooks, and recordings for web, Windows, and macOS (Electron).",
   "author": "Cyberlink",
   "type": "module",
   "main": "electron/main.cjs",
@@ -23,9 +23,13 @@
     "ffmpeg-static": "^5.2.0",
     "franc-min": "^6.2.0",
     "hls.js": "^1.5.7",
+    "jszip": "^3.10.1",
+    "kokoro-js": "^1.2.1",
     "mpegts.js": "^1.8.0",
+    "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
@@ -40,7 +44,7 @@
   },
   "build": {
     "appId": "com.cyberlink.iptvplayer",
-    "productName": "RJ IPTV and Online Radio Player",
+    "productName": "Smart Media player",
     "copyright": "Copyright © contributors",
     "directories": {
       "output": "release"
@@ -50,11 +54,27 @@
       "electron/main.cjs",
       "electron/preload.cjs",
       "package.json",
-      "node_modules/ffmpeg-static/**/*"
+      "node_modules/ffmpeg-static/**/*",
+      "node_modules/kokoro-js/**/*",
+      "node_modules/@huggingface/**/*",
+      "node_modules/phonemizer/**/*",
+      "node_modules/onnxruntime-common/**/*",
+      "node_modules/onnxruntime-node/**/*",
+      "node_modules/onnxruntime-web/**/*",
+      "node_modules/sharp/**/*",
+      "node_modules/@img/**/*",
+      "node_modules/detect-libc/**/*",
+      "node_modules/semver/**/*",
+      "piper/**/*"
     ],
     "asar": true,
     "asarUnpack": [
-      "node_modules/ffmpeg-static/**"
+      "node_modules/ffmpeg-static/**",
+      "node_modules/onnxruntime-node/**",
+      "node_modules/onnxruntime-web/**",
+      "node_modules/sharp/**",
+      "node_modules/@img/**",
+      "piper/**"
     ],
     "win": {
       "target": [

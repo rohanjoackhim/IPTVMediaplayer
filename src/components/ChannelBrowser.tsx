@@ -64,6 +64,86 @@ function channelsFromBrowserVideoFiles(list: FileList | null): Channel[] {
   return out;
 }
 
+function youtubeVideoIdFromUrl(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    const host = u.hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "youtu.be") {
+      const id = u.pathname.split("/").filter(Boolean)[0] ?? "";
+      return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+    }
+    if (host === "youtube.com" || host === "m.youtube.com" || host === "music.youtube.com") {
+      const v = u.searchParams.get("v") ?? "";
+      if (/^[A-Za-z0-9_-]{11}$/.test(v)) return v;
+      const parts = u.pathname.split("/").filter(Boolean);
+      const embedIdx = parts.findIndex((p) => p === "embed" || p === "shorts" || p === "live");
+      const id = embedIdx >= 0 ? parts[embedIdx + 1] ?? "" : "";
+      return /^[A-Za-z0-9_-]{11}$/.test(id) ? id : null;
+    }
+  } catch {
+    /* invalid URL */
+  }
+  return null;
+}
+
+function isLikelyDirectPlayableVideoUrl(raw: string): boolean {
+  const s = raw.trim().toLowerCase();
+  return /\.(m3u8|mp4|m4v|webm|ogv|mov|mpeg|mpg|mpe|mpv|m1v|m2v|m2ts|mts|ts)(\?|#|$)/i.test(s);
+}
+
+function webVideoNameFromUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.replace(/^www\./i, "");
+    const pathName = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() ?? "")
+      .replace(/\.[^/.]+$/, "")
+      .replace(/[-_]+/g, " ")
+      .trim();
+    return pathName ? `${host} - ${pathName}` : host || "Web video";
+  } catch {
+    return "Web video";
+  }
+}
+
+function webVideoChannelFromUrl(raw: string): Channel | null {
+  const trimmed = raw.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return null;
+  const id = youtubeVideoIdFromUrl(raw);
+  if (!id && !isLikelyDirectPlayableVideoUrl(trimmed)) {
+    try {
+      new URL(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  if (!id && isLikelyDirectPlayableVideoUrl(trimmed)) {
+    return {
+      id: `web-video-direct-${crypto.randomUUID()}`,
+      name: webVideoNameFromUrl(trimmed),
+      url: trimmed,
+      group: "Web video",
+    };
+  }
+  if (!id) {
+    return {
+      id: `web-video-page-${crypto.randomUUID()}`,
+      name: webVideoNameFromUrl(trimmed),
+      url: trimmed,
+      group: "Web video",
+      webVideoPageUrl: trimmed,
+    };
+  }
+  return {
+    id: `youtube-${id}-${crypto.randomUUID()}`,
+    name: `YouTube ${id}`,
+    url: trimmed,
+    group: "Web video",
+    youtubeVideoId: id,
+  };
+}
+
 function formatVideoResume(sec: number): string {
   const s = Math.floor(sec % 60);
   const m = Math.floor((sec / 60) % 60);
@@ -84,7 +164,6 @@ function useGroups(channels: Channel[]) {
 
 export interface ChannelBrowserProps {
   channels: Channel[];
-  channelCount: number;
   activeLeftId: string | null;
   activeRightId: string | null;
   splitView: boolean;
@@ -92,6 +171,8 @@ export interface ChannelBrowserProps {
   assignTarget: AssignPanePersisted;
   onAssignTargetChange: (t: AssignPanePersisted) => void;
   onSelectChannel: (c: Channel) => void;
+  onResetTelevisionStream: () => void;
+  resetTelevisionStreamDisabled: boolean;
   onLoadM3U: (text: string, replace: boolean) => void;
   onClearList: () => void;
   /** Television: append channels for disk / browser-picked video files (split view with IPTV). */
@@ -106,6 +187,8 @@ export interface ChannelBrowserProps {
   audioLibraryContinuous: boolean;
   onAudioLibraryShuffleChange: (v: boolean) => void;
   onAudioLibraryContinuousChange: (v: boolean) => void;
+  sidebarMode: SidebarModePersisted;
+  onSidebarModeChange: (mode: SidebarModePersisted) => void;
   /** Sidebar IndexedDB library tracks in list order (blob URLs) for auto-advance / shuffle. */
   onIndexedLibraryChannelsChange?: (channels: Channel[]) => void;
 }
@@ -114,7 +197,6 @@ type ListTab = ListTabPersisted;
 
 function ChannelBrowserInner({
   channels,
-  channelCount,
   activeLeftId,
   activeRightId,
   splitView,
@@ -122,6 +204,8 @@ function ChannelBrowserInner({
   assignTarget,
   onAssignTargetChange,
   onSelectChannel,
+  onResetTelevisionStream,
+  resetTelevisionStreamDisabled,
   onLoadM3U,
   onClearList,
   onAddLocalVideoChannels,
@@ -133,14 +217,16 @@ function ChannelBrowserInner({
   audioLibraryContinuous,
   onAudioLibraryShuffleChange,
   onAudioLibraryContinuousChange,
+  sidebarMode,
+  onSidebarModeChange,
   onIndexedLibraryChannelsChange,
 }: ChannelBrowserProps) {
   const [playlistUrl, setPlaylistUrl] = useState(() => loadLastPlaylistUrl());
+  const [webVideoUrl, setWebVideoUrl] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
   const [query, setQuery] = useState(() => loadUiSession().query);
   const [group, setGroup] = useState(() => loadUiSession().group);
   const [listTab, setListTab] = useState<ListTab>(() => loadUiSession().listTab);
-  const [sidebarMode, setSidebarMode] = useState<SidebarModePersisted>(() => loadUiSession().sidebarMode);
   const [radioCountry, setRadioCountry] = useState(() => loadUiSession().radioCountry);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -276,6 +362,22 @@ function ChannelBrowserInner({
     }
   };
 
+  const addWebVideoUrl = () => {
+    const row = webVideoChannelFromUrl(webVideoUrl);
+    if (!row) {
+      onPlaylistMessage("Enter a valid http(s) video URL or website page that contains video.");
+      return;
+    }
+    onAddLocalVideoChannels([row]);
+    setWebVideoUrl("");
+    setListTab("all");
+    onPlaylistMessage(
+      row.webVideoPageUrl
+        ? "Added web video page to Television. Some websites block embedded playback."
+        : "Added web video to Television."
+    );
+  };
+
   const favCount = favoriteUrls.size;
 
   const favoritesInLibrary = useMemo(
@@ -287,7 +389,7 @@ function ChannelBrowserInner({
     <div className="browser-root">
       <header className="browser-header">
         <div className="browser-header-row">
-          <h1 className="browser-title">RJ IPTV and Online Radio Player</h1>
+          <h1 className="browser-title">Smart Media player</h1>
         </div>
         <div className="source-tabs" role="tablist" aria-label="Library">
           <button
@@ -295,7 +397,7 @@ function ChannelBrowserInner({
             role="tab"
             aria-selected={sidebarMode === "tv"}
             className={`source-tab${sidebarMode === "tv" ? " active" : ""}`}
-            onClick={() => setSidebarMode("tv")}
+            onClick={() => onSidebarModeChange("tv")}
           >
             <span className="source-tab-glyph" aria-hidden>
               📺
@@ -307,7 +409,7 @@ function ChannelBrowserInner({
             role="tab"
             aria-selected={sidebarMode === "radio"}
             className={`source-tab${sidebarMode === "radio" ? " active" : ""}`}
-            onClick={() => setSidebarMode("radio")}
+            onClick={() => onSidebarModeChange("radio")}
           >
             <span className="source-tab-glyph" aria-hidden>
               📻
@@ -319,7 +421,7 @@ function ChannelBrowserInner({
             role="tab"
             aria-selected={sidebarMode === "audio"}
             className={`source-tab${sidebarMode === "audio" ? " active" : ""}`}
-            onClick={() => setSidebarMode("audio")}
+            onClick={() => onSidebarModeChange("audio")}
           >
             <span className="source-tab-glyph" aria-hidden>
               ♪
@@ -329,11 +431,6 @@ function ChannelBrowserInner({
         </div>
         {sidebarMode === "tv" ? (
           <>
-            <p className="browser-sub">
-              {channelCount} channels · {favCount} favorite{favCount === 1 ? "" : "s"} · {localVideosCount} local
-              video{localVideosCount === 1 ? "" : "s"} · list and resume positions saved in this browser · use the{" "}
-              <strong>Local videos</strong> tab to add files; split view plays IPTV and a file on different panes
-            </p>
             <div className="toolbar">
               <input
                 ref={fileRef}
@@ -351,6 +448,15 @@ function ChannelBrowserInner({
               </button>
               <button type="button" className="btn-ghost" onClick={onClearList}>
                 Clear list
+              </button>
+              <button
+                type="button"
+                className="btn-ghost"
+                disabled={resetTelevisionStreamDisabled}
+                title="Reconnect the selected stream locally. This does not bypass provider access rules or change your IP."
+                onClick={onResetTelevisionStream}
+              >
+                Reset stream
               </button>
               <label className="split-toggle">
                 <input
@@ -394,6 +500,25 @@ function ChannelBrowserInner({
                 Refresh channels
               </button>
             </div>
+            <div className="url-row">
+              <input
+                className="playlist-url-input"
+                type="url"
+                inputMode="url"
+                placeholder="Paste a video page or direct video URL"
+                value={webVideoUrl}
+                onChange={(e) => setWebVideoUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addWebVideoUrl();
+                }}
+                autoComplete="off"
+                spellCheck={false}
+                aria-label="Web video URL"
+              />
+              <button type="button" className="url-btn" onClick={addWebVideoUrl}>
+                Add web video
+              </button>
+            </div>
             {parseMessage ? <div className="message-bar">{parseMessage}</div> : null}
           </>
         ) : sidebarMode === "radio" ? (
@@ -401,14 +526,14 @@ function ChannelBrowserInner({
             Online stations by country (Radio Browser). Use <strong>Television</strong> to load M3U playlists and IPTV
             channels. Favorites (★) work for both TV and radio streams.
           </p>
-        ) : (
+        ) : sidebarMode === "audio" ? (
           <p className="browser-sub browser-sub--radio">
             Local audio: on desktop use <strong>Add files…</strong> for reliable loading; the library is stored in
             IndexedDB. Playback resumes on the <strong>right</strong> player. <strong>⇄</strong> shuffle and{" "}
             <strong>⟳</strong> continuous play sit in the row with the add buttons. Use <strong>Television</strong> for M3U
             playlists and IPTV channels.
           </p>
-        )}
+        ) : null}
       </header>
 
       {sidebarMode === "tv" ? (
@@ -608,6 +733,10 @@ function ChannelBrowserInner({
                             loading="lazy"
                             referrerPolicy="no-referrer"
                           />
+                        ) : c.youtubeVideoId || c.webVideoPageUrl ? (
+                          <span className="channel-logo placeholder" aria-hidden>
+                            WEB
+                          </span>
                         ) : c.localVideoFile ? (
                           <span className="channel-logo placeholder" aria-hidden>
                             ▶
@@ -617,7 +746,13 @@ function ChannelBrowserInner({
                         )}
                         <span className="channel-meta">
                           <span className="channel-name">{c.name}</span>
-                          {c.localVideoFile ? (
+                          {c.youtubeVideoId || c.webVideoPageUrl ? (
+                            <span className="channel-group">
+                              <span>{c.youtubeVideoId ? "YouTube" : "Web video"}</span>
+                              <span className="channel-sep"> · </span>
+                              <span>{c.webVideoPageUrl ? "Embedded page" : "Embedded playback"}</span>
+                            </span>
+                          ) : c.localVideoFile ? (
                             <span className="channel-group">
                               <span>{c.group?.trim() || "Local video"}</span>
                               <span className="channel-sep"> · </span>
