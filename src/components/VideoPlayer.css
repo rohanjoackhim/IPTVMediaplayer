@@ -4,11 +4,78 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: #000;
+  background: #ffffff;
+  color: var(--text);
 }
 
 .player-root--split {
   overflow: hidden;
+}
+
+.player-root--compact-tv-dock {
+  height: 100%;
+  background: #000;
+}
+
+.player-root--compact-tv-dock .player-top {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.player-root--compact-tv-dock .video-wrap {
+  height: 100%;
+}
+
+.player-root--compact-reader {
+  height: 100%;
+}
+
+.player-chrome--hidden {
+  display: none !important;
+}
+
+.video-wrap--compact-tv-dock {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+
+.compact-tv-dock-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.72), transparent);
+  pointer-events: none;
+}
+
+.compact-tv-dock-label {
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ebook-player--compact .ebook-page-browser,
+.ebook-player--compact .ebook-real-sidebar {
+  display: none;
+}
+
+.ebook-player--compact .ebook-player-body,
+.ebook-player--compact .ebook-real-reader {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ebook-player--compact .ebook-real-toolbar--top span {
+  font-size: 0.78rem;
 }
 
 .player-below-video {
@@ -45,6 +112,11 @@
   position: relative;
 }
 
+.player-top:has(.video-wrap--ebook) {
+  align-items: stretch;
+  justify-content: stretch;
+}
+
 .video-wrap {
   position: relative;
   width: 100%;
@@ -56,6 +128,12 @@
   justify-content: center;
   min-height: 0;
   min-width: 0;
+}
+
+.video-wrap--ebook {
+  align-self: stretch;
+  align-items: stretch;
+  justify-content: stretch;
 }
 
 .radio-on-air-badge,
@@ -74,9 +152,9 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text);
-  background: rgba(8, 10, 14, 0.82);
+  background: rgba(255, 255, 255, 0.82);
   border: 1px solid var(--accent-border);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.16);
   pointer-events: none;
   user-select: none;
 }
@@ -105,15 +183,15 @@
   justify-content: center;
   border-radius: 50%;
   border: 1px solid var(--accent-border);
-  background: rgba(8, 10, 14, 0.88);
+  background: rgba(255, 255, 255, 0.88);
   color: var(--text);
   cursor: pointer;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.18);
   transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
 }
 
 .radio-transport-btn:hover {
-  background: rgba(20, 26, 36, 0.92);
+  background: rgba(255, 255, 255, 0.96);
   border-color: var(--accent);
 }
 
@@ -151,7 +229,7 @@
   flex-shrink: 0;
   margin-right: 10px;
   padding: 3px 8px;
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   font-size: 0.625rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -175,6 +253,392 @@
   display: none;
 }
 
+.video-wrap--internet-audio {
+  align-items: stretch;
+  justify-content: stretch;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(245, 158, 11, 0.2), transparent 30%),
+    radial-gradient(circle at 84% 20%, rgba(38, 132, 255, 0.16), transparent 34%),
+    linear-gradient(135deg, #111318 0%, #1c1d22 48%, #111 100%);
+}
+
+.video-wrap--internet-audio .video-el--podcast-stream {
+  position: absolute;
+  left: 18px;
+  right: 132px;
+  bottom: 8px;
+  z-index: 8;
+  width: calc(100% - 150px);
+  height: 28px;
+  max-height: 28px;
+  object-fit: fill;
+  background: rgba(255, 255, 255, 0.76);
+  border-radius: 999px;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.24);
+  opacity: 0.88;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio {
+  position: absolute;
+  right: 18px;
+  bottom: 8px;
+  z-index: 10;
+  width: auto;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-host,
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-toggle {
+  position: relative;
+  z-index: 12;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-trigger,
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-toggle {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(8, 10, 14, 0.72);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(14px);
+  font-size: 0.68rem;
+  line-height: 1;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-trigger:hover,
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-toggle:hover {
+  color: #fff;
+  background: rgba(8, 10, 14, 0.86);
+  border-color: rgba(255, 255, 255, 0.34);
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-trigger[aria-expanded="true"],
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-toggle[aria-expanded="true"] {
+  color: #111;
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(255, 255, 255, 0.4);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.32);
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-glyph {
+  font-size: 0.78rem;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-pct {
+  min-width: 2rem;
+  font-size: 0.68rem;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-panel {
+  top: auto;
+  left: auto;
+  right: 0;
+  bottom: calc(100% + 8px);
+  min-width: 112px;
+  padding: 8px 9px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-panel-inner {
+  gap: 5px;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-title {
+  font-size: 0.56rem;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-slider {
+  min-width: 94px;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .volume-popover-readout {
+  font-size: 0.66rem;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 11;
+  width: min(300px, calc(100vw - 56px));
+  max-width: 300px;
+  padding: 10px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.45);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.34);
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-panel .radio-eq-select {
+  min-width: 8rem;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-panel .radio-eq-hint,
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-panel .radio-eq-band-val {
+  color: #374151;
+}
+
+.video-wrap--internet-audio .volume-eq-wrap--internet-audio .radio-eq-panel .radio-eq-band input[type="range"] {
+  height: 74px;
+}
+
+.internet-audio-showcase {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(24px, 4vw, 56px);
+  color: #fff;
+  overflow: hidden;
+}
+
+.internet-audio-showcase--podcast {
+  padding-bottom: max(74px, clamp(24px, 4vw, 56px));
+}
+
+.internet-audio-showcase--podcast .internet-audio-card {
+  max-height: calc(100% - 42px);
+  overflow: auto;
+}
+
+.internet-audio-bg {
+  position: absolute;
+  inset: -8%;
+  opacity: 0.22;
+  filter: blur(34px) saturate(1.2);
+  transform: scale(1.08);
+  pointer-events: none;
+}
+
+.internet-audio-bg img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.internet-audio-card {
+  position: relative;
+  z-index: 1;
+  width: min(1040px, 100%);
+  min-height: min(520px, 100%);
+  display: grid;
+  grid-template-columns: minmax(180px, 320px) minmax(0, 1fr);
+  gap: clamp(22px, 4vw, 48px);
+  align-items: center;
+  padding: clamp(22px, 4vw, 48px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 34px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.06)),
+    rgba(8, 10, 14, 0.72);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(22px);
+}
+
+.internet-audio-art-shell {
+  position: relative;
+  justify-self: center;
+  width: min(100%, 320px);
+}
+
+.internet-audio-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 30px;
+  object-fit: cover;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 52px rgba(0, 0, 0, 0.36);
+}
+
+.internet-audio-art--placeholder {
+  font-size: clamp(3rem, 9vw, 6rem);
+}
+
+.internet-audio-status {
+  position: absolute;
+  left: 50%;
+  bottom: -16px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-radius: 999px;
+  color: #111;
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+}
+
+.internet-audio-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.18);
+}
+
+.internet-audio-status--paused .internet-audio-status-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18);
+}
+
+.internet-audio-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.internet-audio-kicker {
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.internet-audio-title {
+  margin: 0;
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: clamp(1.9rem, 5vw, 4.2rem);
+  line-height: 0.95;
+  letter-spacing: -0.07em;
+}
+
+.internet-audio-subtitle {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: clamp(0.9rem, 2vw, 1.08rem);
+  line-height: 1.4;
+}
+
+.internet-audio-description {
+  max-width: 68ch;
+  margin: 4px 0 0;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.internet-audio-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.internet-audio-tag {
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, 0.78);
+  background: rgba(255, 255, 255, 0.09);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.internet-audio-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 10px;
+  margin: 10px 0 0;
+}
+
+.internet-audio-fact {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.internet-audio-fact dt {
+  margin: 0 0 4px;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.internet-audio-fact dd {
+  margin: 0;
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.internet-audio-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.internet-audio-primary,
+.internet-audio-secondary {
+  min-height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.internet-audio-primary {
+  color: #111;
+  background: #fff;
+}
+
+.internet-audio-secondary {
+  color: rgba(255, 255, 255, 0.84);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.internet-audio-primary:hover,
+.internet-audio-secondary:hover {
+  transform: translateY(-1px);
+}
+
+.internet-audio-technical {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 0.7rem;
+}
+
+.internet-audio-technical span {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .web-video-embed {
   width: 100%;
   height: 100%;
@@ -192,11 +656,12 @@
   gap: 8px;
   color: var(--text);
   background:
-    radial-gradient(circle at center, rgba(155, 240, 11, 0.08), transparent 34%),
-    #000;
+    radial-gradient(circle at center, rgba(28, 28, 30, 0.12), transparent 34%),
+    #111;
 }
 
 .screen-off-title {
+  font-family: var(--font-display);
   font-size: clamp(1.25rem, 2vw, 2rem);
   font-weight: 800;
   letter-spacing: -0.03em;
@@ -208,24 +673,23 @@
 }
 
 .ebook-player {
+  flex: 1;
+  min-height: 0;
   width: 100%;
   height: 100%;
   padding: 0;
   overflow: hidden;
   display: flex;
+  flex-direction: column;
   color: var(--text);
   background:
-    radial-gradient(circle at 18% 0%, rgba(155, 240, 11, 0.14), transparent 34%),
-    radial-gradient(circle at 92% 14%, rgba(59, 130, 246, 0.1), transparent 32%),
-    linear-gradient(135deg, #05070a 0%, #10151f 44%, #040506 100%);
+    radial-gradient(circle at 20% 0%, rgba(255, 255, 255, 0.92), transparent 34%),
+    linear-gradient(135deg, #ffffff 0%, #f7f7f5 52%, #eeeeec 100%);
 }
 
 .ebook-player:fullscreen {
   padding: clamp(6px, 1vw, 16px);
-  background:
-    radial-gradient(circle at 18% 0%, rgba(155, 240, 11, 0.16), transparent 34%),
-    radial-gradient(circle at 92% 14%, rgba(59, 130, 246, 0.12), transparent 32%),
-    linear-gradient(135deg, #030406 0%, #0d121b 44%, #020303 100%);
+  background: linear-gradient(135deg, #ffffff 0%, #eeeeec 100%);
 }
 
 .ebook-player:fullscreen .ebook-player-page {
@@ -234,20 +698,19 @@
 }
 
 .ebook-player-page {
+  flex: 1;
+  min-height: 0;
   width: 100%;
   height: 100%;
-  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.16);
   border-radius: 0;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)),
-    rgba(10, 13, 18, 0.92);
+  background: rgba(255, 255, 255, 0.96);
   box-shadow:
-    0 30px 90px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    0 30px 90px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(10px);
 }
 
@@ -258,7 +721,56 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
+}
+
+.ebook-player-header-content {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ebook-player-page-indicator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ebook-player-page-num {
+  flex-shrink: 0;
+  min-width: 1.4ch;
+  font-family: var(--font-display);
+  font-size: clamp(1.65rem, 2.8vw, 2.35rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.ebook-player-page-meta {
+  min-width: 0;
+}
+
+.ebook-player-page-reading {
+  color: var(--text-muted);
+  font-size: clamp(0.78rem, 1vw, 0.92rem);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.ebook-player-page-indicator--chapter {
+  align-items: flex-start;
+}
+
+.ebook-player-page-num--title {
+  max-width: min(36ch, 100%);
+  font-size: clamp(1.05rem, 1.8vw, 1.55rem);
+  line-height: 1.12;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ebook-player-header-main {
@@ -270,7 +782,7 @@
   border: 1px solid var(--accent-border);
   border-radius: 999px;
   padding: 8px 12px;
-  background: var(--accent-muted);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text);
   font-size: 0.76rem;
   font-weight: 800;
@@ -279,11 +791,11 @@
 }
 
 .ebook-fullscreen-btn:hover {
-  background: rgba(155, 240, 11, 0.18);
+  background: rgba(28, 28, 30, 0.12);
 }
 
 .ebook-player-kicker {
-  display: block;
+  display: none !important;
   margin-bottom: 3px;
   color: var(--accent-hover);
   font-size: 0.7rem;
@@ -295,7 +807,9 @@
 .ebook-player-title {
   margin: 0;
   max-width: 36ch;
+  font-family: var(--font-display);
   font-size: clamp(1.05rem, 1.7vw, 1.8rem);
+  font-weight: 800;
   line-height: 1.08;
   letter-spacing: -0.045em;
 }
@@ -324,8 +838,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.18);
+  border-right: 1px solid rgba(0, 0, 0, 0.14);
+  background: rgba(246, 246, 244, 0.58);
 }
 
 .ebook-page-browser-title {
@@ -342,7 +856,7 @@
   min-height: 0;
   overflow: auto;
   padding: 0 8px 12px;
-  scrollbar-color: rgba(155, 240, 11, 0.35) transparent;
+  scrollbar-color: rgba(28, 28, 30, 0.32) transparent;
 }
 
 .ebook-page-browser-item {
@@ -353,7 +867,7 @@
   grid-template-columns: 28px minmax(0, 1fr);
   gap: 8px;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: 14px;
   background: transparent;
   color: var(--text-muted);
   text-align: left;
@@ -362,7 +876,7 @@
 
 .ebook-page-browser-item:hover {
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .ebook-page-browser-item--current {
@@ -393,12 +907,16 @@
   min-height: 0;
   overflow: auto;
   padding: clamp(16px, 2.6vw, 30px) clamp(18px, 3vw, 44px) clamp(20px, 3vw, 38px);
-  color: rgba(235, 241, 234, 0.9);
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+  color: #2a1b10;
   font-size: clamp(1.08rem, 1.48vw, 1.42rem);
   line-height: 1.78;
   letter-spacing: 0.005em;
-  scrollbar-color: rgba(155, 240, 11, 0.45) rgba(255, 255, 255, 0.08);
+  scrollbar-color: rgba(28, 28, 30, 0.4) rgba(0, 0, 0, 0.08);
+}
+
+.ebook-reader-scroll-locked {
+  overflow: hidden !important;
+  overscroll-behavior: none;
 }
 
 .ebook-real-reader {
@@ -406,14 +924,14 @@
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(132px, 190px) minmax(0, 1fr);
-  background: rgba(0, 0, 0, 0.18);
+  background: rgba(246, 246, 244, 0.58);
 }
 
 .ebook-real-sidebar {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  border-right: 1px solid rgba(0, 0, 0, 0.14);
 }
 
 .ebook-real-thumb-list {
@@ -430,11 +948,9 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.035)),
-    rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text-muted);
   text-align: left;
   cursor: pointer;
@@ -476,7 +992,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
   color: var(--text-muted);
   font-size: 0.78rem;
 }
@@ -485,15 +1001,15 @@
   position: sticky;
   top: 0;
   z-index: 4;
-  background: rgba(9, 12, 17, 0.96);
+  background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(10px);
 }
 
 .ebook-real-toolbar button {
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.16);
   border-radius: 999px;
   padding: 6px 10px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.78);
   color: var(--text);
   font: inherit;
   cursor: pointer;
@@ -508,7 +1024,7 @@
   flex-shrink: 0;
   padding: 8px 14px;
   color: var(--accent-hover);
-  background: rgba(155, 240, 11, 0.08);
+  background: rgba(28, 28, 30, 0.08);
   font-size: 0.78rem;
 }
 
@@ -521,12 +1037,26 @@
   padding: clamp(8px, 1.6vw, 20px);
 }
 
+.ebook-pdf-loading {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  justify-self: center;
+  padding: 12px 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
 .ebook-pdf-page {
   position: relative;
   overflow: hidden;
   border-radius: 8px;
   background: #fff;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
 }
 
 .ebook-pdf-canvas {
@@ -555,12 +1085,15 @@
 }
 
 .ebook-pdf-text-span:hover {
-  background: rgba(155, 240, 11, 0.18);
+  background: rgba(28, 28, 30, 0.14);
 }
 
-.ebook-pdf-text-span--highlight {
-  background: rgba(216, 255, 122, 0.5);
-  box-shadow: 0 0 0 2px rgba(155, 240, 11, 0.28);
+.ebook-pdf-highlight-box {
+  position: absolute;
+  border-radius: 2px;
+  pointer-events: none;
+  background: rgba(199, 195, 188, 0.52);
+  box-shadow: 0 0 0 2px rgba(28, 28, 30, 0.18);
 }
 
 .ebook-epub-page {
@@ -570,12 +1103,11 @@
   margin: clamp(8px, 1.5vw, 18px);
   padding: clamp(18px, 3vw, 42px);
   border-radius: 14px;
-  background: #faf7ef;
+  background: #ffffff;
   color: #181510;
-  font-family: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
   font-size: clamp(1rem, 1.3vw, 1.28rem);
   line-height: 1.7;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.2);
 }
 
 .ebook-epub-page img,
@@ -596,7 +1128,7 @@
 }
 
 .ebook-epub-page a {
-  color: #315d00;
+  color: #1c1c1e;
 }
 
 .ebook-epub-word {
@@ -614,17 +1146,17 @@
 }
 
 .ebook-epub-word:hover {
-  color: #315d00;
-  background: rgba(155, 240, 11, 0.18);
+  color: #1c1c1e;
+  background: rgba(28, 28, 30, 0.1);
 }
 
 .ebook-epub-word--highlight {
   padding: 0.02em 0.12em 0.06em;
-  color: #071005;
-  background: linear-gradient(180deg, #eaffad, #b8f34a);
+  color: #111;
+  background: linear-gradient(180deg, #e7e5e1, #c8c3bc);
   box-shadow:
-    0 0 0 0.12em rgba(87, 128, 0, 0.18),
-    0 0.24em 0.9em rgba(87, 128, 0, 0.24);
+    0 0 0 0.12em rgba(28, 28, 30, 0.14),
+    0 0.24em 0.9em rgba(28, 28, 30, 0.12);
 }
 
 @media (max-width: 900px) {
@@ -701,6 +1233,12 @@
   text-wrap: pretty;
 }
 
+.ebook-player-paragraph--selectable,
+.ebook-epub-sync-text--selectable {
+  user-select: text;
+  cursor: text;
+}
+
 .ebook-player-word-btn {
   display: inline;
   margin: 0;
@@ -730,11 +1268,11 @@
 .ebook-player-word {
   padding: 0.02em 0.12em 0.06em;
   border-radius: 0.22em;
-  color: #071005;
-  background: linear-gradient(180deg, #d8ff7a, var(--accent));
+  color: #111;
+  background: linear-gradient(180deg, #e7e5e1, #c8c3bc);
   box-shadow:
-    0 0 0 0.12em rgba(155, 240, 11, 0.16),
-    0 0.24em 0.9em rgba(155, 240, 11, 0.22);
+    0 0 0 0.12em rgba(28, 28, 30, 0.14),
+    0 0.24em 0.9em rgba(28, 28, 30, 0.14);
 }
 
 /* Chromium / Electron: native controls’ buffering ring can keep animating while paused; hide that shadow panel. */
@@ -751,7 +1289,7 @@
 .player-now-playing {
   flex-shrink: 0;
   padding: 12px 18px;
-  background: linear-gradient(180deg, rgba(155, 240, 11, 0.05) 0%, rgba(0, 0, 0, 0.25) 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78) 0%, rgba(246, 246, 244, 0.78) 100%);
   border-bottom: 1px solid var(--border);
 }
 
@@ -791,9 +1329,10 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  font-size: 1.0625rem;
-  font-weight: 700;
-  letter-spacing: -0.03em;
+  font-family: var(--font-display);
+  font-size: 1.12rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
   color: var(--text);
   line-height: 1.25;
 }
@@ -832,8 +1371,8 @@
 .player-chrome {
   flex-shrink: 0;
   padding: 14px 18px 16px;
-  background: linear-gradient(180deg, #1a211c 0%, #0d100e 55%, #080a08 100%);
-  box-shadow: 0 -12px 48px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(155, 240, 11, 0.06);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(245, 245, 243, 0.98) 100%);
+  box-shadow: 0 -12px 48px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.82);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -866,6 +1405,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .rec-btn {
@@ -1209,7 +1749,7 @@
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   background: var(--bg-panel);
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.18);
 }
 
 .volume-popover-panel-inner {
@@ -1293,8 +1833,8 @@
   margin-top: 8px;
   padding: 8px 12px;
   border-radius: var(--radius-md);
-  border: 1px solid rgba(155, 240, 11, 0.22);
-  background: rgba(155, 240, 11, 0.08);
+  border: 1px solid rgba(28, 28, 30, 0.16);
+  background: rgba(28, 28, 30, 0.07);
   color: var(--text-secondary);
   font-size: 0.75rem;
   line-height: 1.35;
@@ -1308,7 +1848,7 @@
   width: 100%;
   margin-top: 8px;
   padding: 10px 0 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(0, 0, 0, 0.12);
 }
 
 .library-audio-toolbar {
@@ -1320,7 +1860,7 @@
   width: 100%;
   margin-top: 8px;
   padding: 10px 0 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(0, 0, 0, 0.12);
 }
 
 .library-audio-toolbar__group {
@@ -1337,9 +1877,9 @@
 
 .library-audio-tool-btn {
   padding: 7px 12px;
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(18, 22, 28, 0.95);
+  background: rgba(255, 255, 255, 0.82);
   color: var(--text-secondary);
   font-size: 0.75rem;
   font-weight: 700;
@@ -1350,7 +1890,7 @@
 
 .library-audio-tool-btn:hover:not(:disabled) {
   color: var(--text);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--accent-border);
 }
 
 .library-audio-tool-btn:disabled {
@@ -1360,47 +1900,12 @@
 
 .library-audio-tool-btn--yt {
   border-color: rgba(248, 113, 113, 0.35);
-  color: #fecaca;
+  color: #b42318;
 }
 
 .library-audio-tool-btn--yt:hover:not(:disabled) {
   border-color: rgba(248, 113, 113, 0.55);
-  color: #fee2e2;
-}
-
-.library-audio-speed {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: rgba(12, 14, 18, 0.88);
-}
-
-.library-audio-speed__text {
-  font-size: 0.625rem;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.library-audio-speed__select {
-  min-width: 5.5rem;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-input);
-  color: var(--text);
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.library-audio-speed__select:focus {
-  outline: none;
-  border-color: var(--accent);
+  color: #7a1d16;
 }
 
 .library-transport-row {
@@ -1436,9 +1941,9 @@
   min-width: 44px;
   min-height: 40px;
   padding: 8px 12px;
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   border: 1px solid var(--border);
-  background: rgba(18, 22, 28, 0.95);
+  background: rgba(255, 255, 255, 0.82);
   color: var(--text-secondary);
   font-size: 0.6875rem;
   font-weight: 800;
@@ -1449,7 +1954,7 @@
 
 .library-transport-btn:hover {
   color: var(--text);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: var(--accent-border);
 }
 
 .library-transport-btn--play {
@@ -1460,9 +1965,9 @@
   padding: 0;
   border-radius: 50%;
   border-color: var(--accent-border);
-  background: rgba(12, 16, 22, 0.96);
+  background: rgba(255, 255, 255, 0.94);
   color: var(--accent-hover);
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.18);
 }
 
 .library-transport-btn--play:hover {
@@ -1512,6 +2017,24 @@
   line-height: 1.35;
 }
 
+.record-path--inline {
+  max-width: min(28vw, 260px);
+  min-height: 27px;
+  max-height: 27px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.25;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  word-break: normal;
+  box-sizing: border-box;
+}
+
 button.record-path--link {
   display: block;
   width: 100%;
@@ -1526,6 +2049,15 @@ button.record-path--link {
   text-align: left;
   cursor: pointer;
   word-break: break-all;
+}
+
+button.record-path--inline {
+  width: auto;
+  max-width: min(28vw, 260px);
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  word-break: normal;
 }
 
 button.record-path--link:hover {
@@ -1565,6 +2097,25 @@ button.record-path--link:focus-visible {
   accent-color: var(--accent);
 }
 
+.cc-toggle--inline {
+  flex-shrink: 0;
+  min-height: 27px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  line-height: 1.25;
+  color: var(--text-muted);
+}
+
+.cc-toggle--inline input {
+  width: 13px;
+  height: 13px;
+}
+
 .yt-search-err {
   margin-top: 6px;
   padding: 8px 10px;
@@ -1601,14 +2152,14 @@ button.record-path--link:focus-visible {
   min-height: 0;
   border-radius: 0;
   border: none;
-  background: rgba(6, 8, 12, 0.94);
+  background: rgba(255, 255, 255, 0.96);
   box-shadow: none;
   color: var(--text);
 }
 
 .mp3-lyrics-panel:fullscreen,
 .mp3-lyrics-panel--spatial-fullscreen {
-  background: rgb(12, 14, 20);
+  background: #f7f7f5;
   inset: auto;
 }
 
@@ -1622,13 +2173,13 @@ button.record-path--link:focus-visible {
 
 .mp3-lyrics-panel:fullscreen .mp3-lyrics-track-line,
 .mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-track-line {
-  font-size: clamp(1rem, 2.9vmin, 1.32rem);
+  font-size: clamp(0.94rem, 2.55vmin, 1.2rem);
   line-height: 1.32;
 }
 
 .mp3-lyrics-panel:fullscreen .mp3-lyrics-body,
 .mp3-lyrics-panel--spatial-fullscreen .mp3-lyrics-body {
-  font-size: clamp(1.08rem, 2.65vmin, 1.42rem);
+  font-size: clamp(1rem, 2.35vmin, 1.3rem);
   line-height: 1.62;
   padding: max(16px, 3.2vmin) max(18px, 4.4vmin) max(22px, 5.2vmin);
 }
@@ -1640,7 +2191,7 @@ button.record-path--link:focus-visible {
   justify-content: space-between;
   gap: 10px;
   padding: 8px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
 }
 
 .mp3-lyrics-panel-title {
@@ -1655,7 +2206,7 @@ button.record-path--link:focus-visible {
   font-size: 0.75rem;
   font-weight: 700;
   padding: 4px 10px;
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   border: 1px solid var(--accent-border);
   background: rgba(18, 22, 30, 0.95);
   color: var(--text);
@@ -1671,19 +2222,19 @@ button.record-path--link:focus-visible {
   flex-shrink: 0;
   padding: 10px 12px;
   font-size: 0.8rem;
-  color: #fecaca;
+  color: var(--danger);
 }
 
 .mp3-lyrics-track-meta {
   flex-shrink: 0;
   padding: 10px 12px 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.14);
   text-align: center;
 }
 
 .mp3-lyrics-track-line {
   margin: 0;
-  font-size: clamp(0.98rem, 1.25vw, 1.16rem);
+  font-size: clamp(0.92rem, 1.08vw, 1.06rem);
   font-weight: 800;
   letter-spacing: -0.01em;
   color: var(--text);
@@ -1697,10 +2248,10 @@ button.record-path--link:focus-visible {
   overflow: auto;
   padding: 14px 16px 18px;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: clamp(1rem, 1.18vw, 1.18rem);
+  font-size: clamp(0.94rem, 1.02vw, 1.08rem);
   line-height: 1.62;
   letter-spacing: -0.012em;
-  scrollbar-color: rgba(155, 240, 11, 0.42) rgba(255, 255, 255, 0.08);
+  scrollbar-color: rgba(28, 28, 30, 0.36) rgba(0, 0, 0, 0.08);
 }
 
 .mp3-lyrics-empty {
@@ -1720,17 +2271,17 @@ button.record-path--link:focus-visible {
 }
 
 .mp3-lyrics-line--single {
-  color: rgba(244, 248, 255, 0.96);
+  color: var(--text);
   font-weight: 650;
 }
 
 .mp3-lyrics-line--orig {
-  color: rgba(244, 248, 255, 0.96);
+  color: var(--text);
   font-weight: 700;
 }
 
 .mp3-lyrics-line--en {
-  color: rgba(174, 215, 255, 0.95);
+  color: #0a66c2;
   padding-left: 10px;
   border-left: 3px solid rgba(96, 165, 250, 0.5);
   margin-top: 4px;
@@ -1741,7 +2292,7 @@ button.record-path--link:focus-visible {
 .mp3-lyrics-meaning {
   margin-top: 1rem;
   padding-top: 0.75rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: 1px solid rgba(0, 0, 0, 0.14);
 }
 
 .mp3-lyrics-meaning-title {
@@ -1750,13 +2301,13 @@ button.record-path--link:focus-visible {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: rgba(200, 220, 255, 0.85);
+  color: var(--text-muted);
 }
 
 .mp3-lyrics-meaning-meta {
   margin: 0 0 0.5rem;
   font-size: 0.78rem;
-  color: rgba(180, 200, 230, 0.75);
+  color: var(--text-muted);
 }
 
 .mp3-lyrics-meaning-loading {
@@ -1770,21 +2321,21 @@ button.record-path--link:focus-visible {
   margin: 0;
   font-size: 0.8rem;
   line-height: 1.4;
-  color: #fecaca;
+  color: var(--danger);
 }
 
 .mp3-lyrics-meaning-body {
   margin: 0;
   font-size: 0.94rem;
   line-height: 1.58;
-  color: rgba(230, 235, 245, 0.92);
+  color: var(--text-secondary);
   white-space: pre-wrap;
 }
 
 .mp3-lyrics-llm-usage {
   margin-top: 0.85rem;
   padding-top: 0.65rem;
-  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  border-top: 1px dashed rgba(0, 0, 0, 0.18);
 }
 
 .mp3-lyrics-llm-usage-title {
@@ -1793,16 +2344,447 @@ button.record-path--link:focus-visible {
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  color: rgba(180, 200, 230, 0.8);
+  color: var(--text-muted);
 }
 
 .mp3-lyrics-llm-usage-line {
   margin: 0 0 0.25rem;
   font-size: 0.74rem;
   line-height: 1.35;
-  color: rgba(200, 215, 235, 0.88);
+  color: var(--text-secondary);
 }
 
 .mp3-lyrics-llm-usage-line--muted {
-  color: rgba(160, 175, 200, 0.75);
+  color: var(--text-muted);
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 1366px) {
+  .player-chrome {
+    padding: 12px 14px max(14px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .player-controls,
+  .library-controls-bar,
+  .library-transport-row,
+  .mp3-lyrics-panel-head-actions {
+    gap: 8px;
+  }
+
+  .ctrl-btn,
+  .rec-btn,
+  .screen-off-btn,
+  .volume-popover-trigger,
+  .library-audio-tool-btn,
+  .mp3-lyrics-hide {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  .library-transport-btn {
+    min-width: 44px;
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  .library-transport-btn--play {
+    width: 54px;
+    height: 54px;
+  }
+
+  .library-transport-btn--compact,
+  .library-transport-btn--play.library-transport-btn--play--compact {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .volume-popover-panel {
+    left: auto;
+    right: 0;
+    min-width: min(240px, calc(100vw - 32px));
+  }
+
+  .ebook-player-header {
+    padding: 12px 14px 10px;
+    gap: 10px;
+  }
+
+  .ebook-player-title {
+    max-width: min(56ch, 76vw);
+  }
+
+  .ebook-fullscreen-btn {
+    min-width: 44px;
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  .ebook-player-body,
+  .ebook-real-reader {
+    grid-template-columns: 1fr;
+  }
+
+  .ebook-page-browser,
+  .ebook-real-sidebar {
+    max-height: 168px;
+    border-right: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .ebook-page-browser-title {
+    padding: 10px 12px 6px;
+  }
+
+  .ebook-page-browser-list,
+  .ebook-real-thumb-list {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 10px 10px;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
+  }
+
+  .ebook-page-browser-item,
+  .ebook-real-thumb {
+    width: 210px;
+    flex: 0 0 210px;
+    min-height: 76px;
+    scroll-snap-align: start;
+  }
+
+  .ebook-real-toolbar {
+    gap: 8px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ebook-real-toolbar button {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  .ebook-player-text {
+    padding: 18px 20px max(24px, env(safe-area-inset-bottom, 0px));
+    line-height: 1.72;
+  }
+
+  .ebook-epub-page {
+    margin: 10px;
+    padding: 22px;
+  }
+
+  .ebook-pdf-scroll {
+    padding: 10px;
+  }
+
+  .mp3-lyrics-panel {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .mp3-lyrics-panel-head {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .mp3-lyrics-body {
+    padding: 14px 14px max(20px, env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 820px) {
+  .player-now-playing-inner,
+  .library-controls-bar {
+    flex-wrap: wrap;
+  }
+
+  .player-now-playing-logo {
+    width: 44px;
+    height: 44px;
+  }
+
+  .ebook-player-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ebook-fullscreen-btn {
+    align-self: flex-start;
+  }
+
+  .ebook-page-browser,
+  .ebook-real-sidebar {
+    max-height: 142px;
+  }
+
+  .ebook-page-browser-item,
+  .ebook-real-thumb {
+    width: 184px;
+    flex-basis: 184px;
+  }
+
+  .ebook-real-toolbar {
+    flex-wrap: nowrap;
+  }
+
+  .ebook-epub-page {
+    margin: 0;
+    border-radius: 0;
+  }
+}
+
+/* AD editorial theme overrides */
+.player-root,
+.ebook-player,
+.ebook-player-page,
+.ebook-real-reader,
+.ebook-real-main,
+.ebook-player-text,
+.mp3-lyrics-panel {
+  background: #fff;
+}
+
+.radio-on-air-badge,
+.library-on-air-badge,
+.radio-inline-tag,
+.library-inline-tag,
+.local-video-inline-tag {
+  border-radius: 0;
+  border-color: #111;
+  background: #fff;
+  color: #000;
+  box-shadow: none;
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+}
+
+.ebook-player {
+  background: #fff;
+}
+
+.ebook-player:fullscreen {
+  background: #fff;
+}
+
+.ebook-player-page {
+  border: 0;
+  box-shadow: none;
+}
+
+.ebook-player-header,
+.ebook-real-toolbar,
+.player-now-playing,
+.player-chrome,
+.mp3-lyrics-panel-head,
+.mp3-lyrics-track-meta {
+  background: #fff;
+  border-bottom: 1px solid #111;
+  box-shadow: none;
+}
+
+.ebook-player-title,
+.player-now-playing-name,
+.screen-off-title,
+.mp3-lyrics-track-line {
+  font-family: var(--font);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ebook-player-title {
+  font-size: clamp(1rem, 1.5vw, 1.55rem);
+}
+
+.ebook-player-kicker,
+.ebook-page-browser-title,
+.ebook-real-status,
+.mp3-lyrics-panel-title,
+.mp3-lyrics-meaning-title,
+.mp3-lyrics-llm-usage-title,
+.library-seek-label,
+.volume-popover-title {
+  color: #000;
+  font-family: var(--font);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.ebook-page-browser,
+.ebook-real-sidebar {
+  background: #fff;
+  border-right: 1px solid #111;
+}
+
+.ebook-page-browser-item,
+.ebook-real-thumb {
+  border-radius: 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.18);
+  background: #fff;
+}
+
+.ebook-page-browser-item:hover,
+.ebook-real-thumb:hover {
+  background: #f7f7f7;
+}
+
+.ebook-page-browser-item--current,
+.ebook-real-thumb--current {
+  color: #000;
+  background: #ece8dc;
+  border-color: #9f8f65;
+}
+
+.ebook-page-browser-item--current .ebook-page-browser-num,
+.ebook-page-browser-item--current .ebook-page-browser-preview,
+.ebook-real-thumb--current .ebook-real-thumb-page,
+.ebook-real-thumb--current .ebook-real-thumb-lines {
+  color: #000;
+}
+
+.ebook-fullscreen-btn,
+.ebook-real-toolbar button,
+.ctrl-btn,
+.rec-btn,
+.screen-off-btn,
+.volume-popover-trigger,
+.library-audio-tool-btn,
+.library-transport-btn,
+.mp3-lyrics-hide {
+  border-radius: 0;
+  border-color: #111;
+  background: #fff;
+  color: #000;
+  box-shadow: none;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ebook-fullscreen-btn:hover,
+.ebook-real-toolbar button:hover:not(:disabled),
+.ctrl-btn:hover,
+.screen-off-btn:hover,
+.volume-popover-trigger:hover,
+.library-audio-tool-btn:hover:not(:disabled),
+.library-transport-btn:hover,
+.mp3-lyrics-hide:hover {
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
+
+.rec-btn {
+  border-color: #b91c1c;
+  background: #c1121f;
+  color: #fff;
+}
+
+.rec-btn:hover:not(:disabled) {
+  border-color: #7f1d1d;
+  background: #9f1239;
+  color: #fff;
+}
+
+.rec-btn--stop {
+  border-color: #7f1d1d;
+  background: #7f1d1d;
+}
+
+.ebook-player-text,
+.ebook-epub-page {
+  background:
+    radial-gradient(circle at 16% 12%, rgba(255, 255, 255, 0.75), transparent 18rem),
+    linear-gradient(90deg, rgba(0, 0, 0, 0.08), transparent 18px, transparent calc(100% - 18px), rgba(0, 0, 0, 0.045)),
+    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.018) 0 1px, transparent 1px 4px),
+    #f7f1e6;
+  color: #050505;
+  border: 1px solid rgba(44, 31, 16, 0.22);
+  border-radius: 2px;
+  box-shadow:
+    inset 16px 0 28px rgba(80, 52, 24, 0.08),
+    inset -12px 0 22px rgba(80, 52, 24, 0.045),
+    0 18px 42px rgba(0, 0, 0, 0.16);
+  font-family: revert;
+  line-height: 1.72;
+}
+
+.ebook-player-text {
+  margin: clamp(10px, 1.5vw, 20px);
+}
+
+.ebook-epub-media {
+  border-bottom: 1px solid #111;
+  padding-bottom: 1.25rem;
+}
+
+.ebook-player-section {
+  border-left: 0;
+  border-top: 1px solid #111;
+  padding-top: 1.2rem;
+}
+
+.ebook-player-section-label {
+  color: #000;
+  font-family: var(--font);
+  letter-spacing: 0.16em;
+}
+
+.ebook-player-word,
+.ebook-epub-word--highlight,
+.ebook-pdf-highlight-box {
+  background: rgba(0, 0, 0, 0.14);
+  box-shadow: inset 0 -2px 0 #000;
+}
+
+.ebook-pdf-page {
+  border-radius: 2px;
+  background: #f7f1e6;
+  box-shadow:
+    inset 12px 0 24px rgba(80, 52, 24, 0.07),
+    0 18px 42px rgba(0, 0, 0, 0.16);
+  outline: 1px solid rgba(44, 31, 16, 0.22);
+}
+
+.player-now-playing-logo {
+  border-radius: 0;
+}
+
+.now-url,
+.record-path,
+.record-hint,
+.player-chrome-notice,
+.yt-search-err,
+.error-banner {
+  border-radius: 0;
+}
+
+.library-transport-btn--play {
+  background: #000;
+  color: #fff;
+}
+
+.mp3-lyrics-panel {
+  border: 1px solid #111;
+}
+
+.mp3-lyrics-body {
+  font-family: var(--font);
+}
+
+.mp3-lyrics-line--en {
+  color: #333;
+  border-left-color: #111;
+}
+
+.volume-popover-panel,
+.radio-eq-panel {
+  border-radius: 0;
+  border-color: #111;
+  background: #fff;
+  box-shadow: none;
 }

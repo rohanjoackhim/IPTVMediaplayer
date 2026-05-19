@@ -3,22 +3,7 @@ import { Readable } from "node:stream";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-function assertHttpUrlForProxy(raw: string): URL {
-  let t: URL;
-  try {
-    t = new URL(raw);
-  } catch {
-    throw new Error("Invalid target URL.");
-  }
-  if (t.protocol !== "http:" && t.protocol !== "https:") {
-    throw new Error("Only http(s) targets are allowed.");
-  }
-  const host = t.hostname.toLowerCase();
-  if (host === "169.254.169.254" || host === "metadata.google.internal") {
-    throw new Error("Host blocked.");
-  }
-  return t;
-}
+import { assertSafeFetchUrl } from "./src/utils/safeFetchUrl";
 
 function playlistProxyDevPlugin() {
   return {
@@ -57,7 +42,7 @@ function playlistProxyDevPlugin() {
               }
               let t: URL;
               try {
-                t = assertHttpUrlForProxy(target);
+                t = new URL(assertSafeFetchUrl(target));
               } catch (err) {
                 res.statusCode = 400;
                 res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -113,7 +98,7 @@ function playlistProxyDevPlugin() {
             }
             let t: URL;
             try {
-              t = assertHttpUrlForProxy(target);
+              t = new URL(assertSafeFetchUrl(target));
             } catch (err) {
               res.statusCode = 400;
               res.setHeader("Content-Type", "text/plain; charset=utf-8");

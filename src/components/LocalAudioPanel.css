@@ -9,7 +9,7 @@
   padding: 8px 14px 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  background: linear-gradient(180deg, rgba(155, 240, 11, 0.05) 0%, transparent 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.74) 0%, transparent 100%);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -18,9 +18,10 @@
 
 .local-audio-title {
   margin: 0;
-  font-size: 0.9375rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.04em;
   color: var(--text);
   flex: 1;
   min-width: 0;
@@ -40,7 +41,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--bg-input);
   color: var(--text-muted);
@@ -60,10 +61,10 @@
 }
 
 .local-audio-icon-btn--on {
-  color: var(--text);
-  border-color: var(--accent-border);
-  background: var(--accent-muted);
-  box-shadow: inset 0 -2px 0 var(--accent);
+  color: #fff;
+  border-color: #111;
+  background: #111;
+  box-shadow: none;
 }
 
 .local-audio-icon-btn--danger:hover:not(:disabled) {
@@ -121,7 +122,7 @@
   align-items: center;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
-  background: rgba(0, 0, 0, 0.12);
+  background: rgba(246, 246, 244, 0.74);
 }
 
 .local-audio-toolbar-playback {
@@ -142,27 +143,30 @@
 
 .ebook-voice-controls {
   display: flex;
+  flex: 1 1 420px;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
+  overflow: visible;
 }
 
 .ebook-voice-toggle {
   display: inline-flex;
-  padding: 2px;
+  flex: 0 0 auto;
+  padding: 1px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   background: var(--bg-input);
 }
 
 .ebook-voice-toggle-btn {
-  padding: 4px 8px;
+  padding: 3px 6px;
   border: 0;
-  border-radius: calc(var(--radius-md) - 3px);
+  border-radius: 999px;
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   font-weight: 800;
   cursor: pointer;
 }
@@ -172,7 +176,7 @@
 }
 
 .ebook-voice-toggle-btn--active {
-  color: #071005;
+  color: #fff;
   background: var(--accent);
 }
 
@@ -183,16 +187,22 @@
 
 .ebook-voice-field {
   display: inline-flex;
+  flex: 0 1 122px;
   align-items: center;
-  gap: 6px;
-  padding: 5px 8px;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px 5px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   background: var(--bg-input);
   color: var(--text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.ebook-voice-field span {
+  flex: 0 0 auto;
 }
 
 .ebook-voice-field--voice {
@@ -209,14 +219,99 @@
 }
 
 .ebook-voice-field input[type="range"] {
-  width: 72px;
+  width: 54px;
   accent-color: var(--accent);
+}
+
+.ebook-voice-scale {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.ebook-voice-scale-btn {
+  min-height: 24px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.625rem;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ebook-voice-scale-btn:hover,
+.ebook-voice-scale-btn--open {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+}
+
+.ebook-voice-scale--locked .ebook-voice-scale-btn,
+.ebook-voice-scale-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+
+.ebook-voice-scale--locked .ebook-voice-scale-btn:hover,
+.ebook-voice-scale-btn:disabled:hover {
+  color: var(--text-muted);
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+
+.ebook-voice-scale-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 140px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.18);
+}
+
+.ebook-voice-scale-popover-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.ebook-voice-scale-title {
+  color: var(--text-muted);
+  font-size: 0.625rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ebook-voice-scale-range {
+  width: 100%;
+  min-width: 120px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.ebook-voice-scale-readout {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
 }
 
 .ebook-voice-preset-btn {
   padding: 6px 9px;
   border: 1px solid var(--accent-border);
-  border-radius: var(--radius-md);
+  border-radius: 999px;
   background: var(--accent-muted);
   color: var(--text-secondary);
   font-size: 0.6875rem;
@@ -227,7 +322,7 @@
 
 .ebook-voice-preset-btn:hover:not(:disabled) {
   color: var(--text);
-  background: rgba(155, 240, 11, 0.13);
+  background: rgba(28, 28, 30, 0.12);
 }
 
 .ebook-voice-preset-btn:disabled {
@@ -236,9 +331,11 @@
 }
 
 .ebook-neural-status {
-  max-width: 260px;
+  flex: 1 1 100%;
+  min-width: 0;
+  max-width: none;
   color: var(--text-muted);
-  font-size: 0.6875rem;
+  font-size: 0.625rem;
   font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -251,6 +348,23 @@
 
 .ebook-voice-field--natural input {
   accent-color: var(--accent);
+}
+
+.local-audio-pos-glyph--loading {
+  display: inline-block;
+  width: 0.72rem;
+  height: 0.72rem;
+  border: 2px solid color-mix(in srgb, var(--accent-hover) 35%, transparent);
+  border-top-color: var(--accent-hover);
+  border-radius: 50%;
+  animation: local-audio-pos-spin 0.75s linear infinite;
+  vertical-align: middle;
+}
+
+@keyframes local-audio-pos-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .local-audio-hourglass {
@@ -301,12 +415,28 @@
   line-height: 1.4;
 }
 
+.local-audio-empty-formats {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+
+.local-audio-empty-formats p {
+  margin: 0;
+}
+
+.local-audio-empty-formats p + p {
+  margin-top: 4px;
+}
+
 .ebook-reader {
   margin: 8px 10px;
   padding: 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-input);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -353,7 +483,7 @@
   display: flex;
   align-items: stretch;
   gap: 0;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid rgba(97, 66, 34, 0.08);
 }
 
 .local-audio-row-hit {
@@ -373,7 +503,7 @@
 }
 
 .local-audio-row-hit:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.64);
 }
 
 .local-audio-row.active {
@@ -388,7 +518,7 @@
 .local-audio-icon {
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  border-radius: 10px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -401,7 +531,7 @@
 .local-audio-thumb {
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  border-radius: 10px;
   flex-shrink: 0;
   object-fit: cover;
   border: 1px solid var(--border);
@@ -543,7 +673,7 @@
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--text-secondary);
-  background: rgba(0, 0, 0, 0.22);
+  background: rgba(246, 246, 244, 0.8);
   user-select: none;
   transition: color 0.12s ease, background 0.12s ease;
 }
@@ -564,7 +694,7 @@
 
 .local-audio-translate-summary:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .local-audio-translate-details-body {
@@ -572,7 +702,7 @@
   overflow-y: auto;
   overflow-x: hidden;
   border-top: 1px solid var(--border);
-  background: var(--bg-panel, rgba(12, 14, 18, 0.96));
+  background: var(--bg-panel, #f7f7f5);
 }
 
 .local-audio-translate-details-body .lyrics-chat-translate-settings {
@@ -581,4 +711,203 @@
   padding-bottom: 6px;
   padding-left: 12px;
   padding-right: 12px;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .local-audio-header {
+    padding: 10px 14px 12px;
+  }
+
+  .local-audio-icon-btn,
+  .audio-playback-icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .local-audio-toolbar {
+    gap: 8px;
+    padding: 8px 10px;
+    align-items: stretch;
+  }
+
+  .local-audio-toolbar-playback {
+    margin-left: 0;
+    flex-basis: 100%;
+    justify-content: flex-start;
+  }
+
+  .local-audio-toolbar .url-btn,
+  .local-audio-toolbar .file-btn,
+  .ebook-reader .url-btn,
+  .ebook-reader .btn-ghost {
+    min-height: 40px;
+    padding: 8px 12px;
+  }
+
+  .ebook-voice-controls {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .ebook-voice-field {
+    min-height: 28px;
+    padding: 3px 5px;
+  }
+
+  .ebook-voice-field input[type="range"] {
+    width: min(78px, 18vw);
+    min-width: 46px;
+  }
+
+  .ebook-voice-scale-btn {
+    min-height: 26px;
+    padding: 3px 6px;
+  }
+
+  .ebook-voice-toggle-btn {
+    min-height: 26px;
+    padding: 3px 6px;
+  }
+
+  .ebook-neural-status {
+    max-width: none;
+  }
+
+  .local-audio-row-hit {
+    min-height: 56px;
+    padding: 8px 10px 8px 12px;
+  }
+
+  .local-audio-icon,
+  .local-audio-thumb {
+    width: 36px;
+    height: 36px;
+  }
+
+  .local-audio-row-actions {
+    min-width: 54px;
+  }
+
+  .local-audio-pos-btn {
+    min-height: 28px;
+    min-width: 48px;
+  }
+
+  .local-audio-del {
+    width: 44px;
+  }
+
+  .ebook-reader {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .ebook-reader-main {
+    flex: 1 1 260px;
+  }
+
+  .ebook-reader-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 820px) {
+  .ebook-voice-field {
+    flex: 0 1 116px;
+    justify-content: flex-start;
+  }
+
+  .ebook-voice-field input[type="range"] {
+    width: min(68px, 16vw);
+  }
+
+  .ebook-voice-scale-popover {
+    left: auto;
+    right: 0;
+    min-width: min(220px, calc(100vw - 32px));
+  }
+}
+
+/* AD editorial theme overrides */
+.local-audio-header,
+.local-audio-toolbar {
+  background: #fff;
+  border-bottom: 1px solid #111;
+}
+
+.local-audio-title {
+  font-size: 1.32rem;
+  font-family: var(--font);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.local-audio-icon-btn,
+.local-audio-toolbar .url-btn,
+.local-audio-toolbar .file-btn,
+.ebook-reader .url-btn,
+.ebook-reader .btn-ghost,
+.ebook-voice-toggle,
+.ebook-voice-toggle-btn,
+.ebook-voice-field,
+.ebook-voice-scale-btn,
+.ebook-voice-scale-popover,
+.ebook-voice-preset-btn,
+.local-audio-pos-btn {
+  border-radius: 0;
+}
+
+.local-audio-icon-btn,
+.ebook-voice-field,
+.ebook-voice-scale-btn,
+.ebook-voice-scale-popover,
+.ebook-voice-preset-btn {
+  background: #fff;
+  border-color: #111;
+}
+
+.local-audio-icon-btn--on,
+.ebook-voice-toggle-btn--active {
+  color: #fff;
+  background: #000;
+  border-color: #000;
+}
+
+.ebook-voice-controls,
+.ebook-reader-actions,
+.local-audio-toolbar,
+.ebook-voice-scale-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.ebook-reader {
+  border-radius: 0;
+  border: 1px solid #111;
+  background: #fff;
+  box-shadow: none;
+}
+
+.local-audio-row {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.18);
+}
+
+.local-audio-row-hit:hover {
+  background: #f7f7f7;
+}
+
+.local-audio-row.active {
+  background: #f2f2f2;
+  box-shadow: inset 4px 0 0 #000;
+}
+
+.local-audio-thumb,
+.local-audio-icon {
+  border-radius: 0;
 }

@@ -8,10 +8,13 @@ import { loadVideoResumeSeconds } from "../utils/localVideoResumeStorage";
 import { mimeHintForLocalVideoFilename } from "../utils/localVideoMime";
 import { LocalAudioPanel, type LocalAudioPanelHandle } from "./LocalAudioPanel";
 import { RadioPanel } from "./RadioPanel";
+import { PodcastPanel } from "./PodcastPanel";
 import "./ChannelBrowser.css";
 
-const ROW_H = 52;
-const OVERSCAN = 12;
+const ROW_H = 42;
+const OVERSCAN = 16;
+const MEDIA_PLAYBACK_TOGGLE_EVENT = "iptv-media-playback-toggle";
+const MEDIA_PLAYBACK_STATE_EVENT = "iptv-media-playback-state";
 
 function normalizeDesktopLocalVideoRows(raw: unknown): Channel[] {
   if (!Array.isArray(raw)) return [];
@@ -167,7 +170,6 @@ export interface ChannelBrowserProps {
   activeLeftId: string | null;
   activeRightId: string | null;
   splitView: boolean;
-  onSplitViewChange: (v: boolean) => void;
   assignTarget: AssignPanePersisted;
   onAssignTargetChange: (t: AssignPanePersisted) => void;
   onSelectChannel: (c: Channel) => void;
@@ -177,6 +179,7 @@ export interface ChannelBrowserProps {
   onClearList: () => void;
   /** Television: append channels for disk / browser-picked video files (split view with IPTV). */
   onAddLocalVideoChannels: (channels: Channel[]) => void;
+  onRemoveChannel: (channelId: string) => void;
   parseMessage: string | null;
   onPlaylistMessage: (message: string | null) => void;
   favoriteUrls: Set<string>;
@@ -187,20 +190,27 @@ export interface ChannelBrowserProps {
   audioLibraryContinuous: boolean;
   onAudioLibraryShuffleChange: (v: boolean) => void;
   onAudioLibraryContinuousChange: (v: boolean) => void;
+  recordingActive: boolean;
   sidebarMode: SidebarModePersisted;
   onSidebarModeChange: (mode: SidebarModePersisted) => void;
   /** Sidebar IndexedDB library tracks in list order (blob URLs) for auto-advance / shuffle. */
   onIndexedLibraryChannelsChange?: (channels: Channel[]) => void;
+  /** Clear active player selection when the local audio library is emptied. */
+  onLibraryCleared?: () => void;
+  /** Clear active player selection when a single local audio track is removed. */
+  onLibraryTrackRemoved?: (trackId: string) => void;
+  compactView: boolean;
+  onCompactViewChange: (enabled: boolean) => void;
 }
 
 type ListTab = ListTabPersisted;
+type RadioSectionTab = "stations" | "podcasts";
 
 function ChannelBrowserInner({
   channels,
   activeLeftId,
   activeRightId,
   splitView,
-  onSplitViewChange,
   assignTarget,
   onAssignTargetChange,
   onSelectChannel,
@@ -209,6 +219,7 @@ function ChannelBrowserInner({
   onLoadM3U,
   onClearList,
   onAddLocalVideoChannels,
+  onRemoveChannel,
   parseMessage,
   onPlaylistMessage,
   favoriteUrls,
@@ -217,9 +228,14 @@ function ChannelBrowserInner({
   audioLibraryContinuous,
   onAudioLibraryShuffleChange,
   onAudioLibraryContinuousChange,
+  recordingActive,
   sidebarMode,
   onSidebarModeChange,
   onIndexedLibraryChannelsChange,
+  onLibraryCleared,
+  onLibraryTrackRemoved,
+  compactView,
+  onCompactViewChange,
 }: ChannelBrowserProps) {
   const [playlistUrl, setPlaylistUrl] = useState(() => loadLastPlaylistUrl());
   const [webVideoUrl, setWebVideoUrl] = useState("");
@@ -228,10 +244,17 @@ function ChannelBrowserInner({
   const [group, setGroup] = useState(() => loadUiSession().group);
   const [listTab, setListTab] = useState<ListTab>(() => loadUiSession().listTab);
   const [radioCountry, setRadioCountry] = useState(() => loadUiSession().radioCountry);
+  const [podcastCountry, setPodcastCountry] = useState(() => loadUiSession().podcastCountry);
+  const [podcastGenreId, setPodcastGenreId] = useState(() => loadUiSession().podcastGenreId);
+  const [radioSectionTab, setRadioSectionTab] = useState<RadioSectionTab>("stations");
+  const [tvToolsOpen, setTvToolsOpen] = useState(false);
+  const [mediaPlaybackState, setMediaPlaybackState] = useState<{ channelId: string; paused: boolean } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const localVideoFileRef = useRef<HTMLInputElement>(null);
+  const tvToolsRef = useRef<HTMLDivElement>(null);
   const audioPanelRef = useRef<LocalAudioPanelHandle>(null);
   const groups = useGroups(channels);
 
@@ -243,8 +266,27 @@ function ChannelBrowserInner({
   }, [groups, group]);
 
   useEffect(() => {
-    saveUiSession({ listTab, query, group, country: "All countries", sidebarMode, radioCountry });
-  }, [listTab, query, group, sidebarMode, radioCountry]);
+    saveUiSession({ listTab, query, group, country: "All countries", sidebarMode, radioCountry, podcastCountry, podcastGenreId });
+  }, [listTab, query, group, sidebarMode, radioCountry, podcastCountry, podcastGenreId]);
+
+  useEffect(() => {
+    if (!tvToolsOpen) return;
+    const onDocMouseDown = (ev: Event) => {
+      const target = ev.target;
+      if (!(target instanceof Node)) return;
+      if (tvToolsRef.current?.contains(target)) return;
+      setTvToolsOpen(false);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setTvToolsOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [tvToolsOpen]);
 
   const toggleFavorite = useCallback(
     (c: Channel, e: MouseEvent) => {
@@ -256,6 +298,39 @@ function ChannelBrowserInner({
   );
 
   const isFavorite = useCallback((c: Channel) => favoriteUrls.has(favoriteKeyForChannel(c)), [favoriteUrls]);
+
+  useEffect(() => {
+    const onPlaybackState = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ channelId?: string; paused?: boolean }>).detail;
+      if (!detail?.channelId || typeof detail.paused !== "boolean") return;
+      setMediaPlaybackState({ channelId: detail.channelId, paused: detail.paused });
+    };
+    window.addEventListener(MEDIA_PLAYBACK_STATE_EVENT, onPlaybackState);
+    return () => window.removeEventListener(MEDIA_PLAYBACK_STATE_EVENT, onPlaybackState);
+  }, []);
+
+  const toggleMediaPlayback = useCallback(
+    (c: Channel, active: boolean, e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!active) {
+        onSelectChannel(c);
+        return;
+      }
+      if (c.youtubeVideoId || c.webVideoPageUrl) return;
+      window.dispatchEvent(new CustomEvent(MEDIA_PLAYBACK_TOGGLE_EVENT, { detail: { channelId: c.id } }));
+    },
+    [onSelectChannel]
+  );
+
+  const removeChannel = useCallback(
+    (c: Channel, e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onRemoveChannel(c.id);
+    },
+    [onRemoveChannel]
+  );
 
   const flushLocalVideoAdd = useCallback(
     (rows: Channel[]) => {
@@ -304,8 +379,19 @@ function ChannelBrowserInner({
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (el) setScrollTop(el.scrollTop);
+    if (!el || scrollRafRef.current != null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (scrollRef.current) setScrollTop(scrollRef.current.scrollTop);
+    });
   }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollRafRef.current != null) window.cancelAnimationFrame(scrollRafRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -321,7 +407,7 @@ function ChannelBrowserInner({
       )
     ) {
       onPlaylistMessage(
-        "That file is a video, not an M3U playlist. Use + Add local video (or Add local video via browser) in the Television toolbar."
+        "That file is a video, not an M3U playlist. Use + Add local video in the Television toolbar."
       );
       return;
     }
@@ -389,7 +475,20 @@ function ChannelBrowserInner({
     <div className="browser-root">
       <header className="browser-header">
         <div className="browser-header-row">
-          <h1 className="browser-title">Smart Media player</h1>
+          <h1 className="browser-title">Player</h1>
+          <button
+            type="button"
+            className={`compact-view-btn${compactView ? " compact-view-btn--active" : ""}`}
+            onClick={() => onCompactViewChange(!compactView)}
+            title={
+              compactView
+                ? "Exit compact layout — show channel library"
+                : "Compact layout — hide library and maximize the reader; TV keeps playing while you read"
+            }
+            aria-pressed={compactView}
+          >
+            {compactView ? "Compact on" : "Compact"}
+          </button>
         </div>
         <div className="source-tabs" role="tablist" aria-label="Library">
           <button
@@ -403,6 +502,9 @@ function ChannelBrowserInner({
               📺
             </span>
             Television
+            {recordingActive ? (
+              <span className="source-tab-recording-dot" role="status" aria-label="Recording is active" />
+            ) : null}
           </button>
           <button
             type="button"
@@ -430,8 +532,19 @@ function ChannelBrowserInner({
           </button>
         </div>
         {sidebarMode === "tv" ? (
-          <>
-            <div className="toolbar">
+          <div className="tv-tools-shell" ref={tvToolsRef}>
+            <button
+              type="button"
+              className="tv-tools-toggle"
+              aria-expanded={tvToolsOpen}
+              aria-haspopup="dialog"
+              onClick={() => setTvToolsOpen((open) => !open)}
+            >
+              TV tools
+            </button>
+            {tvToolsOpen ? (
+              <div className="tv-tools-popover" role="dialog" aria-label="Television tools">
+                <div className="toolbar">
               <input
                 ref={fileRef}
                 type="file"
@@ -458,16 +571,8 @@ function ChannelBrowserInner({
               >
                 Reset stream
               </button>
-              <label className="split-toggle">
-                <input
-                  type="checkbox"
-                  checked={splitView}
-                  onChange={(e) => onSplitViewChange(e.target.checked)}
-                />
-                Split view (2 players)
-              </label>
-            </div>
-            <div className="url-row">
+                </div>
+                <div className="url-row">
               <input
                 className="playlist-url-input"
                 type="url"
@@ -499,8 +604,8 @@ function ChannelBrowserInner({
               >
                 Refresh channels
               </button>
-            </div>
-            <div className="url-row">
+                </div>
+                <div className="url-row">
               <input
                 className="playlist-url-input"
                 type="url"
@@ -518,20 +623,15 @@ function ChannelBrowserInner({
               <button type="button" className="url-btn" onClick={addWebVideoUrl}>
                 Add web video
               </button>
-            </div>
-            {parseMessage ? <div className="message-bar">{parseMessage}</div> : null}
-          </>
+                </div>
+                {parseMessage ? <div className="message-bar">{parseMessage}</div> : null}
+              </div>
+            ) : null}
+          </div>
         ) : sidebarMode === "radio" ? (
           <p className="browser-sub browser-sub--radio">
-            Online stations by country (Radio Browser). Use <strong>Television</strong> to load M3U playlists and IPTV
-            channels. Favorites (★) work for both TV and radio streams.
-          </p>
-        ) : sidebarMode === "audio" ? (
-          <p className="browser-sub browser-sub--radio">
-            Local audio: on desktop use <strong>Add files…</strong> for reliable loading; the library is stored in
-            IndexedDB. Playback resumes on the <strong>right</strong> player. <strong>⇄</strong> shuffle and{" "}
-            <strong>⟳</strong> continuous play sit in the row with the add buttons. Use <strong>Television</strong> for M3U
-            playlists and IPTV channels.
+            Online radio stations and free podcasts. Use <strong>Radio stations</strong> for live streams, or{" "}
+            <strong>Podcasts</strong> to browse shows and episodes. Favorites (★) work across TV, radio, and podcasts.
           </p>
         ) : null}
       </header>
@@ -566,6 +666,27 @@ function ChannelBrowserInner({
             Local videos{localVideosCount > 0 ? ` (${localVideosCount})` : ""}
           </button>
         </div>
+      ) : sidebarMode === "radio" ? (
+        <div className="browser-tabs" role="tablist" aria-label="Radio section">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={radioSectionTab === "stations"}
+            className={`browser-tab${radioSectionTab === "stations" ? " active" : ""}`}
+            onClick={() => setRadioSectionTab("stations")}
+          >
+            Radio stations
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={radioSectionTab === "podcasts"}
+            className={`browser-tab${radioSectionTab === "podcasts" ? " active" : ""}`}
+            onClick={() => setRadioSectionTab("podcasts")}
+          >
+            Podcasts
+          </button>
+        </div>
       ) : null}
 
       {splitView && sidebarMode !== "audio" ? (
@@ -577,7 +698,7 @@ function ChannelBrowserInner({
             onClick={() => onAssignTargetChange("L")}
             aria-pressed={assignTarget === "L"}
           >
-            Left
+            Screen 1
           </button>
           <button
             type="button"
@@ -585,7 +706,7 @@ function ChannelBrowserInner({
             onClick={() => onAssignTargetChange("R")}
             aria-pressed={assignTarget === "R"}
           >
-            Right
+            Screen 2
           </button>
         </div>
       ) : null}
@@ -658,14 +779,11 @@ function ChannelBrowserInner({
                   + Add local video
                 </button>
               ) : null}
-              <button type="button" className="file-btn" onClick={() => localVideoFileRef.current?.click()}>
-                {hasDesktopVideoPick ? "+ Add local video (browser)" : "+ Add local video"}
-              </button>
-              <p className="local-videos-toolbar-hint">
-                Last played time is remembered per file (this browser). On the desktop app, <strong>.mkv</strong> files
-                are converted to H.264/AAC MP4 on first play (FFmpeg; may take a while). Use split view and Next click
-                plays on to play a file on one side while IPTV runs on the other.
-              </p>
+              {!hasDesktopVideoPick ? (
+                <button type="button" className="file-btn" onClick={() => localVideoFileRef.current?.click()}>
+                  + Add local video
+                </button>
+              ) : null}
             </div>
           ) : null}
 
@@ -696,9 +814,8 @@ function ChannelBrowserInner({
                 ) : listTab === "localVideos" ? (
                   localVideosCount === 0 ? (
                     <>
-                      No local videos yet. Use <strong>+ Add local video</strong> (desktop) or{" "}
-                      <strong>+ Add local video (browser)</strong> above. Playback position is saved per file in this
-                      browser.
+                      No local videos yet. Use <strong>+ Add local video</strong> above. Playback position is saved per
+                      file in this browser.
                     </>
                   ) : (
                     <>No local videos match your search. Try clearing the search box.</>
@@ -718,12 +835,17 @@ function ChannelBrowserInner({
                   const fav = isFavorite(c);
                   const leftOn = c.id === activeLeftId;
                   const rightOn = splitView && c.id === activeRightId;
+                  const active = leftOn || rightOn;
+                  const playback = mediaPlaybackState?.channelId === c.id ? mediaPlaybackState : null;
+                  const isPlaying = active && playback?.paused !== true;
+                  const isPaused = active && playback?.paused === true;
+                  const embeddedPlayback = !!(c.youtubeVideoId || c.webVideoPageUrl);
                   const rowClass =
-                    leftOn || rightOn
+                    active
                       ? `channel-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
                       : "channel-row";
                   return (
-                    <div key={c.id} className={rowClass} style={{ top }}>
+                    <div key={c.id} className={rowClass} style={{ transform: `translateY(${top}px)` }}>
                       <button type="button" className="channel-row-hit" onClick={() => onSelectChannel(c)}>
                         {c.logo ? (
                           <img
@@ -774,6 +896,43 @@ function ChannelBrowserInner({
                           ) : null}
                         </span>
                       </button>
+                      <div className="channel-row-actions" aria-label="Playback">
+                        <button
+                          type="button"
+                          className={`channel-play-btn${isPaused ? " channel-play-btn--paused" : ""}`}
+                          title={
+                            embeddedPlayback && active
+                              ? "Use the embedded player controls"
+                              : isPlaying
+                                ? "Pause"
+                                : isPaused
+                                  ? "Resume"
+                                  : "Play"
+                          }
+                          aria-label={
+                            embeddedPlayback && active
+                              ? `${c.name} uses embedded player controls`
+                              : isPlaying
+                                ? `Pause ${c.name}`
+                                : isPaused
+                                  ? `Resume ${c.name}`
+                                  : `Play ${c.name}`
+                          }
+                          disabled={embeddedPlayback && active}
+                          onClick={(e) => toggleMediaPlayback(c, active, e)}
+                        >
+                          {isPlaying ? "Ⅱ" : "▶"}
+                        </button>
+                        <button
+                          type="button"
+                          className="channel-remove-btn"
+                          title="Remove from list"
+                          aria-label={`Remove ${c.name}`}
+                          onClick={(e) => removeChannel(c, e)}
+                        >
+                          ×
+                        </button>
+                      </div>
                       <button
                         type="button"
                         className={`fav-btn${fav ? " fav-btn--on" : ""}`}
@@ -792,7 +951,7 @@ function ChannelBrowserInner({
           </div>
         </>
       ) : null}
-      {sidebarMode === "radio" ? (
+      {sidebarMode === "radio" && radioSectionTab === "stations" ? (
         <RadioPanel
           onSelectStation={onSelectChannel}
           activeLeftId={activeLeftId}
@@ -802,6 +961,20 @@ function ChannelBrowserInner({
           onToggleFavoriteChannel={onToggleFavoriteChannel}
           radioCountry={radioCountry}
           onRadioCountryChange={setRadioCountry}
+        />
+      ) : null}
+      {sidebarMode === "radio" && radioSectionTab === "podcasts" ? (
+        <PodcastPanel
+          onSelectEpisode={onSelectChannel}
+          activeLeftId={activeLeftId}
+          activeRightId={activeRightId}
+          splitView={splitView}
+          favoriteUrls={favoriteUrls}
+          onToggleFavoriteChannel={onToggleFavoriteChannel}
+          podcastCountry={podcastCountry}
+          onPodcastCountryChange={setPodcastCountry}
+          podcastGenreId={podcastGenreId}
+          onPodcastGenreChange={setPodcastGenreId}
         />
       ) : null}
       {/*
@@ -823,6 +996,8 @@ function ChannelBrowserInner({
           audioLibraryContinuous={audioLibraryContinuous}
           onAudioLibraryShuffleChange={onAudioLibraryShuffleChange}
           onAudioLibraryContinuousChange={onAudioLibraryContinuousChange}
+          onLibraryCleared={onLibraryCleared}
+          onLibraryTrackRemoved={onLibraryTrackRemoved}
         />
       </div>
     </div>

@@ -1,5 +1,9 @@
 import { isLikelyHls, isLikelyMpegTsOverHttp, isLikelyProgressiveVideoUrl } from "./streamKind";
 
+export function isPodcastChannelId(channelId: string): boolean {
+  return channelId.startsWith("podcast-");
+}
+
 export function isRadioStationChannelId(channelId: string): boolean {
   return channelId.startsWith("radio-");
 }
@@ -23,6 +27,7 @@ export function canRecordRawHttpStream(url: string, channelId: string): boolean 
   if (isLikelyRawTransportRecordable(u)) return true;
   if (isLikelyProgressiveVideoUrl(u)) return true;
   if (isRadioStationChannelId(channelId)) return true;
+  if (isPodcastChannelId(channelId)) return true;
   return true;
 }
 
@@ -46,6 +51,7 @@ export function recordFileSuffixAndTapType(url: string, channelId: string): Reco
   if (/\.ogg(\?|#|$)/.test(lower)) return { filenameExt: ".ogg", tapContentType: "audio/ogg", recordMode: "raw" };
   if (/\.opus(\?|#|$)/.test(lower)) return { filenameExt: ".opus", tapContentType: "audio/ogg", recordMode: "raw" };
   if (isRadioStationChannelId(channelId)) return { filenameExt: ".mp3", tapContentType: "audio/mpeg", recordMode: "raw" };
+  if (isPodcastChannelId(channelId)) return { filenameExt: ".mp3", tapContentType: "audio/mpeg", recordMode: "raw" };
   if (isLikelyMpegTsOverHttp(url)) return { filenameExt: ".mp4", tapContentType: "video/mp2t", recordMode: "mpegts" };
   return { filenameExt: ".bin", tapContentType: "application/octet-stream", recordMode: "raw" };
 }

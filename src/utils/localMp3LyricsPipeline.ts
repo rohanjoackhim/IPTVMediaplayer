@@ -34,6 +34,8 @@ export interface LocalMp3LyricsResult {
   songMeaningLlmHost?: string;
   metaArtist?: string;
   metaTitle?: string;
+  manualSaved?: boolean;
+  fromLocalCache?: boolean;
 }
 
 export const LOCAL_LYRICS_MATCH_VERSION = 2;
@@ -88,7 +90,13 @@ export function mapCachedLibraryLyricsToResult(cached: LibraryLyricsCacheRow): L
     songMeaningLlmHost: cached.songMeaningLlmHost?.trim() || undefined,
     metaArtist: cached.metaArtist?.trim() || undefined,
     metaTitle: cached.metaTitle?.trim() || undefined,
+    manualSaved: cached.manualSaved === true,
+    fromLocalCache: true,
   };
+}
+
+export function isUsableSavedLyricsCache(cached: LibraryLyricsCacheRow | null | undefined): cached is LibraryLyricsCacheRow {
+  return !!cached?.pairs?.length;
 }
 
 /** Add LLM song meaning when missing (e.g. older cached lyrics). */
@@ -192,9 +200,10 @@ async function finalizeWithLlmSongMeaning(
 
 export async function saveLocalMp3LyricsResultToCache(
   trackId: string,
-  result: LocalMp3LyricsResult
-): Promise<void> {
-  if (!trackId || !result.pairs.length || typeof indexedDB === "undefined") return;
+  result: LocalMp3LyricsResult,
+  opts?: { manualSaved?: boolean }
+): Promise<boolean> {
+  if (!trackId || !result.pairs.length || typeof indexedDB === "undefined") return false;
   try {
     await putLibraryLyricsCache(trackId, {
       pairs: result.pairs,
@@ -211,9 +220,12 @@ export async function saveLocalMp3LyricsResultToCache(
       metaArtist: result.metaArtist,
       metaTitle: result.metaTitle,
       lyricsMatchVersion: LOCAL_LYRICS_MATCH_VERSION,
+      manualSaved: opts?.manualSaved === true,
     });
+    return true;
   } catch {
     /* quota / IndexedDB */
+    return false;
   }
 }
 

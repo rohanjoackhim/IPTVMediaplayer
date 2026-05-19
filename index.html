@@ -6,8 +6,12 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <title>Smart Media player</title>
+    <title>Player</title>
     <meta name="theme-color" content="#0a0b0a" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* https:; media-src 'self' blob: file: http: https:; connect-src 'self' http://127.0.0.1:* https: blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-src https:; form-action 'none';"
+    />
   </head>
   <body>
     <div id="root"></div>

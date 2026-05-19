@@ -5,18 +5,26 @@ const KEY = "iptv-ui-session";
 export type ListTabPersisted = "all" | "favorites" | "localVideos";
 /** Radio sidebar: only all vs favorites (no local-files tab). */
 export type RadioListTabPersisted = "all" | "favorites";
+/** Podcast sidebar: all shows/episodes vs favorites only. */
+export type PodcastListTabPersisted = "all" | "favorites";
 export type AssignPanePersisted = "L" | "R";
 export type SidebarModePersisted = "tv" | "radio" | "audio";
 
 export interface UiSession {
-  v: 8;
+  v: 9;
   listTab: ListTabPersisted;
   /** Radio sidebar: all stations in country vs favorites only (same URLs as Television favorites). */
   radioListTab: RadioListTabPersisted;
-  /** Left sidebar: IPTV, online radio, or Audio. */
+  /** Podcast sidebar: all vs favorites only. */
+  podcastListTab: PodcastListTabPersisted;
+  /** Left sidebar: IPTV, online radio/podcasts, or Audio. */
   sidebarMode: SidebarModePersisted;
   /** Radio Browser country name (exact match to API country list). */
   radioCountry: string;
+  /** iTunes storefront country code for podcast discovery (e.g. us, gb). */
+  podcastCountry: string;
+  /** Apple Podcasts genre id; 0 = all genres. */
+  podcastGenreId: number;
   query: string;
   group: string;
   country: string;
@@ -34,14 +42,19 @@ export interface UiSession {
   audioLibraryShuffle: boolean;
   /** Local library audio: when a track ends, start the next (or random if shuffle) in the library list. */
   audioLibraryContinuous: boolean;
+  /** Hide the library sidebar and maximize the player / reader area. */
+  compactView: boolean;
 }
 
 const defaultSession: UiSession = {
-  v: 8,
+  v: 9,
   listTab: "all",
   radioListTab: "all",
+  podcastListTab: "all",
   sidebarMode: "tv",
   radioCountry: "",
+  podcastCountry: "us",
+  podcastGenreId: 0,
   query: "",
   group: "All groups",
   country: "All countries",
@@ -54,6 +67,7 @@ const defaultSession: UiSession = {
   radioEqCustomGains: parseEqCustomGains(undefined),
   audioLibraryShuffle: false,
   audioLibraryContinuous: false,
+  compactView: false,
 };
 
 function vol(x: unknown, d: number) {
@@ -67,8 +81,18 @@ export function clampSidebarWidthPx(n: number): number {
 
 function parseSidebarMode(raw: unknown): SidebarModePersisted {
   if (raw === "radio") return "radio";
+  if (raw === "podcast") return "radio";
   if (raw === "audio") return "audio";
   return "tv";
+}
+
+function parsePodcastListTab(raw: unknown): PodcastListTabPersisted {
+  return raw === "favorites" ? "favorites" : "all";
+}
+
+function parsePodcastGenreId(raw: unknown): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
 function parseRadioListTab(raw: unknown): RadioListTabPersisted {
@@ -81,107 +105,16 @@ function parseListTab(raw: unknown): ListTabPersisted {
   return "all";
 }
 
-function migrateFromV2(o: Record<string, unknown>): UiSession {
+function migrateFromV8(o: Record<string, unknown>): UiSession {
   return {
-    v: 8,
-    listTab: parseListTab(o.listTab),
-    radioListTab: "all",
-    sidebarMode: "tv",
-    radioCountry: "",
-    query: typeof o.query === "string" ? o.query : "",
-    group: typeof o.group === "string" ? o.group : "All groups",
-    country: typeof o.country === "string" ? o.country : "All countries",
-    splitView: !!o.splitView,
-    assignTarget: o.assignTarget === "R" ? "R" : "L",
-    volumeLeft: vol(o.volumeLeft, 1),
-    volumeRight: vol(o.volumeRight, 1),
-    sidebarWidthPx: defaultSession.sidebarWidthPx,
-    radioEqPreset: defaultSession.radioEqPreset,
-    radioEqCustomGains: [...defaultSession.radioEqCustomGains],
-    audioLibraryShuffle: false,
-    audioLibraryContinuous: false,
-  };
-}
-
-function migrateFromV3(o: Record<string, unknown>): UiSession {
-  return {
-    v: 8,
-    listTab: parseListTab(o.listTab),
-    radioListTab: "all",
-    sidebarMode: parseSidebarMode(o.sidebarMode),
-    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
-    query: typeof o.query === "string" ? o.query : "",
-    group: typeof o.group === "string" ? o.group : "All groups",
-    country: typeof o.country === "string" ? o.country : "All countries",
-    splitView: !!o.splitView,
-    assignTarget: o.assignTarget === "R" ? "R" : "L",
-    volumeLeft: vol(o.volumeLeft, 1),
-    volumeRight: vol(o.volumeRight, 1),
-    sidebarWidthPx: clampSidebarWidthPx(
-      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
-    ),
-    radioEqPreset: defaultSession.radioEqPreset,
-    radioEqCustomGains: [...defaultSession.radioEqCustomGains],
-    audioLibraryShuffle: false,
-    audioLibraryContinuous: false,
-  };
-}
-
-function migrateFromV4(o: Record<string, unknown>): UiSession {
-  return {
-    v: 8,
-    listTab: parseListTab(o.listTab),
-    radioListTab: "all",
-    sidebarMode: parseSidebarMode(o.sidebarMode),
-    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
-    query: typeof o.query === "string" ? o.query : "",
-    group: typeof o.group === "string" ? o.group : "All groups",
-    country: typeof o.country === "string" ? o.country : "All countries",
-    splitView: !!o.splitView,
-    assignTarget: o.assignTarget === "R" ? "R" : "L",
-    volumeLeft: vol(o.volumeLeft, 1),
-    volumeRight: vol(o.volumeRight, 1),
-    sidebarWidthPx: clampSidebarWidthPx(
-      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
-    ),
-    radioEqPreset: defaultSession.radioEqPreset,
-    radioEqCustomGains: [...defaultSession.radioEqCustomGains],
-    audioLibraryShuffle: false,
-    audioLibraryContinuous: false,
-  };
-}
-
-function migrateFromV5(o: Record<string, unknown>): UiSession {
-  return {
-    v: 8,
+    v: 9,
     listTab: parseListTab(o.listTab),
     radioListTab: parseRadioListTab(o.radioListTab),
+    podcastListTab: "all",
     sidebarMode: parseSidebarMode(o.sidebarMode),
     radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
-    query: typeof o.query === "string" ? o.query : "",
-    group: typeof o.group === "string" ? o.group : "All groups",
-    country: typeof o.country === "string" ? o.country : "All countries",
-    splitView: !!o.splitView,
-    assignTarget: o.assignTarget === "R" ? "R" : "L",
-    volumeLeft: vol(o.volumeLeft, 1),
-    volumeRight: vol(o.volumeRight, 1),
-    sidebarWidthPx: clampSidebarWidthPx(
-      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
-    ),
-    radioEqPreset: defaultSession.radioEqPreset,
-    radioEqCustomGains: [...defaultSession.radioEqCustomGains],
-    audioLibraryShuffle: false,
-    audioLibraryContinuous: false,
-  };
-}
-
-function migrateFromV6(o: Record<string, unknown>): UiSession {
-  return {
-    v: 8,
-    listTab: parseListTab(o.listTab),
-    radioListTab: parseRadioListTab(o.radioListTab),
-    sidebarMode: parseSidebarMode(o.sidebarMode),
-    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
+    podcastCountry: "us",
+    podcastGenreId: 0,
     query: typeof o.query === "string" ? o.query : "",
     group: typeof o.group === "string" ? o.group : "All groups",
     country: typeof o.country === "string" ? o.country : "All countries",
@@ -194,9 +127,73 @@ function migrateFromV6(o: Record<string, unknown>): UiSession {
     ),
     radioEqPreset: parseEqPresetId(o.radioEqPreset),
     radioEqCustomGains: parseEqCustomGains(o.radioEqCustomGains),
+    audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
+    audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
+    compactView: typeof o.compactView === "boolean" ? o.compactView : false,
+  };
+}
+
+function migrateFromV2(o: Record<string, unknown>): UiSession {
+  return migrateFromV8({
+    ...o,
+    v: 8,
+    radioListTab: "all",
+    sidebarMode: "tv",
+    radioCountry: "",
+    radioEqPreset: defaultSession.radioEqPreset,
+    radioEqCustomGains: defaultSession.radioEqCustomGains,
     audioLibraryShuffle: false,
     audioLibraryContinuous: false,
-  };
+    compactView: false,
+  });
+}
+
+function migrateFromV3(o: Record<string, unknown>): UiSession {
+  return migrateFromV8({
+    ...o,
+    v: 8,
+    radioListTab: "all",
+    radioEqPreset: defaultSession.radioEqPreset,
+    radioEqCustomGains: defaultSession.radioEqCustomGains,
+    audioLibraryShuffle: false,
+    audioLibraryContinuous: false,
+    compactView: false,
+  });
+}
+
+function migrateFromV4(o: Record<string, unknown>): UiSession {
+  return migrateFromV8({
+    ...o,
+    v: 8,
+    radioListTab: "all",
+    radioEqPreset: defaultSession.radioEqPreset,
+    radioEqCustomGains: defaultSession.radioEqCustomGains,
+    audioLibraryShuffle: false,
+    audioLibraryContinuous: false,
+    compactView: false,
+  });
+}
+
+function migrateFromV5(o: Record<string, unknown>): UiSession {
+  return migrateFromV8({
+    ...o,
+    v: 8,
+    radioEqPreset: defaultSession.radioEqPreset,
+    radioEqCustomGains: defaultSession.radioEqCustomGains,
+    audioLibraryShuffle: false,
+    audioLibraryContinuous: false,
+    compactView: false,
+  });
+}
+
+function migrateFromV6(o: Record<string, unknown>): UiSession {
+  return migrateFromV8({
+    ...o,
+    v: 8,
+    audioLibraryShuffle: false,
+    audioLibraryContinuous: false,
+    compactView: false,
+  });
 }
 
 function migrateFromV1(o: Record<string, unknown>): UiSession {
@@ -220,13 +217,17 @@ export function loadUiSession(): UiSession {
     if (o.v === 4) return migrateFromV4(o);
     if (o.v === 5) return migrateFromV5(o);
     if (o.v === 6) return migrateFromV6(o);
-    if (o.v !== 7 && o.v !== 8) return { ...defaultSession };
+    if (o.v === 7 || o.v === 8) return migrateFromV8(o);
+    if (o.v !== 9) return { ...defaultSession };
     return {
-      v: 8,
+      v: 9,
       listTab: parseListTab(o.listTab),
       radioListTab: parseRadioListTab(o.radioListTab),
+      podcastListTab: parsePodcastListTab(o.podcastListTab),
       sidebarMode: parseSidebarMode(o.sidebarMode),
       radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
+      podcastCountry: typeof o.podcastCountry === "string" && o.podcastCountry.trim() ? o.podcastCountry : "us",
+      podcastGenreId: parsePodcastGenreId(o.podcastGenreId),
       query: typeof o.query === "string" ? o.query : "",
       group: typeof o.group === "string" ? o.group : "All groups",
       country: typeof o.country === "string" ? o.country : "All countries",
@@ -241,6 +242,7 @@ export function loadUiSession(): UiSession {
       radioEqCustomGains: parseEqCustomGains(o.radioEqCustomGains),
       audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
       audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
+      compactView: typeof o.compactView === "boolean" ? o.compactView : false,
     };
   } catch {
     return { ...defaultSession };
@@ -251,11 +253,14 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
   try {
     const cur = loadUiSession();
     const next: UiSession = {
-      v: 8,
+      v: 9,
       listTab: partial.listTab ?? cur.listTab,
       radioListTab: partial.radioListTab ?? cur.radioListTab,
+      podcastListTab: partial.podcastListTab ?? cur.podcastListTab,
       sidebarMode: partial.sidebarMode ?? cur.sidebarMode,
       radioCountry: partial.radioCountry !== undefined ? partial.radioCountry : cur.radioCountry,
+      podcastCountry: partial.podcastCountry !== undefined ? partial.podcastCountry : cur.podcastCountry,
+      podcastGenreId: partial.podcastGenreId !== undefined ? parsePodcastGenreId(partial.podcastGenreId) : cur.podcastGenreId,
       query: partial.query !== undefined ? partial.query : cur.query,
       group: partial.group !== undefined ? partial.group : cur.group,
       country: partial.country !== undefined ? partial.country : cur.country,
@@ -276,6 +281,7 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
         partial.audioLibraryShuffle !== undefined ? partial.audioLibraryShuffle : cur.audioLibraryShuffle,
       audioLibraryContinuous:
         partial.audioLibraryContinuous !== undefined ? partial.audioLibraryContinuous : cur.audioLibraryContinuous,
+      compactView: partial.compactView !== undefined ? partial.compactView : cur.compactView,
     };
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {

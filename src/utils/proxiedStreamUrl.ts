@@ -5,6 +5,8 @@
  * Rewriting to this origin’s /__proxy/stream lets Node/Electron fetch upstream
  * without CORS on the renderer.
  */
+import { getStreamProxyToken } from "./streamProxyAuth";
+
 export function shouldUseStreamProxy(): boolean {
   if (typeof window === "undefined") return false;
   const h = window.location.hostname;
@@ -35,5 +37,8 @@ export function proxiedStreamUrl(originalUrl: string, proxyOrigin?: string): str
     (typeof window !== "undefined" ? window.location.origin : "");
   if (!origin) return originalUrl;
   const base = origin.replace(/\/$/, "");
-  return `${base}/__proxy/stream?url=${encodeURIComponent(trimmed)}`;
+  const qs = new URLSearchParams({ url: trimmed });
+  const token = getStreamProxyToken();
+  if (token) qs.set("token", token);
+  return `${base}/__proxy/stream?${qs.toString()}`;
 }

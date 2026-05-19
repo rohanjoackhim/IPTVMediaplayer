@@ -6,6 +6,18 @@ export interface Channel {
   group?: string;
   /** From tvg-country / group-title heuristics (IPTV lists vary). */
   country?: string;
+  /** Online radio metadata from Radio Browser. */
+  radioTags?: string;
+  radioHomepage?: string;
+  radioCodec?: string;
+  radioBitrate?: number;
+  /** Podcast episode/show metadata from the podcast directory. */
+  podcastShowName?: string;
+  podcastAuthor?: string;
+  podcastGenre?: string;
+  podcastReleaseDate?: string;
+  podcastDurationMs?: number;
+  podcastDescription?: string;
   /** IndexedDB key for local MP3 / audiobook resume (stable file fingerprint). */
   libraryTrackId?: string;
   /** Set when restarting the same library blob so effect teardown skips re-saving resume. */

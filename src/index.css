@@ -1,40 +1,36 @@
 :root {
-  color-scheme: dark;
-  /* Xbox-inspired surfaces: near-black with a subtle green cast */
-  --bg-deep: #0a0b0a;
-  --bg-panel: #141816;
-  --bg-elevated: #1c211d;
-  --bg-input: #121514;
-  --border: #2a3029;
-  --border-subtle: rgba(255, 255, 255, 0.06);
-  /* Text */
-  --text: #f5f6f3;
-  --text-secondary: #c8cfcc;
-  --text-muted: #8b9590;
-  /* Xbox accent (Series / Game Pass lime) */
-  --accent: #9bf00b;
-  --accent-hover: #c5ff52;
-  --accent-dim: rgba(155, 240, 11, 0.4);
-  --accent-muted: rgba(155, 240, 11, 0.14);
-  --accent-border: rgba(155, 240, 11, 0.42);
-  --accent-glow: rgba(155, 240, 11, 0.12);
-  /* Secondary highlight (split right / status) — Xbox cyan */
-  --success: #5ce1e6;
-  --success-muted: rgba(92, 225, 230, 0.12);
-  --danger: #ff6b6b;
-  --danger-muted: rgba(255, 107, 107, 0.12);
-  /* Layout — slightly tighter radii like console tiles */
+  color-scheme: light;
+  /* AD-inspired editorial theme: white canvas, black rules, high-contrast type */
+  --bg-deep: #ffffff;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-input: #ffffff;
+  --border: #111111;
+  --border-subtle: rgba(0, 0, 0, 0.16);
+  --text: #050505;
+  --text-secondary: #2a2a2a;
+  --text-muted: #666666;
+  --accent: #000000;
+  --accent-hover: #000000;
+  --accent-dim: rgba(0, 0, 0, 0.52);
+  --accent-muted: rgba(0, 0, 0, 0.06);
+  --accent-border: rgba(0, 0, 0, 0.64);
+  --accent-glow: rgba(0, 0, 0, 0.1);
+  --success: #0a84ff;
+  --success-muted: rgba(10, 132, 255, 0.1);
+  --danger: #d7352a;
+  --danger-muted: rgba(215, 53, 42, 0.1);
   --row-h: 52px;
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --shadow-panel: 0 0 0 1px var(--border-subtle), 0 12px 40px rgba(0, 0, 0, 0.5),
-    0 0 100px rgba(155, 240, 11, 0.025);
-  --font: "Segoe UI Variable", "Segoe UI", "Bahnschrift", system-ui, -apple-system, sans-serif;
+  --radius-sm: 0;
+  --radius-md: 2px;
+  --radius-lg: 4px;
+  --shadow-panel: none;
+  --font: "Avenir Next", Avenir, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-display: var(--font);
   font-family: var(--font);
   font-size: 15px;
   line-height: 1.5;
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  font-feature-settings: "kern", "liga";
 }
 
 *,
@@ -70,8 +66,8 @@ body {
 }
 
 ::selection {
-  background: rgba(155, 240, 11, 0.28);
-  color: var(--text);
+  background: #000;
+  color: #fff;
 }
 
 button,
@@ -84,12 +80,38 @@ button {
   cursor: pointer;
 }
 
-/* Scrollbars — Xbox lime accent */
+@media (hover: none) and (pointer: coarse) {
+  body {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0.14);
+  }
+
+  button,
+  input,
+  select,
+  summary,
+  [role="button"] {
+    touch-action: manipulation;
+  }
+
+  .channel-scroll,
+  .radio-scroll,
+  .local-audio-scroll,
+  .ebook-player-text,
+  .ebook-pdf-scroll,
+  .ebook-epub-page,
+  .mp3-lyrics-body {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+}
+
+/* Scrollbars — AD-style black accent */
 .channel-scroll,
 .radio-scroll,
 .local-audio-scroll {
   scrollbar-width: thin;
-  scrollbar-color: rgba(155, 240, 11, 0.28) transparent;
+  scrollbar-color: rgba(0, 0, 0, 0.34) transparent;
 }
 
 .channel-scroll::-webkit-scrollbar,
@@ -101,7 +123,7 @@ button {
 .channel-scroll::-webkit-scrollbar-thumb,
 .radio-scroll::-webkit-scrollbar-thumb,
 .local-audio-scroll::-webkit-scrollbar-thumb {
-  background: rgba(155, 240, 11, 0.22);
+  background: rgba(0, 0, 0, 0.28);
   border-radius: 99px;
   border: 2px solid transparent;
   background-clip: padding-box;
@@ -110,6 +132,6 @@ button {
 .channel-scroll::-webkit-scrollbar-thumb:hover,
 .radio-scroll::-webkit-scrollbar-thumb:hover,
 .local-audio-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(155, 240, 11, 0.4);
+  background: rgba(0, 0, 0, 0.5);
   background-clip: padding-box;
 }

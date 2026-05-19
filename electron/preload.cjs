@@ -45,6 +45,16 @@ contextBridge.exposeInMainWorld("iptv", {
   /** Two localhost origins (different ports) so split-view players do not share one HTTP/1.1 connection pool. */
   getStreamProxyOrigins: () => ipcRenderer.invoke("iptv-get-stream-proxy-origins"),
 
+  /** Desktop menu preference: File > Preferences > Enable split screen. */
+  setSplitScreenPreference: (enabled) => ipcRenderer.invoke("iptv-set-split-screen-preference", enabled),
+
+  onSplitScreenPreferenceChange: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const handler = (_event, enabled) => callback(!!enabled);
+    ipcRenderer.on("iptv-split-screen-preference-change", handler);
+    return () => ipcRenderer.removeListener("iptv-split-screen-preference-change", handler);
+  },
+
   pickRecordDir: () => ipcRenderer.invoke("iptv-pick-record-dir"),
 
   /** Desktop: native open dialog + main-process readFile; returns rows for IndexedDB. */

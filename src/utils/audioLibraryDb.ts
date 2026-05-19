@@ -19,6 +19,19 @@ function mimeFromFileName(fileName: string): string | undefined {
   return undefined;
 }
 
+function normalizeLocalAudioMime(fileName: string, mime?: string): string {
+  const byName = mimeFromFileName(fileName);
+  const raw = String(mime ?? "").trim().toLowerCase();
+  if (!raw || raw === "application/octet-stream") return byName || "audio/mpeg";
+  if (/\.(m4a|m4b)$/i.test(fileName) && (raw.includes("mp4") || raw.includes("mpeg-4") || raw.includes("m4"))) {
+    return "audio/mp4";
+  }
+  if (raw === "audio/x-m4a" || raw === "audio/x-m4b" || raw === "audio/m4a" || raw === "audio/m4b") {
+    return "audio/mp4";
+  }
+  return raw;
+}
+
 /** New database name so a clean library is used after the previous MP3 tab implementation. */
 const DB_NAME = "iptv-local-audio-v2";
 const STORE = "tracks";
@@ -40,6 +53,11 @@ export interface StoredAudioTrack {
   /** Embedded album art (JPEG/PNG), if extracted. */
   coverArt?: Blob;
   coverArtMime?: string;
+  /** Persisted tag metadata — avoids re-scanning blobs on every library mount. */
+  tagArtist?: string;
+  tagTitle?: string;
+  tagsTooltip?: string | null;
+  tagsEnriched?: boolean;
 }
 
 export interface StoredEbook {
@@ -86,6 +104,7 @@ export interface LibraryLyricsCacheRow {
   metaArtist?: string;
   metaTitle?: string;
   lyricsMatchVersion?: number;
+  manualSaved?: boolean;
 }
 
 export interface LibraryLyricsTargetTranslation {
@@ -93,7 +112,7 @@ export interface LibraryLyricsTargetTranslation {
   pairs: { orig: string; en: string }[];
 }
 
-/** Payload from Electron `iptv-pick-local-audio-files` (file read in main process). */
+/** Payload from Electron `iptv-pick-local-audio-files` (folder scan + read in main process). */
 export interface PickedLocalAudioPayload {
   /** Basename with extension (e.g. `Song.mp3`); with size/mtime gives the same id as browser `fileToStoredTrack`. */
   fileName?: string;
@@ -112,7 +131,7 @@ export interface PickedLocalAudioPayload {
 }
 
 export function trackFromDesktopPick(raw: PickedLocalAudioPayload): StoredAudioTrack {
-  const mime = raw.mime || "audio/mpeg";
+  const mime = normalizeLocalAudioMime(raw.fileName ?? raw.name, raw.mime);
   const blob = new Blob([raw.data as BlobPart], { type: mime });
   const legacy = raw.legacyLibDeskId?.trim();
   const fileName = String(raw.fileName ?? "").trim() || `${raw.name}.mp3`;
@@ -182,10 +201,7 @@ function fileBodyAsBlob(file: File, mime: string): Blob {
 /** Read local file into a storable row (no IndexedDB write yet). */
 export function fileToStoredTrack(file: File): StoredAudioTrack {
   const id = stableLocalAudioId(file);
-  let mime = (file.type && file.type.trim()) || mimeFromFileName(file.name) || "";
-  if (!mime || mime === "application/octet-stream") {
-    mime = mimeFromFileName(file.name) || "audio/mpeg";
-  }
+  const mime = normalizeLocalAudioMime(file.name, file.type);
   const blob = fileBodyAsBlob(file, mime);
   return {
     id,
@@ -217,25 +233,37 @@ function normalizeBlobField(raw: unknown, mime?: string): Blob | undefined {
     return new Blob([raw], { type: mime });
   }
   if (raw instanceof ArrayBuffer && raw.byteLength > 0) {
-    return new Blob([raw], { type: mime || "image/jpeg" });
+    return new Blob([raw], { type: mime || "application/octet-stream" });
   }
   if (ArrayBuffer.isView(raw) && raw.byteLength > 0) {
-    return new Blob([raw], { type: mime || "image/jpeg" });
+    return new Blob([raw], { type: mime || "application/octet-stream" });
   }
   return undefined;
 }
 
 /** Ensure Blobs from IndexedDB are usable in the renderer (cover + audio). */
 export function normalizeStoredTrackRow(track: StoredAudioTrack): StoredAudioTrack {
-  const blob = normalizeBlobField(track.blob, track.contentType || "audio/mpeg");
+  const fileName = track.sourceFileName || track.name;
+  const contentType = normalizeLocalAudioMime(fileName, track.contentType || track.blob?.type);
+  const blob = normalizeBlobField(track.blob, contentType);
   if (!(blob instanceof Blob)) return track;
   const coverArt = normalizeBlobField(track.coverArt, track.coverArtMime || "image/jpeg");
   return {
     ...track,
     blob,
+    contentType,
     coverArt,
     coverArtMime: coverArt ? track.coverArtMime || coverArt.type || "image/jpeg" : undefined,
+    tagArtist: typeof track.tagArtist === "string" ? track.tagArtist : undefined,
+    tagTitle: typeof track.tagTitle === "string" ? track.tagTitle : undefined,
+    tagsTooltip: track.tagsTooltip === null || typeof track.tagsTooltip === "string" ? track.tagsTooltip : undefined,
+    tagsEnriched: track.tagsEnriched === true ? true : undefined,
   };
+}
+
+export function trackHasPersistedTags(track: StoredAudioTrack): boolean {
+  if (track.tagsEnriched) return true;
+  return !!(track.tagsTooltip?.trim() || (track.tagArtist?.trim() && track.tagTitle?.trim()));
 }
 
 function normalizeStoredEbookRow(row: StoredEbook): StoredEbook | null {
@@ -426,6 +454,34 @@ export async function putAudioLibraryFile(file: File): Promise<StoredAudioTrack>
   const row = fileToStoredTrack(file);
   await persistStoredTrack(row);
   return row;
+}
+
+export async function getEbookLibraryItemById(id: string): Promise<StoredEbook | null> {
+  const key = id.trim();
+  if (!key) return null;
+  const db = await openDb();
+  let tx: IDBTransaction;
+  try {
+    tx = readOnlyEbooksTx(db);
+  } catch (e) {
+    closeDb(db);
+    throw e instanceof Error ? e : new Error(`Cannot open ebook library: ${String(e)}`);
+  }
+  return new Promise((resolve, reject) => {
+    tx.onerror = () => {
+      closeDb(db);
+      reject(tx.error ?? new Error("ebook read transaction failed"));
+    };
+    tx.oncomplete = () => closeDb(db);
+    const q = tx.objectStore(EBOOK_STORE).get(key);
+    q.onerror = () => {
+      closeDb(db);
+      reject(q.error ?? new Error("ebook read failed"));
+    };
+    q.onsuccess = () => {
+      resolve(normalizeStoredEbookRow(q.result as StoredEbook) ?? null);
+    };
+  });
 }
 
 export async function listEbookLibraryItems(): Promise<StoredEbook[]> {
@@ -705,6 +761,11 @@ export async function putLibraryLyricsCache(
           validTranslatedTargets((payload as LibraryLyricsCacheRow).translatedTargets) ?? existingTargets,
         metaArtist: payload.metaArtist?.trim() || undefined,
         metaTitle: payload.metaTitle?.trim() || undefined,
+        lyricsMatchVersion:
+          typeof payload.lyricsMatchVersion === "number" && Number.isFinite(payload.lyricsMatchVersion)
+            ? payload.lyricsMatchVersion
+            : undefined,
+        manualSaved: payload.manualSaved === true,
       };
       store.put(row);
     };
@@ -756,10 +817,11 @@ export function channelFromLibraryTrack(
   objectUrl: string,
   opts?: { restartNonce?: number }
 ): Channel {
-  const t =
+  const rawType =
     track.contentType?.trim() ||
     (track.blob.type && track.blob.type !== "application/octet-stream" ? track.blob.type.trim() : "") ||
     "audio/mpeg";
+  const t = normalizeLocalAudioMime(track.sourceFileName || track.name, rawType);
   const ch: Channel = {
     id: `audio-lib-${track.id}`,
     name: track.name,

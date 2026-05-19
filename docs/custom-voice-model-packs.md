@@ -1,6 +1,6 @@
 # Custom Voice Model Packs
 
-Smart Media player runs finished TTS models locally. Training and fine-tuning should happen outside the app, then the exported voice is imported as a model pack.
+Player runs finished TTS models locally. Training and fine-tuning should happen outside the app, then the exported voice is imported as a model pack.
 
 ## Pack Layout
 

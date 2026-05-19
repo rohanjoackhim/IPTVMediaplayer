@@ -21,6 +21,8 @@ import {
 } from "./utils/playlistSettingsStorage";
 import { clearVideoResume } from "./utils/localVideoResumeStorage";
 import { clampSidebarWidthPx, loadUiSession, saveUiSession } from "./utils/uiSessionStorage";
+import { setStreamProxyToken } from "./utils/streamProxyAuth";
+import { isPodcastChannelId, isRadioStationChannelId } from "./utils/recordableStream";
 import type { Channel } from "./types";
 
 const VideoPlayer = lazy(() =>
@@ -118,6 +120,21 @@ function revokeLocalVideoBlobUrls(channels: Channel[]) {
   }
 }
 
+function sidebarModeForChannel(c: Channel): "tv" | "radio" | "audio" {
+  if (isRadioStationChannelId(c.id)) return "radio";
+  if (isPodcastChannelId(c.id)) return "radio";
+  if (c.libraryTrackId || c.ebookId) return "audio";
+  return "tv";
+}
+
+function isCompactTvCandidate(c: Channel | null): boolean {
+  return !!c?.url?.trim() && !c.ebookId && !c.libraryTrackId;
+}
+
+function isIndexedLibraryChannel(c: Channel | null): boolean {
+  return !!(c?.libraryTrackId?.trim() || c?.ebookId?.trim());
+}
+
 function PlayerLoadingFallback({ splitView }: { splitView: boolean }) {
   if (splitView) {
     return (
@@ -143,6 +160,9 @@ export default function App() {
   });
   const [active, setActive] = useState<Channel | null>(null);
   const [channelRight, setChannelRight] = useState<Channel | null>(null);
+  const [lastTvChannel, setLastTvChannel] = useState<Channel | null>(null);
+  const [lastRadioChannel, setLastRadioChannel] = useState<Channel | null>(null);
+  const [lastAudioChannel, setLastAudioChannel] = useState<Channel | null>(null);
   const [splitView, setSplitView] = useState(false);
   const [assignTarget, setAssignTarget] = useState(() => loadUiSession().assignTarget);
   const [volumeLeft, setVolumeLeft] = useState(() => loadUiSession().volumeLeft);
@@ -154,8 +174,10 @@ export default function App() {
     () => loadUiSession().audioLibraryContinuous
   );
   const [sidebarMode, setSidebarMode] = useState(() => loadUiSession().sidebarMode);
+  const [recordingPanes, setRecordingPanes] = useState<Record<"L" | "R", boolean>>({ L: false, R: false });
   /** Electron: two localhost origins (different ports) so left/right streams do not share one connection pool. */
   const [streamProxyOrigins, setStreamProxyOrigins] = useState<[string, string] | null>(null);
+  const [compactView, setCompactView] = useState(() => loadUiSession().compactView);
   const [sidebarWidth, setSidebarWidth] = useState(() => fitSidebarToViewport(loadUiSession().sidebarWidthPx));
   const sidebarDragRef = useRef<{ startX: number; startW: number } | null>(null);
   const sidebarWidthLive = useRef(sidebarWidth);
@@ -164,11 +186,16 @@ export default function App() {
   useEffect(() => {
     const fn = window.iptv?.getStreamProxyOrigins;
     if (!fn) return;
-    void fn().then((list) => {
+    void fn().then((payload) => {
+      const list = Array.isArray(payload) ? payload : payload?.origins;
+      const token = Array.isArray(payload) ? "" : String(payload?.token ?? "");
       if (!Array.isArray(list) || list.length < 2) return;
       const a = typeof list[0] === "string" ? list[0].trim() : "";
       const b = typeof list[1] === "string" ? list[1].trim() : "";
-      if (a && b) setStreamProxyOrigins([a, b]);
+      if (a && b) {
+        setStreamProxyOrigins([a, b]);
+        setStreamProxyToken(token);
+      }
     });
   }, [splitView]);
 
@@ -191,6 +218,18 @@ export default function App() {
   useEffect(() => {
     saveUiSession({ splitView, assignTarget, volumeLeft, volumeRight });
   }, [splitView, assignTarget, volumeLeft, volumeRight]);
+
+  useEffect(() => {
+    saveUiSession({ compactView });
+  }, [compactView]);
+
+  const compactTvChannel = useMemo(
+    () => (isCompactTvCandidate(lastTvChannel) ? lastTvChannel : null),
+    [lastTvChannel]
+  );
+  const showCompactReaderWithTv =
+    compactView && !!active?.ebookId && !!compactTvChannel && !splitView;
+  const soloLayoutMode = compactView && active?.ebookId ? "compactReader" as const : "default" as const;
 
   useEffect(() => {
     const onResize = () => {
@@ -241,6 +280,7 @@ export default function App() {
     if (!found) return;
     setActive((prev) => {
       if (prev && channels.some((c) => c.id === prev.id)) return prev;
+      setLastTvChannel(found);
       return found;
     });
   }, [channelListKey]);
@@ -271,20 +311,68 @@ export default function App() {
     if (!v) setChannelRight(null);
   }, []);
 
+  const rememberLastPlayed = useCallback((c: Channel | null) => {
+    if (!c) return;
+    const mode = sidebarModeForChannel(c);
+    if (mode === "radio") setLastRadioChannel(c);
+    else if (mode === "audio") setLastAudioChannel(c);
+    else setLastTvChannel(c);
+  }, []);
+
+  const setPrimaryActiveChannel = useCallback(
+    (c: Channel | null) => {
+      setActive(c);
+      rememberLastPlayed(c);
+    },
+    [rememberLastPlayed]
+  );
+
+  const setRightActiveChannel = useCallback(
+    (c: Channel | null) => {
+      setChannelRight(c);
+      rememberLastPlayed(c);
+    },
+    [rememberLastPlayed]
+  );
+
+  useEffect(() => {
+    void window.iptv?.setSplitScreenPreference?.(splitView);
+    const unsubscribe = window.iptv?.onSplitScreenPreferenceChange?.((enabled) => {
+      handleSplitViewChange(enabled);
+    });
+    return () => {
+      unsubscribe?.();
+    };
+  }, [handleSplitViewChange, splitView]);
+
   const handleSelectChannel = useCallback(
     (c: Channel) => {
       if (c.ebookId) {
-        setActive(c);
+        setPrimaryActiveChannel(c);
         return;
       }
       if (!splitView) {
-        setActive(c);
+        setPrimaryActiveChannel(c);
         return;
       }
-      if (assignTarget === "L") setActive(c);
-      else setChannelRight(c);
+      if (assignTarget === "L") setPrimaryActiveChannel(c);
+      else setRightActiveChannel(c);
     },
-    [splitView, assignTarget]
+    [assignTarget, setPrimaryActiveChannel, setRightActiveChannel, splitView]
+  );
+
+  const handleSidebarModeChange = useCallback(
+    (mode: "tv" | "radio" | "audio") => {
+      setSidebarMode(mode);
+      const restore =
+        mode === "radio"
+          ? lastRadioChannel
+          : mode === "audio"
+            ? lastAudioChannel
+            : lastTvChannel;
+      if (restore) setPrimaryActiveChannel(restore);
+    },
+    [lastAudioChannel, lastRadioChannel, lastTvChannel, setPrimaryActiveChannel]
   );
 
   const canResetTelevisionStream = useMemo(() => {
@@ -298,12 +386,20 @@ export default function App() {
       return { ...c, streamResetNonce: Date.now() };
     };
     if (splitView && assignTarget === "R") {
-      setChannelRight((cur) => bump(cur));
+      setChannelRight((cur) => {
+        const next = bump(cur);
+        rememberLastPlayed(next);
+        return next;
+      });
     } else {
-      setActive((cur) => bump(cur));
+      setActive((cur) => {
+        const next = bump(cur);
+        rememberLastPlayed(next);
+        return next;
+      });
     }
     setParseMessage("Reset local stream session for the selected player. Provider-side blocks still require a valid provider/account connection.");
-  }, [assignTarget, splitView]);
+  }, [assignTarget, rememberLastPlayed, splitView]);
 
   const onLoadM3U = useCallback((text: string, replace: boolean) => {
     const { channels: next, errors } = parseM3U(text);
@@ -327,11 +423,19 @@ export default function App() {
         const last = loadLastActiveChannelUrl();
         if (last) {
           const byLast = next.find((c) => favoriteKeyForChannel(c) === last);
-          if (byLast) return byLast;
+          if (byLast) {
+            setLastTvChannel(byLast);
+            return byLast;
+          }
         }
-        return next[0] ?? null;
+        const first = next[0] ?? null;
+        setLastTvChannel(first);
+        return first;
       }
-      if (!cur && next.length) return next[0];
+      if (!cur && next.length) {
+        setLastTvChannel(next[0]!);
+        return next[0]!;
+      }
       return cur;
     });
   }, []);
@@ -341,7 +445,8 @@ export default function App() {
       revokeLocalVideoBlobUrls(prev);
       return [];
     });
-    setActive(null);
+    setActive((cur) => (cur && sidebarModeForChannel(cur) === "tv" ? null : cur));
+    setLastTvChannel(null);
     setChannelRight(null);
     setParseMessage("Playlist cleared.");
   }, []);
@@ -356,11 +461,21 @@ export default function App() {
       );
       return;
     }
-    setSplitView(true);
     setParseMessage(
-      `Added ${incoming.length} local video file(s) at the top of the list (see the Local videos tab). Playback position is saved per file. Turn on Split view if it was off, then use Next click plays on to put IPTV on one player and a local file on the other.`
+      `Added ${incoming.length} local video file(s) at the top of the list (see the Local videos tab). Playback position is saved per file. To use two players, enable split screen from File > Preferences.`
     );
   }, []);
+
+  const onRemoveChannel = useCallback((channelId: string) => {
+    const removed = channels.find((c) => c.id === channelId) ?? null;
+    if (!removed) return;
+    revokeLocalVideoBlobUrls([removed]);
+    setChannels((prev) => prev.filter((c) => c.id !== channelId));
+    setActive((cur) => (cur?.id === channelId ? null : cur));
+    setChannelRight((cur) => (cur?.id === channelId ? null : cur));
+    setLastTvChannel((cur) => (cur?.id === channelId ? null : cur));
+    setParseMessage(`Removed "${removed.name}" from Television.`);
+  }, [channels]);
 
   const libraryAudioChannels = useMemo(
     () => channels.filter((c) => !!c.libraryTrackId?.trim() && !c.localVideoFile),
@@ -398,14 +513,43 @@ export default function App() {
         next = list[(i + 1) % list.length]!;
       }
       if (splitView) {
-        if (pane === "L") setActive(next);
-        else setChannelRight(next);
+        if (pane === "L") setPrimaryActiveChannel(next);
+        else setRightActiveChannel(next);
       } else {
-        setActive(next);
+        setPrimaryActiveChannel(next);
       }
     },
-    [audioLibraryContinuous, audioLibraryShuffle, indexedLibraryChannels, libraryAudioChannels, splitView]
+    [
+      audioLibraryContinuous,
+      audioLibraryShuffle,
+      indexedLibraryChannels,
+      libraryAudioChannels,
+      setPrimaryActiveChannel,
+      setRightActiveChannel,
+      splitView,
+    ]
   );
+
+  const handleLibraryCleared = useCallback(() => {
+    setActive((cur) => (isIndexedLibraryChannel(cur) ? null : cur));
+    setChannelRight((cur) => (isIndexedLibraryChannel(cur) ? null : cur));
+    setLastAudioChannel((cur) => (isIndexedLibraryChannel(cur) ? null : cur));
+  }, []);
+
+  const handleLibraryTrackRemoved = useCallback((trackId: string) => {
+    const removedId = trackId.trim();
+    if (!removedId) return;
+    const isRemovedTrack = (c: Channel | null) => c?.libraryTrackId?.trim() === removedId;
+    setActive((cur) => (isRemovedTrack(cur) ? null : cur));
+    setChannelRight((cur) => (isRemovedTrack(cur) ? null : cur));
+    setLastAudioChannel((cur) => (isRemovedTrack(cur) ? null : cur));
+  }, []);
+
+  const setPaneRecording = useCallback((pane: "L" | "R", recording: boolean) => {
+    setRecordingPanes((cur) => (cur[pane] === recording ? cur : { ...cur, [pane]: recording }));
+  }, []);
+
+  const recordingActive = recordingPanes.L || recordingPanes.R;
 
   const onSidebarResizerPointerDown = useCallback((e: PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -447,91 +591,141 @@ export default function App() {
 
   return (
     <div
-      className="app-shell"
+      className={`app-shell${compactView ? " app-shell--compact" : ""}`}
       style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` } as CSSProperties}
     >
-      <aside className="browser-pane">
-        <ChannelBrowser
-          channels={channels}
-          activeLeftId={active?.id ?? null}
-          activeRightId={splitView ? channelRight?.id ?? null : null}
-          splitView={splitView}
-          onSplitViewChange={handleSplitViewChange}
-          assignTarget={assignTarget}
-          onAssignTargetChange={setAssignTarget}
-          onSelectChannel={handleSelectChannel}
-          onResetTelevisionStream={handleResetTelevisionStream}
-          resetTelevisionStreamDisabled={!canResetTelevisionStream}
-          onLoadM3U={onLoadM3U}
-          onClearList={onClearList}
-          onAddLocalVideoChannels={onAddLocalVideoChannels}
-          parseMessage={parseMessage}
-          onPlaylistMessage={setParseMessage}
-          favoriteUrls={favoriteUrls}
-          onToggleFavoriteChannel={toggleFavoriteChannel}
-          audioLibraryShuffle={audioLibraryShuffle}
-          audioLibraryContinuous={audioLibraryContinuous}
-          onAudioLibraryShuffleChange={setAudioLibraryShuffle}
-          onAudioLibraryContinuousChange={setAudioLibraryContinuous}
-          sidebarMode={sidebarMode}
-          onSidebarModeChange={setSidebarMode}
-          onIndexedLibraryChannelsChange={handleIndexedLibraryChannelsChange}
-        />
-      </aside>
-      <div
-        className="sidebar-resizer"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize channel list"
-        title="Drag to resize. Double-click to reset width."
-        tabIndex={0}
-        onPointerDown={onSidebarResizerPointerDown}
-        onPointerMove={onSidebarResizerPointerMove}
-        onPointerUp={onSidebarResizerPointerUp}
-        onPointerCancel={onSidebarResizerPointerUp}
-        onDoubleClick={onSidebarResizerDoubleClick}
-      />
-      <main className={`player-pane${splitView ? " player-pane--split" : ""}`}>
+      {!compactView ? (
+        <>
+          <aside className="browser-pane">
+            <ChannelBrowser
+              channels={channels}
+              activeLeftId={active?.id ?? null}
+              activeRightId={splitView ? channelRight?.id ?? null : null}
+              splitView={splitView}
+              assignTarget={assignTarget}
+              onAssignTargetChange={setAssignTarget}
+              onSelectChannel={handleSelectChannel}
+              onResetTelevisionStream={handleResetTelevisionStream}
+              resetTelevisionStreamDisabled={!canResetTelevisionStream}
+              onLoadM3U={onLoadM3U}
+              onClearList={onClearList}
+              onAddLocalVideoChannels={onAddLocalVideoChannels}
+              onRemoveChannel={onRemoveChannel}
+              parseMessage={parseMessage}
+              onPlaylistMessage={setParseMessage}
+              favoriteUrls={favoriteUrls}
+              onToggleFavoriteChannel={toggleFavoriteChannel}
+              audioLibraryShuffle={audioLibraryShuffle}
+              audioLibraryContinuous={audioLibraryContinuous}
+              onAudioLibraryShuffleChange={setAudioLibraryShuffle}
+              onAudioLibraryContinuousChange={setAudioLibraryContinuous}
+              recordingActive={recordingActive}
+              sidebarMode={sidebarMode}
+              onSidebarModeChange={handleSidebarModeChange}
+              onIndexedLibraryChannelsChange={handleIndexedLibraryChannelsChange}
+              onLibraryCleared={handleLibraryCleared}
+              onLibraryTrackRemoved={handleLibraryTrackRemoved}
+              compactView={compactView}
+              onCompactViewChange={setCompactView}
+            />
+          </aside>
+          <div
+            className="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize channel list"
+            title="Drag to resize. Double-click to reset width."
+            tabIndex={0}
+            onPointerDown={onSidebarResizerPointerDown}
+            onPointerMove={onSidebarResizerPointerMove}
+            onPointerUp={onSidebarResizerPointerUp}
+            onPointerCancel={onSidebarResizerPointerUp}
+            onDoubleClick={onSidebarResizerDoubleClick}
+          />
+        </>
+      ) : null}
+      <main
+        className={`player-pane${splitView ? " player-pane--split" : ""}${compactView ? " player-pane--compact" : ""}${
+          showCompactReaderWithTv ? " player-pane--compact-dual" : ""
+        }`}
+      >
         <Suspense fallback={<PlayerLoadingFallback splitView={splitView} />}>
-          {splitView ? (
+          {showCompactReaderWithTv ? (
+            <>
+              <section className="compact-tv-dock" aria-label="Television while reading">
+                <VideoPlayer
+                  channel={compactTvChannel}
+                  volume={volumeLeft}
+                  onVolumeChange={setVolumeLeft}
+                  layoutMode="compactTvDock"
+                  recordable={false}
+                  playbackPane="L"
+                  onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
+                />
+              </section>
+              <section className="compact-reader-dock" aria-label="Ebook reader">
+                <VideoPlayer
+                  channel={active}
+                  volume={volumeLeft}
+                  onVolumeChange={setVolumeLeft}
+                  layoutMode="compactReader"
+                  playbackPane="L"
+                  onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
+                  onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
+                />
+              </section>
+            </>
+          ) : splitView ? (
             <div className="player-split">
               <VideoPlayer
-                key={`L-${active?.id ?? "none"}`}
                 channel={active}
                 volume={volumeLeft}
                 onVolumeChange={setVolumeLeft}
-                paneLabel="Left"
+                paneLabel="Screen 1"
                 splitIsolateNetwork={splitView}
                 streamProxyOrigin={splitView && streamProxyOrigins ? streamProxyOrigins[0] : undefined}
                 playbackPane="L"
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
+                onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
               />
               <VideoPlayer
-                key={`R-${channelRight?.id ?? "none"}`}
                 channel={channelRight}
                 volume={volumeRight}
                 onVolumeChange={setVolumeRight}
-                paneLabel="Right"
+                paneLabel="Screen 2"
                 splitIsolateNetwork={splitView}
                 streamProxyOrigin={splitView && streamProxyOrigins ? streamProxyOrigins[1] : undefined}
                 playbackPane="R"
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
+                onRecordingStatusChange={(recording) => setPaneRecording("R", recording)}
               />
             </div>
           ) : (
             <VideoPlayer
-              key={`S-${active?.id ?? "none"}`}
               channel={active}
               volume={volumeLeft}
               onVolumeChange={setVolumeLeft}
+              layoutMode={soloLayoutMode}
               playbackPane="L"
               onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
+              onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
             />
           )}
         </Suspense>
       </main>
+      {compactView ? (
+        <button
+          type="button"
+          className="compact-library-fab"
+          onClick={() => setCompactView(false)}
+          title="Show channel library"
+          aria-label="Show channel library"
+        >
+          Library
+        </button>
+      ) : null}
     </div>
   );
 }

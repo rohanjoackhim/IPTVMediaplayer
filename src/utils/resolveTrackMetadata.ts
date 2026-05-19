@@ -50,10 +50,22 @@ export async function resolveTrackMetadataFromLibrary(
   if (tid) {
     try {
       const row = await getAudioLibraryTrackById(tid);
-      if (row?.blob instanceof Blob) {
-        const hint = row.sourceFileName?.trim() || `${row.name}${guessExtFromMime(row.contentType)}`;
-        const meta = await extractAudioMetadata(row.blob, hint);
-        return pickIdentityFromTags(meta, displayName);
+      if (row) {
+        const persistedArtist = row.tagArtist?.trim() ?? "";
+        const persistedTitle = row.tagTitle?.trim() ?? "";
+        if (persistedArtist || persistedTitle) {
+          return {
+            artist: persistedArtist,
+            title: persistedTitle || displayName.trim(),
+            album: "",
+            source: "tags",
+          };
+        }
+        if (row.blob instanceof Blob) {
+          const hint = row.sourceFileName?.trim() || `${row.name}${guessExtFromMime(row.contentType)}`;
+          const meta = await extractAudioMetadata(row.blob, hint);
+          return pickIdentityFromTags(meta, displayName);
+        }
       }
     } catch {
       /* fall through */

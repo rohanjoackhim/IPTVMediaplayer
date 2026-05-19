@@ -88,9 +88,19 @@ declare global {
         llmHost?: string;
       }>;
       /** Desktop: `[primaryOrigin, secondaryOrigin]` for /__proxy/stream (split view). */
-      getStreamProxyOrigins: () => Promise<string[]>;
+      getStreamProxyOrigins: () => Promise<
+        | string[]
+        | {
+            origins: string[];
+            token?: string;
+          }
+      >;
+      /** Desktop: sync File > Preferences > Enable split screen check state. */
+      setSplitScreenPreference?: (enabled: boolean) => Promise<{ ok: true }>;
+      /** Desktop: subscribe to File > Preferences > Enable split screen changes. */
+      onSplitScreenPreferenceChange?: (callback: (enabled: boolean) => void) => () => void;
       pickRecordDir: () => Promise<string | null>;
-      /** Desktop: native picker + read in main; each item has `data: ArrayBuffer`. */
+      /** Desktop: pick a folder; main process recursively reads audio, audiobooks, and ebooks (`data: ArrayBuffer`). */
       pickLocalAudioFiles: () => Promise<
         Array<{
           /** Basename with extension; used with size/mtime for stable library + lyrics id (same as browser import). */

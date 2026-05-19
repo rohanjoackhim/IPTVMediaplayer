@@ -1,6 +1,6 @@
 # LJSpeech Neural TTS Cloud Training
 
-This guide trains a first custom voice from the LJSpeech dataset outside Smart Media player, then exports it as an offline voice pack candidate for the app.
+This guide trains a first custom voice from the LJSpeech dataset outside Player, then exports it as an offline voice pack candidate for the app.
 
 ## Recommended First Target
 
@@ -118,7 +118,7 @@ ljspeech-lj.onnx
 ljspeech-lj.onnx.json
 ```
 
-## Smart Media Player Voice Pack
+## Player Voice Pack
 
 Package the trained Piper voice as:
 
@@ -151,7 +151,7 @@ Example `manifest.json`:
 
 ## App Integration Status
 
-Current Smart Media player neural TTS uses bundled Kokoro via `kokoro-js`.
+Current Player neural TTS uses bundled Kokoro via `kokoro-js`.
 
 To use this trained Piper voice in the app, the next implementation step is to add a `piper-vits` runtime/provider that can:
 

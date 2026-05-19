@@ -168,28 +168,7 @@ async function epubToText(file: File): Promise<EbookTextResult> {
 
 async function pdfToText(file: File): Promise<EbookTextResult> {
   installPdfJsCompatibilityShims();
-  const [{ getDocument }, pdfWorker] = await Promise.all([
-    import("pdfjs-dist/legacy/build/pdf.mjs"),
-    import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
-  ]);
-  (globalThis as typeof globalThis & { pdfjsWorker?: unknown }).pdfjsWorker = pdfWorker;
-
-  const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await getDocument({ data, isEvalSupported: false, useWorkerFetch: false } as Parameters<typeof getDocument>[0]).promise;
-  const pages: string[] = [];
-
-  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
-    const page = await pdf.getPage(pageNo);
-    const content = await page.getTextContent();
-    const pageText = (content.items as Array<{ str?: unknown }>)
-      .map((item) => (typeof item.str === "string" ? item.str : ""))
-      .join(" ");
-    const cleaned = normalizeReadableText(pageText);
-    if (cleaned) pages.push(cleaned);
-  }
-
-  const text = assertReadableText(pages.join("\n\n"), "PDF");
-  return { title: fileBaseName(file.name), text, format: "pdf", pages: pages.length ? pages : [text] };
+  return { title: fileBaseName(file.name), text: "", format: "pdf", pages: [] };
 }
 
 export async function extractEbookText(file: File): Promise<EbookTextResult> {

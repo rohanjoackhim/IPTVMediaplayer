@@ -1,5 +1,5 @@
 /**
- * Smart Media player — Electron shell.
+ * Player — Electron shell.
  * Serves the Vite `dist` folder over http://127.0.0.1 so playlist/stream fetches behave like a normal web origin
  * (avoids file:// + CORS issues). Uses a **stable port** when possible so `localStorage` (channels, favorites, settings)
  * stays on the same origin across restarts. Desktop targets: recent Windows (x64), macOS (arm64 / Intel per build).
@@ -64,23 +64,120 @@ const MIME = {
 let staticServers = [];
 /** [primary, secondary] origins for /__proxy/stream — separate ports avoid browser per-host connection limits in split view. */
 let streamProxyOriginsForIpc = null;
+let streamProxySessionToken = null;
+let splitScreenPreferenceEnabled = false;
+/** Exact recording output files the renderer may reveal in the file manager. */
+const allowedRecordRevealPaths = new Set();
+/** Recording output folders chosen in the native picker. */
+const allowedRecordOutputDirs = new Set();
 
-function assertPlaylistUrlForMain(raw) {
+const BLOCKED_FETCH_HOSTNAMES = new Set([
+  "metadata.google.internal",
+  "metadata.goog",
+  "169.254.169.254",
+]);
+
+function parseIpv4Host(host) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return null;
+  const parts = m.slice(1, 5).map((n) => Number(n));
+  if (parts.some((n) => n > 255)) return null;
+  return parts;
+}
+
+/** Block loopback, link-local, and cloud metadata. RFC1918 LAN hosts stay allowed for IPTV. */
+function isBlockedFetchHostname(hostname) {
+  const h = String(hostname || "")
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (!h) return true;
+  if (BLOCKED_FETCH_HOSTNAMES.has(h)) return true;
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  const v4 = parseIpv4Host(h);
+  if (v4) {
+    const [a, b] = v4;
+    if (a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+  }
+  return false;
+}
+
+function assertSafeFetchUrl(raw, label = "URL") {
   let u;
   try {
     u = new URL(String(raw).trim());
   } catch {
-    throw new Error("Invalid playlist URL.");
+    throw new Error(`Invalid ${label}.`);
   }
   if (u.protocol !== "http:" && u.protocol !== "https:") {
-    throw new Error("Only http(s) playlist links are supported.");
+    throw new Error(`Only http(s) ${label} is supported.`);
   }
-  const h = u.hostname.toLowerCase();
-  if (h === "169.254.169.254" || h === "metadata.google.internal") {
+  if (isBlockedFetchHostname(u.hostname)) {
     throw new Error("That host is not allowed.");
+  }
+  if (u.username || u.password) {
+    throw new Error("URLs with embedded credentials are not allowed.");
   }
   return u.toString();
 }
+
+function assertPlaylistUrlForMain(raw) {
+  return assertSafeFetchUrl(raw, "playlist URL");
+}
+
+function assertStreamProxySessionToken(reqUrl) {
+  if (!streamProxySessionToken) return;
+  let u;
+  try {
+    u = new URL(reqUrl || "/", "http://127.0.0.1");
+  } catch {
+    throw new Error("Invalid proxy request.");
+  }
+  const token = u.searchParams.get("token");
+  if (token !== streamProxySessionToken) {
+    throw new Error("Forbidden.");
+  }
+}
+
+function assertUserAccessibleMediaPath(resolvedPath) {
+  const resolved = path.resolve(resolvedPath);
+  const roots = [
+    app.getPath("home"),
+    app.getPath("videos"),
+    app.getPath("music"),
+    app.getPath("downloads"),
+    app.getPath("documents"),
+    app.getPath("desktop"),
+    app.getPath("temp"),
+  ]
+    .map((p) => {
+      try {
+        return path.resolve(p);
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
+  const allowed = roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  if (!allowed) {
+    throw new Error("Media file must be under your user folders.");
+  }
+  return resolved;
+}
+
+function assertAllowedRecordRevealPath(rawPath) {
+  const resolved = path.resolve(String(rawPath ?? "").trim());
+  if (resolved.length < 4) throw new Error("Invalid path.");
+  if (allowedRecordRevealPaths.has(resolved)) return resolved;
+  for (const dir of allowedRecordOutputDirs) {
+    if (resolved === dir || resolved.startsWith(`${dir}${path.sep}`)) return resolved;
+  }
+  throw new Error("That file path is not from an app recording.");
+}
+
+const APP_CSP =
+  "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* https:; media-src 'self' blob: file: http: https:; connect-src 'self' http://127.0.0.1:* https: blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-src https:; form-action 'none';";
 
 ipcMain.handle("iptv-fetch-playlist-text", async (_evt, rawUrl) => {
   const url = assertPlaylistUrlForMain(rawUrl);
@@ -1041,9 +1138,7 @@ async function postGeminiGenerateContent(systemPrompt, userPrompt, purpose, gene
     throw new Error("IPTV_GEMINI_NO_KEY");
   }
   const modelId = getGeminiModelRaw();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    modelId
-  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent`;
 
   const body = {
     systemInstruction: {
@@ -1067,6 +1162,7 @@ async function postGeminiGenerateContent(systemPrompt, userPrompt, purpose, gene
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
+      "x-goog-api-key": apiKey,
       "User-Agent": "RJ-IPTV-and-Online-Radio-Player/1.0",
     },
     body: JSON.stringify(body),
@@ -1502,16 +1598,27 @@ function normalizeRecordMode(raw, url, tapMime) {
   return tapMime === "video/mp2t" ? "mpegts" : "raw";
 }
 
-ipcMain.handle("iptv-get-stream-proxy-origins", () => streamProxyOriginsForIpc ?? []);
+ipcMain.handle("iptv-get-stream-proxy-origins", () => ({
+  origins: streamProxyOriginsForIpc ?? [],
+  token: streamProxySessionToken ?? "",
+}));
+
+ipcMain.handle("iptv-set-split-screen-preference", (_evt, enabled) => {
+  splitScreenPreferenceEnabled = !!enabled;
+  const item = Menu.getApplicationMenu()?.getMenuItemById("split-screen-preference");
+  if (item) item.checked = splitScreenPreferenceEnabled;
+  return { ok: true };
+});
 
 ipcMain.handle("iptv-pick-record-dir", async () => {
   const { dialog } = require("electron");
   const r = await dialog.showOpenDialog({
     properties: ["openDirectory", "createDirectory"],
-    title: "Smart Media player — folder for recordings",
+    title: "Player — folder for recordings",
     buttonLabel: "Save",
   });
   if (r.canceled || !r.filePaths?.[0]) return null;
+  allowedRecordOutputDirs.add(path.resolve(r.filePaths[0]));
   return r.filePaths[0];
 });
 
@@ -1528,41 +1635,99 @@ function mimeForLocalAudioExt(ext) {
   return "";
 }
 
+function mimeForLibraryExt(ext) {
+  const audio = mimeForLocalAudioExt(ext);
+  if (audio) return audio;
+  const e = String(ext || "").toLowerCase();
+  if (e === ".pdf") return "application/pdf";
+  if (e === ".epub") return "application/epub+zip";
+  if (e === ".txt" || e === ".md" || e === ".markdown") return "text/plain";
+  if (e === ".html" || e === ".htm" || e === ".xhtml") return "text/html";
+  return "";
+}
+
 /**
- * Native file picker + readFile in main (reliable on Windows vs renderer File / IndexedDB quirks).
- * Returns serializable rows for the renderer IndexedDB library.
+ * Native folder picker + readFile in main (reliable on Windows vs renderer File / IndexedDB quirks).
+ * Recursively imports supported audio, audiobook, and ebook files into the renderer IndexedDB library.
  */
-ipcMain.handle("iptv-pick-local-audio-files", async () => {
-  const { dialog } = require("electron");
-  const r = await dialog.showOpenDialog({
-    properties: ["openFile", "multiSelections"],
-    filters: [
-      {
-        name: "Audio",
-        extensions: ["mp3", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "flac", "webm", "mpga", "mpeg"],
-      },
-      { name: "All files", extensions: ["*"] },
-    ],
-    title: "Smart Media player — add MP3 or audiobook files",
-  });
-  if (r.canceled || !r.filePaths?.length) return [];
-  const out = [];
+const MAX_DESKTOP_LIBRARY_PICK_COUNT = 500;
+const MAX_DESKTOP_LIBRARY_FILE_BYTES = 512 * 1024 * 1024;
+
+const LIBRARY_IMPORT_EXTENSIONS = new Set([
+  ".mp3",
+  ".m4a",
+  ".m4b",
+  ".aac",
+  ".ogg",
+  ".oga",
+  ".opus",
+  ".wav",
+  ".flac",
+  ".webm",
+  ".mpga",
+  ".mpeg",
+  ".pdf",
+  ".epub",
+  ".txt",
+  ".md",
+  ".markdown",
+  ".html",
+  ".htm",
+  ".xhtml",
+]);
+
+function isLibraryImportPath(fp) {
+  const base = path.basename(fp);
+  if (!base || base.startsWith(".")) return false;
+  return LIBRARY_IMPORT_EXTENSIONS.has(path.extname(fp).toLowerCase());
+}
+
+async function collectLibraryFilePathsUnderDir(rootDir, maxCount) {
   const fsp = fs.promises;
-  for (const fp of r.filePaths) {
-    let stat;
+  const out = [];
+  async function walk(dir) {
+    if (out.length >= maxCount) return;
+    let entries;
     try {
-      stat = await fsp.stat(fp);
+      entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch {
-      continue;
+      return;
     }
-    if (!stat.isFile() || stat.size === 0) continue;
-    const ext = path.extname(fp);
-    const mime = mimeForLocalAudioExt(ext) || "application/octet-stream";
-    const base = path.basename(fp);
-    const name = ext && base.toLowerCase().endsWith(ext.toLowerCase()) ? base.slice(0, -ext.length) : base;
-    const buf = await fsp.readFile(fp);
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-    out.push({
+    entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+    for (const ent of entries) {
+      if (out.length >= maxCount) return;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith(".")) continue;
+        await walk(full);
+      } else if (ent.isFile() && isLibraryImportPath(full)) {
+        out.push(full);
+      }
+    }
+  }
+  await walk(path.resolve(rootDir));
+  return out;
+}
+
+async function readLibraryPickFromPath(fp, fsp) {
+  let stat;
+  try {
+    stat = await fsp.stat(fp);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile() || stat.size === 0) return null;
+  if (stat.size > MAX_DESKTOP_LIBRARY_FILE_BYTES) {
+    return { skip: `${path.basename(fp)} exceeds ${Math.round(MAX_DESKTOP_LIBRARY_FILE_BYTES / (1024 * 1024))} MB and was skipped.` };
+  }
+  const ext = path.extname(fp);
+  const mime = mimeForLibraryExt(ext) || "application/octet-stream";
+  const base = path.basename(fp);
+  const name = ext && base.toLowerCase().endsWith(ext.toLowerCase()) ? base.slice(0, -ext.length) : base;
+  const buf = await fsp.readFile(fp);
+  const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return {
+    row: {
       fileName: base,
       name,
       size: stat.size,
@@ -1570,9 +1735,58 @@ ipcMain.handle("iptv-pick-local-audio-files", async () => {
       addedAt: Date.now(),
       mime,
       data: ab,
+    },
+  };
+}
+
+async function readLibraryPicksFromPaths(filePaths, dialog) {
+  const out = [];
+  const skipped = [];
+  const fsp = fs.promises;
+  for (const fp of filePaths) {
+    if (out.length >= MAX_DESKTOP_LIBRARY_PICK_COUNT) {
+      skipped.push(`Only the first ${MAX_DESKTOP_LIBRARY_PICK_COUNT} files were imported.`);
+      break;
+    }
+    const result = await readLibraryPickFromPath(fp, fsp);
+    if (!result) continue;
+    if (result.skip) {
+      skipped.push(result.skip);
+      continue;
+    }
+    out.push(result.row);
+  }
+  if (skipped.length && dialog) {
+    void dialog.showMessageBox({
+      type: "warning",
+      title: "Some library files were skipped",
+      message: "Not every file in the folder could be added.",
+      detail: skipped.slice(0, 8).join("\n"),
     });
   }
   return out;
+}
+
+ipcMain.handle("iptv-pick-local-audio-files", async () => {
+  const { dialog } = require("electron");
+  const r = await dialog.showOpenDialog({
+    properties: ["openDirectory", "createDirectory"],
+    title: "Add folder to library — audio, audiobooks, ebooks",
+    buttonLabel: "Add",
+  });
+  if (r.canceled || !r.filePaths?.[0]) return [];
+  const rootDir = r.filePaths[0];
+  const filePaths = await collectLibraryFilePathsUnderDir(rootDir, MAX_DESKTOP_LIBRARY_PICK_COUNT);
+  if (!filePaths.length) {
+    void dialog.showMessageBox({
+      type: "info",
+      title: "No supported files found",
+      message: "That folder does not contain any supported audio, audiobook, or ebook files.",
+      detail: `Supported types: ${[...LIBRARY_IMPORT_EXTENSIONS].join(", ")}`,
+    });
+    return [];
+  }
+  return readLibraryPicksFromPaths(filePaths, dialog);
 });
 
 /**
@@ -1626,7 +1840,7 @@ ipcMain.handle("iptv-pick-local-video-files", async () => {
       },
       { name: "All files", extensions: ["*"] },
     ],
-    title: "Smart Media player — add local video files",
+    title: "Player — add local video files",
   });
   if (r.canceled || !r.filePaths?.length) return [];
   const fsp = fs.promises;
@@ -1683,10 +1897,16 @@ function getBundledFfmpegPath() {
 }
 
 function runFfmpeg(ffmpegPath, args) {
+  const MAX_STDERR_BYTES = 256 * 1024;
   return new Promise((resolve, reject) => {
+    let stderrSize = 0;
     const stderrChunks = [];
     const child = spawn(ffmpegPath, args, { windowsHide: process.platform === "win32" });
-    child.stderr?.on("data", (d) => stderrChunks.push(d));
+    child.stderr?.on("data", (d) => {
+      if (stderrSize >= MAX_STDERR_BYTES) return;
+      stderrChunks.push(d);
+      stderrSize += d.length;
+    });
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve();
@@ -1700,6 +1920,42 @@ function runFfmpeg(ffmpegPath, args) {
       }
     });
   });
+}
+
+const mkvPrepareInFlight = new Map();
+const MKV_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+
+async function cleanupMkvCache() {
+  const cacheDir = path.join(app.getPath("temp"), "rj-iptv-mkv-cache");
+  let entries;
+  try {
+    entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".mp4")) continue;
+    const fp = path.join(cacheDir, entry.name);
+    try {
+      const st = await fs.promises.stat(fp);
+      files.push({ fp, size: st.size, mtimeMs: st.mtimeMs });
+    } catch {
+      /* ignore missing cache files */
+    }
+  }
+  let total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total <= MKV_CACHE_MAX_BYTES) return;
+  files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const file of files) {
+    if (total <= MKV_CACHE_MAX_BYTES * 0.8) break;
+    try {
+      await fs.promises.unlink(file.fp);
+      total -= file.size;
+    } catch {
+      /* best-effort cache cleanup */
+    }
+  }
 }
 
 /**
@@ -1738,7 +1994,7 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
   }
   if (!st.isFile() || st.size === 0) throw new Error("Video file is missing or empty.");
 
-  const fpNorm = path.resolve(inPath);
+  const fpNorm = assertUserAccessibleMediaPath(inPath);
   const cacheKey = crypto
     .createHash("sha256")
     .update(`${fpNorm}\0${st.size}\0${Number(st.mtimeMs)}`)
@@ -1757,6 +2013,10 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     /* build */
   }
 
+  const inflight = mkvPrepareInFlight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const work = (async () => {
   const tryUnlink = async (p) => {
     try {
       await fsp.unlink(p);
@@ -1800,29 +2060,37 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     await runFfmpeg(ffmpegPath, [...baseArgs, ...extraArgs, outPath]);
   };
 
+  let result;
   try {
     await tryEncode(copyWithAudio);
-    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
+    result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
   } catch {
     await tryUnlink(outPath);
+    try {
+      await tryEncode(copyVideoOnly);
+      result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
+    } catch {
+      await tryUnlink(outPath);
+      try {
+        await tryEncode(x264aac);
+        result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
+      } catch {
+        await tryUnlink(outPath);
+        await tryEncode(x264an);
+        result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
+      }
+    }
   }
+  void cleanupMkvCache();
+  return result;
+  })();
 
+  mkvPrepareInFlight.set(cacheKey, work);
   try {
-    await tryEncode(copyVideoOnly);
-    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
-  } catch {
-    await tryUnlink(outPath);
+    return await work;
+  } finally {
+    mkvPrepareInFlight.delete(cacheKey);
   }
-
-  try {
-    await tryEncode(x264aac);
-    return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
-  } catch {
-    await tryUnlink(outPath);
-  }
-
-  await tryEncode(x264an);
-  return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
 });
 
 function createRecordingOutput(filePath, tapMime) {
@@ -2083,6 +2351,8 @@ ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
   const pad = (n, l = 2) => String(n).padStart(l, "0");
   const name = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}_${pad(d.getMilliseconds(), 3)}${filenameExt}`;
   const filePath = path.join(outDir, name);
+  allowedRecordOutputDirs.add(path.resolve(outDir));
+  allowedRecordRevealPaths.add(path.resolve(filePath));
   if (recordMode === "hls") {
     return startFfmpegHlsRecording(id, url, filePath);
   }
@@ -2126,7 +2396,7 @@ ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
   attachRecordingFanout(id, upstream, recordOutput, filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
   const playbackUrl =
     rendererOrigin != null && recordMode !== "mpegts"
-      ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}`
+      ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}&token=${encodeURIComponent(streamProxySessionToken ?? "")}`
       : null;
   return { ok: true, id, filePath, playbackUrl };
 });
@@ -2476,7 +2746,7 @@ async function synthesizePiperTts({ voiceId, text, speed, style, requestGenerati
 }
 
 ipcMain.handle("iptv-neural-tts-voices", async () => {
-  const piperVoices = await listPiperVoicePacks({ requireRuntime: true });
+  const piperVoices = await listPiperVoicePacks({ requireRuntime: false });
   return {
     ok: true,
     engine: piperVoices.length ? "piper-vits+kokoro-js" : "kokoro-js",
@@ -2491,11 +2761,13 @@ ipcMain.handle("iptv-neural-tts-voices", async () => {
   };
 });
 
-ipcMain.handle("iptv-neural-tts-warmup", async () => {
-  await loadKokoroTts();
-  scheduleKokoroUnload(300_000);
-  return { ok: true, engine: "kokoro-js", model: KOKORO_MODEL_ID };
-});
+ipcMain.handle("iptv-neural-tts-warmup", async () =>
+  enqueueNeuralTtsWork(async () => {
+    await loadKokoroTts();
+    scheduleKokoroUnload(300_000);
+    return { ok: true, engine: "kokoro-js", model: KOKORO_MODEL_ID };
+  })
+);
 
 ipcMain.handle("iptv-neural-tts-cancel", async () => {
   neuralTtsGeneration += 1;
@@ -2569,10 +2841,7 @@ ipcMain.handle("iptv-neural-tts-synthesize", async (_evt, rawPayload) => {
 
 /** Reveal the recorded file in Finder / File Explorer / file manager. */
 ipcMain.handle("iptv-show-record-in-folder", async (_evt, rawPath) => {
-  const fp = typeof rawPath === "string" ? rawPath.trim() : "";
-  if (!fp) throw new Error("No file path.");
-  const resolved = path.resolve(fp);
-  if (resolved.length < 4) throw new Error("Invalid path.");
+  const resolved = assertAllowedRecordRevealPath(rawPath);
   shell.showItemInFolder(resolved);
   return { ok: true };
 });
@@ -2688,20 +2957,7 @@ function distDir() {
 }
 
 function assertStreamProxyTarget(raw) {
-  let u;
-  try {
-    u = new URL(String(raw).trim());
-  } catch {
-    throw new Error("Invalid URL.");
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") {
-    throw new Error("Only http(s) targets are allowed.");
-  }
-  const h = u.hostname.toLowerCase();
-  if (h === "169.254.169.254" || h === "metadata.google.internal") {
-    throw new Error("Host blocked.");
-  }
-  return u.toString();
+  return assertSafeFetchUrl(raw, "target URL");
 }
 
 async function tryServeStreamProxy(req, res) {
@@ -2712,6 +2968,13 @@ async function tryServeStreamProxy(req, res) {
     return false;
   }
   if (u.pathname !== "/__proxy/stream") return false;
+
+  try {
+    assertStreamProxySessionToken(req.url || "/");
+  } catch (e) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" }).end(e instanceof Error ? e.message : "Forbidden");
+    return true;
+  }
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -2796,6 +3059,13 @@ async function tryServeStreamTap(req, res) {
     return false;
   }
   if (u.pathname !== "/__tap/stream") return false;
+
+  try {
+    assertStreamProxySessionToken(req.url || "/");
+  } catch (e) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" }).end(e instanceof Error ? e.message : "Forbidden");
+    return true;
+  }
 
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
@@ -2916,6 +3186,9 @@ function createStaticRequestHandler(root) {
         const ext = path.extname(filePath).toLowerCase();
         res.setHeader("Content-Type", MIME[ext] || "application/octet-stream");
         res.setHeader("Cache-Control", "no-cache");
+        if (ext === ".html") {
+          res.setHeader("Content-Security-Policy", APP_CSP);
+        }
         res.writeHead(200).end(data);
       });
     })();
@@ -2942,6 +3215,7 @@ function startStaticServers(root) {
   }
 
   return (async () => {
+    streamProxySessionToken = crypto.randomBytes(32).toString("hex");
     for (let i = 0; i < STATIC_SERVER_PORT_TRIES; i++) {
       const port1 = STATIC_SERVER_PREFERRED_PORT + i;
       try {
@@ -3044,6 +3318,22 @@ function defaultWindowBoundsFromDisplay() {
 
 function installAppMenu() {
   const isMac = process.platform === "darwin";
+  const preferenceMenu = {
+    label: "Preferences",
+    submenu: [
+      {
+        id: "split-screen-preference",
+        label: "Enable split screen",
+        type: "checkbox",
+        checked: splitScreenPreferenceEnabled,
+        click: (item) => {
+          splitScreenPreferenceEnabled = !!item.checked;
+          const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+          win?.webContents.send("iptv-split-screen-preference-change", splitScreenPreferenceEnabled);
+        },
+      },
+    ],
+  };
   const editMenu = {
     label: "Edit",
     submenu: [
@@ -3077,9 +3367,9 @@ function installAppMenu() {
               { role: "quit" },
             ],
           },
-          { label: "File", submenu: [{ role: "close" }] },
+          { label: "File", submenu: [preferenceMenu, { type: "separator" }, { role: "close" }] },
         ]
-      : [{ label: "File", submenu: [{ role: "quit", label: "Exit" }] }]),
+      : [{ label: "File", submenu: [preferenceMenu, { type: "separator" }, { role: "quit", label: "Exit" }] }]),
     editMenu,
     {
       label: "View",
@@ -3164,7 +3454,7 @@ async function createWindow() {
   if (!fs.existsSync(path.join(root, "index.html"))) {
     const { dialog } = require("electron");
     dialog.showErrorBox(
-      "Smart Media player",
+      "Player",
       "Built UI not found (missing dist/index.html). Run npm run build first, then rebuild the desktop app."
     );
     app.quit();
@@ -3190,7 +3480,7 @@ async function createWindow() {
     y: wb.y,
     minWidth: 900,
     minHeight: 600,
-    title: "Smart Media player",
+    title: "Player",
     fullscreenable: true,
     webPreferences: {
       preload: preloadPath,
@@ -3211,6 +3501,28 @@ async function createWindow() {
     win.show();
   });
   await win.loadURL(appUrl);
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        void shell.openExternal(u.toString());
+      }
+    } catch {
+      /* ignore malformed URLs */
+    }
+    return { action: "deny" };
+  });
+
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      if (rendererOrigin && new URL(url).origin !== rendererOrigin) {
+        event.preventDefault();
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
 
   win.on("close", () => saveWindowState(win));
 

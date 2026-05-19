@@ -2,7 +2,7 @@
   "name": "iptv-player",
   "private": true,
   "version": "1.0.0",
-  "description": "Smart Media player — IPTV, radio, local media, ebooks, and recordings for web, Windows, and macOS (Electron).",
+  "description": "Player — IPTV, radio, local media, ebooks, and recordings for web, Windows, and macOS (Electron).",
   "author": "Cyberlink",
   "type": "module",
   "main": "electron/main.cjs",
@@ -44,7 +44,7 @@
   },
   "build": {
     "appId": "com.cyberlink.iptvplayer",
-    "productName": "Smart Media player",
+    "productName": "Player",
     "copyright": "Copyright © contributors",
     "directories": {
       "output": "release"

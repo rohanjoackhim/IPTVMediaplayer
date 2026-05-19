@@ -13,6 +13,8 @@ import "./RadioPanel.css";
 
 const ROW_H = 52;
 const OVERSCAN = 12;
+const MEDIA_PLAYBACK_TOGGLE_EVENT = "iptv-media-playback-toggle";
+const MEDIA_PLAYBACK_STATE_EVENT = "iptv-media-playback-state";
 
 export interface RadioPanelProps {
   onSelectStation: (c: Channel) => void;
@@ -66,6 +68,7 @@ export function RadioPanel({
   const [countriesErr, setCountriesErr] = useState<string | null>(null);
   const [stationsErr, setStationsErr] = useState<string | null>(null);
   const [stationsRefreshTick, setStationsRefreshTick] = useState(0);
+  const [mediaPlaybackState, setMediaPlaybackState] = useState<{ channelId: string; paused: boolean } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -172,6 +175,35 @@ export function RadioPanel({
     (ch: Channel) => favoriteUrls.has(favoriteKeyForChannel(ch)),
     [favoriteUrls]
   );
+
+  useEffect(() => {
+    const onPlaybackState = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ channelId?: string; paused?: boolean }>).detail;
+      if (!detail?.channelId || typeof detail.paused !== "boolean") return;
+      setMediaPlaybackState({ channelId: detail.channelId, paused: detail.paused });
+    };
+    window.addEventListener(MEDIA_PLAYBACK_STATE_EVENT, onPlaybackState);
+    return () => window.removeEventListener(MEDIA_PLAYBACK_STATE_EVENT, onPlaybackState);
+  }, []);
+
+  const toggleMediaPlayback = useCallback(
+    (ch: Channel, active: boolean, e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!active) {
+        onSelectStation(ch);
+        return;
+      }
+      window.dispatchEvent(new CustomEvent(MEDIA_PLAYBACK_TOGGLE_EVENT, { detail: { channelId: ch.id } }));
+    },
+    [onSelectStation]
+  );
+
+  const removeStation = useCallback((stationuuid: string, e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setStations((cur) => cur.filter((s) => s.stationuuid !== stationuuid));
+  }, []);
 
   const countryOptions = useMemo(
     () =>
@@ -321,8 +353,12 @@ export function RadioPanel({
               const fav = isFavorite(ch);
               const leftOn = ch.id === activeLeftId;
               const rightOn = splitView && ch.id === activeRightId;
+              const active = leftOn || rightOn;
+              const playback = mediaPlaybackState?.channelId === ch.id ? mediaPlaybackState : null;
+              const isPlaying = active && playback?.paused !== true;
+              const isPaused = active && playback?.paused === true;
               const rowClass =
-                leftOn || rightOn
+                active
                   ? `radio-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
                   : "radio-row";
               return (
@@ -336,6 +372,26 @@ export function RadioPanel({
                       ) : null}
                     </span>
                   </button>
+                  <div className="radio-row-actions" aria-label="Playback">
+                    <button
+                      type="button"
+                      className={`radio-play-btn${isPaused ? " radio-play-btn--paused" : ""}`}
+                      title={isPlaying ? "Pause" : isPaused ? "Resume" : "Play"}
+                      aria-label={isPlaying ? `Pause ${ch.name}` : isPaused ? `Resume ${ch.name}` : `Play ${ch.name}`}
+                      onClick={(e) => toggleMediaPlayback(ch, active, e)}
+                    >
+                      {isPlaying ? "Ⅱ" : "▶"}
+                    </button>
+                    <button
+                      type="button"
+                      className="radio-remove-btn"
+                      title="Remove from list"
+                      aria-label={`Remove ${ch.name}`}
+                      onClick={(e) => removeStation(s.stationuuid, e)}
+                    >
+                      ×
+                    </button>
+                  </div>
                   <button
                     type="button"
                     className={`radio-fav-btn${fav ? " radio-fav-btn--on" : ""}`}

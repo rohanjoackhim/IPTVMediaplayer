@@ -5,7 +5,7 @@
   min-width: 0;
   width: 100%;
   overflow: hidden;
-  background: var(--bg-deep);
+  background: #ffffff;
   box-sizing: border-box;
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
     env(safe-area-inset-left, 0px);
@@ -19,8 +19,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
-  background: var(--bg-panel);
+  border-right: 1px solid #111;
+  background: #fff;
   box-shadow: var(--shadow-panel);
   z-index: 1;
 }
@@ -45,7 +45,7 @@
 
 .sidebar-resizer:hover,
 .sidebar-resizer:focus-visible {
-  background: var(--accent-glow);
+  background: #111;
 }
 
 .sidebar-resizer:focus-visible {
@@ -59,9 +59,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: radial-gradient(ellipse 110% 75% at 50% -5%, rgba(155, 240, 11, 0.07) 0%, transparent 42%),
-    radial-gradient(ellipse 90% 60% at 80% 100%, rgba(92, 225, 230, 0.04) 0%, transparent 45%),
-    linear-gradient(180deg, #151a16 0%, #0a0b0a 55%, #000 100%);
+  background: #ffffff;
 }
 
 .player-pane--split {
@@ -74,8 +72,8 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0;
-  background: #000;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  background: #111;
+  box-shadow: none;
 }
 
 .player-split > * {
@@ -86,7 +84,7 @@
 }
 
 .player-split > *:first-child {
-  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
+  box-shadow: inset -1px 0 0 #111;
 }
 
 /* Async VideoPlayer chunk loading: match native player split layout without gradient flash. */
@@ -95,11 +93,50 @@
   min-height: 0;
   min-width: 0;
   width: 100%;
-  background: #000;
+  background: #ffffff;
 }
 
 .player-loading-pane--solo {
   flex: 1 1 auto;
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 1366px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .browser-pane {
+    flex: 0 0 auto;
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+    height: min(36vh, 380px);
+    height: min(36dvh, 380px);
+    max-height: min(42vh, 440px);
+    max-height: min(42dvh, 440px);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    box-shadow: none;
+  }
+
+  .sidebar-resizer {
+    display: none;
+  }
+
+  .player-pane {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .player-split {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(240px, 1fr) minmax(240px, 1fr);
+    grid-template-rows: minmax(min(240px, 42dvh), 1fr) minmax(min(240px, 42dvh), 1fr);
+  }
+
+  .player-split > *:first-child {
+    box-shadow: inset 0 -1px 0 #111;
+  }
 }
 
 @media (max-width: 900px) {
@@ -118,7 +155,7 @@
     max-height: min(55dvh, 520px);
     border-right: none;
     border-bottom: 1px solid var(--border);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    box-shadow: none;
   }
 
   .sidebar-resizer {
@@ -137,6 +174,55 @@
   }
 
   .player-split > *:first-child {
-    box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+    box-shadow: inset 0 -1px 0 #111;
   }
+}
+
+.app-shell--compact .player-pane--compact {
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.player-pane--compact-dual {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.compact-tv-dock {
+  flex: 0 0 auto;
+  height: clamp(128px, 24vh, 220px);
+  min-height: 128px;
+  border-bottom: 1px solid #111;
+  background: #000;
+}
+
+.compact-reader-dock {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.compact-library-fab {
+  position: fixed;
+  right: clamp(12px, 2vw, 20px);
+  bottom: clamp(12px, 2vh, 20px);
+  z-index: 40;
+  border: 1px solid #111;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.96);
+  color: #111;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.compact-library-fab:hover {
+  background: #111;
+  color: #fff;
 }

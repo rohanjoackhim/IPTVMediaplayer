@@ -83,5 +83,9 @@ export function radioStationToChannel(s: RadioBrowserStationRow): Channel {
     logo: fav && /^https?:\/\//i.test(fav) ? fav : undefined,
     group: "Internet radio",
     country: s.country?.trim() || s.countrycode?.trim() || undefined,
+    radioTags: s.tags?.trim() || undefined,
+    radioHomepage: s.homepage?.trim() || undefined,
+    radioCodec: s.codec?.trim() || undefined,
+    radioBitrate: typeof s.bitrate === "number" && Number.isFinite(s.bitrate) && s.bitrate > 0 ? s.bitrate : undefined,
   };
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject, type ReactNode, type WheelEvent } from "react";
+import { memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { flushSync } from "react-dom";
 import Hls, { FetchLoader } from "hls.js";
 import mpegts from "mpegts.js";
@@ -8,6 +8,7 @@ import { mpegtsIptvConfig, streamRefererForUrl } from "../utils/iptvStreamHeader
 import { isAlreadyProxiedStreamUrl, proxiedStreamUrl, shouldUseStreamProxy } from "../utils/proxiedStreamUrl";
 import {
   canRecordRawHttpStream,
+  isPodcastChannelId,
   isRadioStationChannelId,
   recordFileSuffixAndTapType,
 } from "../utils/recordableStream";
@@ -27,13 +28,14 @@ import {
   fetchBilingualLyricsForLocalMp3,
   fetchDeepSeekLyricsForLocalMp3,
   fetchGeminiLyricsForLocalMp3,
-  LOCAL_LYRICS_MATCH_VERSION,
+  isUsableSavedLyricsCache,
   mapCachedLibraryLyricsToResult,
   saveLocalMp3LyricsResultToCache,
   type LyricLinePair,
   type LocalMp3LyricsResult,
 } from "../utils/localMp3LyricsPipeline";
 import { createLyricsJsonFetcher } from "../utils/lyricsJsonFetch";
+import { sanitizeEpubMediaHtml } from "../utils/sanitizeEpubMediaHtml";
 import { formatLlmUsageLine } from "../utils/lyricsLlmEndpointLabel";
 import { labelForLyricsTargetCode } from "../utils/lyricsTargetLanguages";
 import { translateLineBatchesToLanguage } from "../utils/translateLyricsLines";
@@ -41,6 +43,8 @@ import {
   resolveTrackMetadataFromLibrary,
   type TrackFileMetadata,
 } from "../utils/resolveTrackMetadata";
+import { getEbookLibraryItemById } from "../utils/audioLibraryDb";
+import { loadPdfJs } from "../utils/pdfJsLoader";
 import { LyricsTranslateMenu } from "./LyricsTranslateMenu";
 import { RadioEqualizer } from "./RadioEqualizer";
 import "./VideoPlayer.css";
@@ -70,6 +74,10 @@ export interface VideoPlayerProps {
   inSplitView?: boolean;
   /** Fires when a local IndexedDB library track (`blob:` + `libraryTrackId`) finishes naturally. */
   onLocalLibraryAudioEnded?: (info: { pane: "L" | "R"; channelId: string }) => void;
+  /** Notifies the app shell so it can show a global recording indicator while browsing elsewhere. */
+  onRecordingStatusChange?: (recording: boolean) => void;
+  /** Compact layout: TV strip dock or reader-focused chrome. */
+  layoutMode?: "default" | "compactTvDock" | "compactReader";
 }
 
 interface TrackOption {
@@ -86,11 +94,45 @@ interface EbookSpeechBoundary {
   charLength?: number;
 }
 
+interface EbookTtsActiveDetail {
+  ebookId: string;
+  active: boolean;
+}
+
 const EBOOK_SPEECH_EVENT = "iptv-ebook-speech-boundary";
+const EBOOK_TTS_ACTIVE_EVENT = "iptv-ebook-tts-active";
 const EBOOK_START_EVENT = "iptv-ebook-start-at";
 const EBOOK_OCR_TEXT_EVENT = "iptv-ebook-ocr-text";
 const LIBRARY_AUDIO_TOGGLE_EVENT = "iptv-library-audio-toggle";
 const LIBRARY_AUDIO_STATE_EVENT = "iptv-library-audio-state";
+const LIBRARY_CLEARED_EVENT = "iptv-library-cleared";
+const MEDIA_PLAYBACK_TOGGLE_EVENT = "iptv-media-playback-toggle";
+const MEDIA_PLAYBACK_STATE_EVENT = "iptv-media-playback-state";
+
+type EbookPageNavUnit = "page" | "chapter" | "part";
+
+type EbookPageNav = {
+  current: number;
+  total: number;
+  unit: EbookPageNavUnit;
+  label?: string;
+};
+
+type EbookPageChangeMeta = {
+  unit?: EbookPageNavUnit;
+  label?: string;
+};
+
+function ebookPageNavUnitFromFormat(format: Channel["ebookFormat"]): EbookPageNavUnit {
+  if (format === "epub") return "chapter";
+  if (format === "pdf") return "page";
+  return "part";
+}
+
+function ebookReadingLabel(unit: EbookPageNavUnit, current: number, total: number): string {
+  const noun = unit === "chapter" ? "chapter" : unit === "part" ? "part" : "page";
+  return `Reading ${noun} ${current} of ${total}`;
+}
 
 function splitEbookText(text: string): string[] {
   const cleaned = text.replace(/\s+/g, " ").trim();
@@ -131,6 +173,85 @@ function ebookHighlightRange(chunk: string, boundary: EbookSpeechBoundary | null
   return end > start ? { start, end } : null;
 }
 
+function textOffsetFromNode(container: HTMLElement, node: Node, offset: number): { charIndex: number; word?: string } | null {
+  if (!container.contains(node)) return null;
+  const pre = document.createRange();
+  pre.selectNodeContents(container);
+  pre.setEnd(node, offset);
+  const charIndex = Math.max(0, pre.toString().length);
+  const text = container.textContent ?? "";
+  const safeIndex = Math.max(0, Math.min(charIndex, text.length));
+  const left = text.slice(0, safeIndex).match(/\S+$/)?.[0] ?? "";
+  const right = text.slice(safeIndex).match(/^\S+/)?.[0] ?? "";
+  const word = `${left}${right}`.trim();
+  return { charIndex: safeIndex - left.length, word: word || undefined };
+}
+
+function caretTextOffsetWithin(container: HTMLElement, clientX: number, clientY: number): { charIndex: number; word?: string } | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  const position = doc.caretPositionFromPoint?.(clientX, clientY);
+  if (position) return textOffsetFromNode(container, position.offsetNode, position.offset);
+  const range = doc.caretRangeFromPoint?.(clientX, clientY);
+  if (range) return textOffsetFromNode(container, range.startContainer, range.startOffset);
+  return null;
+}
+
+function selectedTextOffsetWithin(container: HTMLElement, point?: { clientX: number; clientY: number }): { charIndex: number; word?: string } | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) {
+    return point ? caretTextOffsetWithin(container, point.clientX, point.clientY) : null;
+  }
+  const selected = sel.toString().trim();
+  const range = sel.getRangeAt(0);
+  if (!container.contains(range.startContainer)) {
+    return point ? caretTextOffsetWithin(container, point.clientX, point.clientY) : null;
+  }
+  const pre = document.createRange();
+  pre.selectNodeContents(container);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const rawStart = pre.toString().length;
+  const word = selected.split(/\s+/).filter(Boolean)[0] ?? "";
+  if (word) {
+    return {
+      charIndex: Math.max(0, rawStart),
+      word,
+    };
+  }
+  return point ? caretTextOffsetWithin(container, point.clientX, point.clientY) : {
+    charIndex: Math.max(0, rawStart),
+    word: undefined,
+  };
+}
+
+function highlightedTextNodes(text: string, range: { start: number; end: number } | null, highlightClassName: string): ReactNode {
+  if (!range) return text;
+  const start = Math.max(0, Math.min(range.start, text.length));
+  const end = Math.max(start, Math.min(range.end, text.length));
+  return (
+    <>
+      {text.slice(0, start)}
+      <mark className={highlightClassName}>{text.slice(start, end)}</mark>
+      {text.slice(end)}
+    </>
+  );
+}
+
+function scrollIntoViewIfOutside(container: HTMLElement | null, target: Element | null) {
+  if (!container || !target) return;
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (targetRect.top >= containerRect.top + 24 && targetRect.bottom <= containerRect.bottom - 24) return;
+  target.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+}
+
+function preventEbookReaderScroll(ev: WheelEvent<HTMLElement>) {
+  ev.preventDefault();
+  ev.stopPropagation();
+}
+
 function dispatchEbookStartAt(ebookId: string, chunkIndex: number, charIndex: number, word?: string, source?: "navigation" | "word-dblclick") {
   window.dispatchEvent(
     new CustomEvent(EBOOK_START_EVENT, {
@@ -143,9 +264,34 @@ function dispatchLibraryAudioState(trackId: string, paused: boolean) {
   window.dispatchEvent(new CustomEvent(LIBRARY_AUDIO_STATE_EVENT, { detail: { trackId, paused } }));
 }
 
+function dispatchMediaPlaybackState(channelId: string, paused: boolean) {
+  window.dispatchEvent(new CustomEvent(MEDIA_PLAYBACK_STATE_EVENT, { detail: { channelId, paused } }));
+}
+
 function ebookPartPreview(chunk: string): string {
   const trimmed = chunk.replace(/\s+/g, " ").trim();
   return trimmed.length > 88 ? `${trimmed.slice(0, 88)}…` : trimmed;
+}
+
+function ebookDisplayTitle(title: string): string {
+  const cleaned = title.replace(/\s+/g, " ").trim();
+  return (
+    cleaned
+      .replace(/^\s*(?:\[|\(|\{)?\s*ebook\s*(?:\]|\)|\})?\s*(?:[:|/\\•·—–-]\s*)?/i, "")
+      .trim() || cleaned
+  );
+}
+
+function visiblePageIndices(pageCount: number, currentPage: number, radius = 6): number[] {
+  const out = new Set<number>();
+  const count = Math.max(0, pageCount);
+  if (!count) return [];
+  out.add(0);
+  out.add(count - 1);
+  for (let i = Math.max(0, currentPage - radius); i <= Math.min(count - 1, currentPage + radius); i++) {
+    out.add(i);
+  }
+  return [...out].sort((a, b) => a - b);
 }
 
 function useEbookWheelPaging(currentPage: number, pageCount: number, goToPage: (idx: number) => void) {
@@ -297,6 +443,34 @@ function formatPlaybackClockHMS(sec: number): string {
   return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+function formatMediaDate(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+}
+
+function stripHtmlText(raw?: string): string {
+  return String(raw ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function domainLabel(raw?: string): string {
+  if (!raw) return "";
+  try {
+    return new URL(raw).hostname.replace(/^www\./i, "");
+  } catch {
+    return "";
+  }
+}
+
 /** Shown next to the channel name so you can see how the stream is being decoded. */
 export type PlaybackModeLabel =
   | "HLS · hls.js"
@@ -309,14 +483,146 @@ export type PlaybackModeLabel =
   | "Native · record tap"
   | "Radio · native"
   | "Radio · record tap"
+  | "Podcast · native"
+  | "Podcast · record tap"
   | "Library · native"
   | "Local video · native"
   | "Local video · preparing MKV…"
   | "Local video · MP4 (cache)"
   | "Local video · MP4 (remux)"
   | "Local video · MP4 (transcoded)"
-  | "Screen off · recording"
   | "URL · blocked";
+
+function InternetAudioShowcase({
+  channel,
+  kind,
+  playing,
+  playbackMode,
+  bufferLine,
+  onTogglePlay,
+  onCopy,
+  onOpen,
+  onReload,
+}: {
+  channel: Channel;
+  kind: "radio" | "podcast";
+  playing: boolean;
+  playbackMode: PlaybackModeLabel | null;
+  bufferLine: string | null;
+  onTogglePlay: () => void;
+  onCopy: () => void;
+  onOpen: () => void;
+  onReload: () => void;
+}) {
+  const isPodcast = kind === "podcast";
+  const tags = (channel.radioTags ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const description = stripHtmlText(channel.podcastDescription);
+  const releaseDate = formatMediaDate(channel.podcastReleaseDate);
+  const duration =
+    typeof channel.podcastDurationMs === "number" && channel.podcastDurationMs > 0
+      ? formatPlaybackClock(channel.podcastDurationMs / 1000)
+      : "";
+  const streamHost = domainLabel(channel.url);
+  const homepageHost = domainLabel(channel.radioHomepage);
+  const facts = isPodcast
+    ? [
+        channel.podcastShowName ? ["Show", channel.podcastShowName] : null,
+        channel.podcastAuthor ? ["Host", channel.podcastAuthor] : null,
+        channel.podcastGenre ? ["Genre", channel.podcastGenre] : null,
+        releaseDate ? ["Released", releaseDate] : null,
+        duration ? ["Length", duration] : null,
+      ].filter((item): item is string[] => Array.isArray(item))
+    : [
+        channel.country ? ["Country", channel.country] : null,
+        channel.radioCodec ? ["Codec", channel.radioCodec.toUpperCase()] : null,
+        channel.radioBitrate ? ["Bitrate", `${channel.radioBitrate} kbps`] : null,
+        homepageHost ? ["Homepage", homepageHost] : null,
+        streamHost ? ["Stream host", streamHost] : null,
+      ].filter((item): item is string[] => Array.isArray(item));
+
+  return (
+    <section className={`internet-audio-showcase internet-audio-showcase--${kind}`} aria-label={isPodcast ? "Podcast player" : "Radio player"}>
+      <div className="internet-audio-bg" aria-hidden>
+        {channel.logo ? <img src={channel.logo} alt="" /> : null}
+      </div>
+      <div className="internet-audio-card">
+        <div className="internet-audio-art-shell">
+          {channel.logo ? (
+            <img className="internet-audio-art" src={channel.logo} alt="" referrerPolicy="no-referrer" />
+          ) : (
+            <div className="internet-audio-art internet-audio-art--placeholder" aria-hidden>
+              {isPodcast ? "🎙" : "♪"}
+            </div>
+          )}
+          <div className={`internet-audio-status${!playing ? " internet-audio-status--paused" : ""}`}>
+            <span className="internet-audio-status-dot" aria-hidden />
+            {playing ? "Playing" : "Paused"}
+          </div>
+        </div>
+
+        <div className="internet-audio-main">
+          <div className="internet-audio-kicker">{isPodcast ? "Podcast episode" : "Live radio station"}</div>
+          <h2 className="internet-audio-title">{channel.name}</h2>
+          <p className="internet-audio-subtitle">
+            {isPodcast
+              ? [channel.podcastShowName, channel.podcastAuthor].filter(Boolean).join(" · ") || "Podcast"
+              : [channel.country, channel.group].filter(Boolean).join(" · ") || "Internet radio"}
+          </p>
+
+          {isPodcast && description ? (
+            <p className="internet-audio-description">{description.length > 360 ? `${description.slice(0, 360).trim()}...` : description}</p>
+          ) : null}
+
+          {!isPodcast && tags.length ? (
+            <div className="internet-audio-tags" aria-label="Station tags">
+              {tags.map((tag) => (
+                <span key={tag} className="internet-audio-tag">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {facts.length ? (
+            <dl className="internet-audio-facts">
+              {facts.map(([label, value]) => (
+                <div key={label} className="internet-audio-fact">
+                  <dt>{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : null}
+
+          <div className="internet-audio-actions">
+            <button type="button" className="internet-audio-primary" onClick={onTogglePlay}>
+              {playing ? "Pause" : "Play"}
+            </button>
+            <button type="button" className="internet-audio-secondary" onClick={onCopy}>
+              Copy URL
+            </button>
+            <button type="button" className="internet-audio-secondary" onClick={onOpen}>
+              Open stream
+            </button>
+            <button type="button" className="internet-audio-secondary" onClick={onReload}>
+              Reload
+            </button>
+          </div>
+
+          <div className="internet-audio-technical">
+            {playbackMode ? <span>{playbackMode}</span> : null}
+            {bufferLine ? <span>{bufferLine}</span> : null}
+            {streamHost ? <span>{streamHost}</span> : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 type PdfJsDocument = {
   numPages: number;
@@ -339,6 +645,89 @@ type PdfTextSpan = {
   height: number;
 };
 
+const PdfTextLayer = memo(function PdfTextLayer({
+  spans,
+  pageIndex,
+  ebookId,
+}: {
+  spans: PdfTextSpan[];
+  pageIndex: number;
+  ebookId: string;
+}) {
+  return (
+    <>
+      {spans.map((span, idx) => (
+        <button
+          key={`${pageIndex}-${idx}-${span.start}`}
+          type="button"
+          className="ebook-pdf-text-span"
+          style={{
+            left: span.left,
+            top: span.top,
+            width: span.width,
+            height: span.height,
+            fontSize: span.height * 0.78,
+          }}
+          title="Start reading from this text"
+          onClick={() => {
+            if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text);
+          }}
+          onDoubleClick={() => {
+            if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text, "word-dblclick");
+          }}
+        >
+          {span.text}
+        </button>
+      ))}
+    </>
+  );
+});
+
+function PdfHighlightOverlay({ spans, range }: { spans: PdfTextSpan[]; range: { start: number; end: number } | null }) {
+  if (!range) return null;
+  const highlighted: PdfTextSpan[] = [];
+  for (const span of spans) {
+    if (span.end <= range.start) continue;
+    if (span.start >= range.end) break;
+    highlighted.push(span);
+  }
+  return (
+    <>
+      {highlighted.map((span, idx) => (
+          <span
+            key={`${span.start}-${idx}`}
+            className="ebook-pdf-highlight-box"
+            aria-hidden
+            style={{ left: span.left, top: span.top, width: span.width, height: span.height }}
+          />
+      ))}
+    </>
+  );
+}
+
+function normalizePdfPageText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+async function resolveEbookPdfBlob(channel: Channel): Promise<Blob> {
+  if (channel.ebookBlob instanceof Blob && channel.ebookBlob.size > 0) return channel.ebookBlob;
+  const id = channel.ebookId?.trim();
+  if (!id) throw new Error("The original PDF file is not available.");
+  const row = await getEbookLibraryItemById(id);
+  if (!(row?.blob instanceof Blob) || row.blob.size <= 0) {
+    throw new Error("The PDF file is missing from the library. Remove it and add the file again.");
+  }
+  return row.blob;
+}
+
+function cappedPdfRenderScale(page: PdfJsPage, requestedScale: number): number {
+  const base = page.getViewport({ scale: 1 });
+  const maxPixels = 3_200_000;
+  const pixels = Math.max(1, base.width * requestedScale * base.height * requestedScale);
+  if (pixels <= maxPixels) return requestedScale;
+  return Math.max(0.55, Math.sqrt(maxPixels / Math.max(1, base.width * base.height)));
+}
+
 function dispatchEbookOcrText(ebookId: string, pageIndex: number, text: string) {
   window.dispatchEvent(new CustomEvent(EBOOK_OCR_TEXT_EVENT, { detail: { ebookId, pageIndex, text } }));
 }
@@ -348,15 +737,18 @@ function EbookPlainTextPage({
   ebookChunks,
   ebookStartChunk,
   ebookSpeechBoundary,
-  ebookCurrentWordRef,
+  ebookTtsActive,
+  onEbookPageChange,
 }: {
   channel: Channel;
   ebookChunks: string[];
   ebookStartChunk: number;
   ebookSpeechBoundary: EbookSpeechBoundary | null;
-  ebookCurrentWordRef: MutableRefObject<HTMLButtonElement | null>;
+  ebookTtsActive: boolean;
+  onEbookPageChange?: (pageIndex: number, pageCount: number, meta?: EbookPageChangeMeta) => void;
 }) {
   const pageScrollRef = useRef<HTMLDivElement | null>(null);
+  const paragraphRef = useRef<HTMLParagraphElement | null>(null);
   const [textScale, setTextScale] = useState(1);
   const [visiblePart, setVisiblePart] = useState(ebookStartChunk);
   const speech = ebookSpeechBoundary;
@@ -381,12 +773,26 @@ function EbookPlainTextPage({
   useEffect(() => {
     pageScrollRef.current?.scrollTo({ top: 0, left: 0 });
   }, [currentPart]);
+  useEffect(() => {
+    scrollIntoViewIfOutside(pageScrollRef.current, paragraphRef.current?.querySelector(".ebook-player-word") ?? null);
+  }, [ebookSpeechBoundary]);
+  const currentChunk = ebookChunks[currentPart] ?? "";
+  const boundary =
+    speech && speech.ebookId === channel.ebookId && speech.chunkIndex === currentPart
+      ? speech
+      : null;
+  const range = ebookHighlightRange(currentChunk, boundary);
+  const browserIndices = useMemo(() => visiblePageIndices(pageCount, currentPart), [currentPart, pageCount]);
+  useEffect(() => {
+    onEbookPageChange?.(currentPart, pageCount, { unit: "part" });
+  }, [currentPart, onEbookPageChange, pageCount]);
   return (
     <div className="ebook-player-body">
       <nav className="ebook-page-browser" aria-label="Book parts">
         <div className="ebook-page-browser-title">Pages</div>
         <div className="ebook-page-browser-list">
-          {ebookChunks.map((chunk, idx) => {
+          {browserIndices.map((idx) => {
+            const chunk = ebookChunks[idx] ?? "";
             const isCurrent = idx === currentPart;
             return (
               <button
@@ -405,89 +811,52 @@ function EbookPlainTextPage({
       <div className="ebook-reader-pane">
         <div className="ebook-real-toolbar ebook-real-toolbar--top">
           <button type="button" onClick={() => goToPart(0)} disabled={currentPart <= 0}>
-            First
+            First Page
           </button>
           <button type="button" onClick={() => goToPart(currentPart - 1)} disabled={currentPart <= 0}>
-            Prev
+            Previous
           </button>
           <span>Part {Math.min(currentPart + 1, pageCount)} of {pageCount}</span>
           <button type="button" onClick={() => goToPart(currentPart + 1)} disabled={currentPart >= pageCount - 1}>
             Next
           </button>
           <button type="button" onClick={() => goToPart(pageCount - 1)} disabled={currentPart >= pageCount - 1}>
-            Last
+            Last Page
           </button>
           <button type="button" onClick={() => setTextScale((s) => Math.max(0.8, Number((s - 0.1).toFixed(1))))}>
-            Zoom -
+            A-
           </button>
           <span>{Math.round(textScale * 100)}%</span>
           <button type="button" onClick={() => setTextScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(1))))}>
-            Zoom +
+            A+
           </button>
         </div>
       <div
         ref={pageScrollRef}
-        className="ebook-player-text"
+        className={`ebook-player-text${ebookTtsActive ? " ebook-reader-scroll-locked" : ""}`}
         style={{ fontSize: `calc(clamp(1.08rem, 1.48vw, 1.42rem) * ${textScale})` }}
-        onWheel={onPageWheel}
+        onWheel={ebookTtsActive ? preventEbookReaderScroll : onPageWheel}
       >
-        {ebookChunks.map((chunk, idx) => {
-          const speech = ebookSpeechBoundary;
-          const boundary =
-            speech && speech.ebookId === channel.ebookId && speech.chunkIndex === idx
-              ? speech
-              : null;
-          const range = ebookHighlightRange(chunk, boundary);
-          return (
             <section
-              key={idx}
-              className={
-                idx === currentPart
-                  ? "ebook-player-section ebook-player-section--start"
-                  : "ebook-player-section"
-              }
-              aria-label={`Part ${idx + 1}`}
-              hidden={idx !== currentPart}
+              className="ebook-player-section ebook-player-section--start"
+              aria-label={`Part ${currentPart + 1}`}
             >
               <span className="ebook-player-section-label">
-                {idx === currentPart ? "Current page" : `Part ${idx + 1}`}
+                Current page
               </span>
-              <p className="ebook-player-paragraph">
-                {(() => {
+              <p
+                ref={paragraphRef}
+                className="ebook-player-paragraph ebook-player-paragraph--selectable"
+                onDoubleClick={(ev: ReactMouseEvent<HTMLParagraphElement>) => {
                   const ebookId = channel.ebookId;
-                  if (!ebookId) return chunk;
-                  const parts: ReactNode[] = [];
-                  const re = /\s+|\S+/g;
-                  let match: RegExpExecArray | null;
-                  while ((match = re.exec(chunk)) != null) {
-                    const token = match[0];
-                    const start = match.index;
-                    const end = start + token.length;
-                    if (/^\s+$/.test(token)) {
-                      parts.push(token);
-                      continue;
-                    }
-                    const highlighted = !!range && start < range.end && end > range.start;
-                    parts.push(
-                      <button
-                        key={`${idx}-${start}`}
-                        type="button"
-                        className="ebook-player-word-btn"
-                        ref={highlighted ? ebookCurrentWordRef : undefined}
-                        title="Start reading from this word"
-                        onClick={() => dispatchEbookStartAt(ebookId, idx, start, token)}
-                        onDoubleClick={() => dispatchEbookStartAt(ebookId, idx, start, token, "word-dblclick")}
-                      >
-                        {highlighted ? <mark className="ebook-player-word">{token}</mark> : token}
-                      </button>
-                    );
-                  }
-                  return parts;
-                })()}
+                  if (!ebookId || !paragraphRef.current) return;
+                  const hit = selectedTextOffsetWithin(paragraphRef.current, ev);
+                  if (hit) dispatchEbookStartAt(ebookId, currentPart, hit.charIndex, hit.word, "word-dblclick");
+                }}
+              >
+                {highlightedTextNodes(currentChunk, range, "ebook-player-word")}
               </p>
             </section>
-          );
-        })}
       </div>
       </div>
     </div>
@@ -499,11 +868,15 @@ function PdfReader({
   pageTexts,
   ebookStartChunk,
   ebookSpeechBoundary,
+  ebookTtsActive,
+  onEbookPageChange,
 }: {
   channel: Channel;
   pageTexts: string[];
   ebookStartChunk: number;
   ebookSpeechBoundary: EbookSpeechBoundary | null;
+  ebookTtsActive: boolean;
+  onEbookPageChange?: (pageIndex: number, pageCount: number, meta?: EbookPageChangeMeta) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const pageScrollRef = useRef<HTMLDivElement | null>(null);
@@ -520,59 +893,83 @@ function PdfReader({
     () => Array.from({ length: Math.max(pdfDoc?.numPages ?? 0, pageTexts.length, 1) }, (_, idx) => ocrPageTexts[idx] ?? pageTexts[idx] ?? ""),
     [ocrPageTexts, pageTexts, pdfDoc?.numPages]
   );
+  const effectivePageTextsRef = useRef(effectivePageTexts);
+  useEffect(() => {
+    effectivePageTextsRef.current = effectivePageTexts;
+  }, [effectivePageTexts]);
   const pageCount = pdfDoc?.numPages ?? Math.max(effectivePageTexts.length, 1);
   const ebookId = channel.ebookId ?? "";
 
   useEffect(() => {
+    setPageIndex(Math.max(0, Math.min(ebookStartChunk, pageCount - 1)));
+  }, [ebookStartChunk, pageCount]);
+
+  useEffect(() => {
     let cancelled = false;
+    let loadingTask: { promise: Promise<unknown>; destroy?: () => void } | null = null;
     setStatus("Loading PDF…");
     setPdfDoc(null);
     setSpans([]);
+    setPageSize({ width: 0, height: 0 });
     void (async () => {
       try {
-        if (!(channel.ebookBlob instanceof Blob)) throw new Error("The original PDF file is not available.");
-        const [pdfjs, pdfWorker] = await Promise.all([
-          import("pdfjs-dist/legacy/build/pdf.mjs"),
-          import("pdfjs-dist/legacy/build/pdf.worker.mjs"),
-        ]);
-        (globalThis as typeof globalThis & { pdfjsWorker?: unknown }).pdfjsWorker = pdfWorker;
-        const data = new Uint8Array(await channel.ebookBlob.arrayBuffer());
-        const doc = await pdfjs.getDocument({ data, isEvalSupported: false, useWorkerFetch: false } as Parameters<typeof pdfjs.getDocument>[0]).promise;
+        const blob = await resolveEbookPdfBlob(channel);
+        const pdfjs = await loadPdfJs();
+        const data = new Uint8Array(await blob.arrayBuffer());
+        if (cancelled) return;
+        loadingTask = pdfjs.getDocument({
+          data,
+          isEvalSupported: false,
+        } as Parameters<typeof pdfjs.getDocument>[0]) as { promise: Promise<unknown>; destroy?: () => void };
+        const doc = (await loadingTask.promise) as PdfJsDocument;
         if (cancelled) return;
         setPdfUtil(pdfjs.Util ?? null);
-        setPdfDoc(doc as unknown as PdfJsDocument);
+        setPdfDoc(doc);
         setPageIndex((cur) => Math.max(0, Math.min(cur, doc.numPages - 1)));
-        setStatus("");
+        setStatus(doc.numPages > 0 ? "" : "This PDF has no pages.");
       } catch (e) {
         if (!cancelled) setStatus(e instanceof Error ? e.message : String(e));
       }
     })();
     return () => {
       cancelled = true;
+      try {
+        loadingTask?.destroy?.();
+      } catch {
+        /* noop */
+      }
     };
-  }, [channel.ebookBlob]);
+  }, [channel.ebookBlob, channel.ebookId]);
 
   useEffect(() => {
     let cancelled = false;
     setSpans([]);
-    setStatus((cur) => (cur === "Loading PDF…" ? cur : ""));
     void (async () => {
       try {
         if (!pdfDoc || !canvasRef.current) return;
+        setStatus("Rendering page…");
         const page = await pdfDoc.getPage(pageIndex + 1);
         if (cancelled) return;
-        const viewport = page.getViewport({ scale });
+        const renderScale = cappedPdfRenderScale(page, scale);
+        const viewport = page.getViewport({ scale: renderScale });
         const canvas = canvasRef.current;
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error("Could not create a PDF canvas context.");
         canvas.width = Math.max(1, Math.floor(viewport.width));
         canvas.height = Math.max(1, Math.floor(viewport.height));
-        setPageSize({ width: viewport.width, height: viewport.height });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        setPageSize((prev) =>
+          Math.abs(prev.width - viewport.width) < 0.5 && Math.abs(prev.height - viewport.height) < 0.5
+            ? prev
+            : { width: viewport.width, height: viewport.height }
+        );
         await page.render({ canvas, canvasContext: ctx, viewport }).promise;
         if (cancelled) return;
         const text = await page.getTextContent();
         if (cancelled) return;
         let cursor = 0;
+        const pageTextParts: string[] = [];
         const nextSpans: PdfTextSpan[] = [];
         for (const item of text.items) {
           const str = typeof item.str === "string" ? item.str : "";
@@ -587,7 +984,8 @@ function PdfReader({
           const fontHeight = tx ? Math.max(8, Math.hypot(tx[2] ?? 0, tx[3] ?? 10)) : 12;
           const left = tx?.[4] ?? 0;
           const top = tx ? viewport.height - (tx[5] ?? 0) - fontHeight : 0;
-          const width = typeof item.width === "number" ? Math.max(8, item.width * scale) : Math.max(8, str.length * fontHeight * 0.45);
+          const width = typeof item.width === "number" ? Math.max(8, item.width * renderScale) : Math.max(8, str.length * fontHeight * 0.45);
+          pageTextParts.push(str);
           nextSpans.push({
             text: str,
             start: cursor,
@@ -600,8 +998,16 @@ function PdfReader({
           cursor += str.length + 1;
         }
         setSpans(nextSpans);
-        if (nextSpans.length === 0 && !(effectivePageTexts[pageIndex] ?? "").trim()) {
+        const extractedPageText = normalizePdfPageText(pageTextParts.join(" "));
+        const knownPageText = (effectivePageTextsRef.current[pageIndex] ?? "").trim();
+        if (extractedPageText && ebookId && !knownPageText) {
+          setOcrPageTexts((prev) => (prev[pageIndex] ? prev : { ...prev, [pageIndex]: extractedPageText }));
+          dispatchEbookOcrText(ebookId, pageIndex, extractedPageText);
+        }
+        if (nextSpans.length === 0 && !knownPageText) {
           setStatus("This PDF page has no selectable text. Press OCR page to scan it for read-aloud and highlighting.");
+        } else {
+          setStatus(renderScale < scale ? "Large page rendered at a lighter resolution to avoid high memory use." : "");
         }
       } catch (e) {
         if (!cancelled) {
@@ -613,7 +1019,7 @@ function PdfReader({
     return () => {
       cancelled = true;
     };
-  }, [effectivePageTexts, pageIndex, pdfDoc, pdfUtil, scale]);
+  }, [ebookId, pageIndex, pdfDoc, pdfUtil, scale]);
 
   useEffect(() => {
     const speech = ebookSpeechBoundary;
@@ -660,13 +1066,17 @@ function PdfReader({
   useEffect(() => {
     pageScrollRef.current?.scrollTo({ top: 0, left: 0 });
   }, [pageIndex]);
+  const browserIndices = useMemo(() => visiblePageIndices(pageCount, pageIndex), [pageCount, pageIndex]);
+  useEffect(() => {
+    onEbookPageChange?.(pageIndex, pageCount, { unit: "page" });
+  }, [onEbookPageChange, pageCount, pageIndex]);
 
   return (
     <div className="ebook-real-reader">
       <aside className="ebook-real-sidebar" aria-label="PDF pages">
         <div className="ebook-page-browser-title">Pages</div>
         <div className="ebook-real-thumb-list">
-          {Array.from({ length: pageCount }, (_, idx) => (
+          {browserIndices.map((idx) => (
             <button
               key={idx}
               type="button"
@@ -682,56 +1092,41 @@ function PdfReader({
       <section className="ebook-real-main">
         <div className="ebook-real-toolbar ebook-real-toolbar--top">
           <button type="button" onClick={() => goToPdfPage(0)} disabled={pageIndex <= 0}>
-            First
+            First Page
           </button>
           <button type="button" onClick={() => goToPdfPage(pageIndex - 1)} disabled={pageIndex <= 0}>
-            Prev
+            Previous
           </button>
           <span>Page {pageIndex + 1} of {pageCount}</span>
           <button type="button" onClick={() => goToPdfPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1}>
             Next
           </button>
           <button type="button" onClick={() => goToPdfPage(pageCount - 1)} disabled={pageIndex >= pageCount - 1}>
-            Last
+            Last Page
           </button>
-          <button type="button" onClick={() => setScale((s) => Math.max(0.7, Number((s - 0.1).toFixed(1))))}>Zoom -</button>
+          <button type="button" onClick={() => setScale((s) => Math.max(0.7, Number((s - 0.1).toFixed(1))))}>A-</button>
           <span>{Math.round(scale * 100)}%</span>
-          <button type="button" onClick={() => setScale((s) => Math.min(2.4, Number((s + 0.1).toFixed(1))))}>Zoom +</button>
+          <button type="button" onClick={() => setScale((s) => Math.min(2.4, Number((s + 0.1).toFixed(1))))}>A+</button>
           <button type="button" onClick={() => void runOcr()} disabled={ocrBusy || !pdfDoc}>
             {ocrBusy ? "OCR…" : "OCR page"}
           </button>
         </div>
         {status ? <div className="ebook-real-status" role="status">{status}</div> : null}
-        <div ref={pageScrollRef} className="ebook-pdf-scroll" onWheel={onPageWheel}>
+        <div
+          ref={pageScrollRef}
+          className={`ebook-pdf-scroll${ebookTtsActive ? " ebook-reader-scroll-locked" : ""}`}
+          onWheel={ebookTtsActive ? preventEbookReaderScroll : onPageWheel}
+        >
+          {!pdfDoc && !status ? (
+            <div className="ebook-pdf-loading" role="status">
+              Loading PDF…
+            </div>
+          ) : null}
           <div className="ebook-pdf-page" style={{ width: pageSize.width || undefined, height: pageSize.height || undefined }}>
             <canvas ref={canvasRef} className="ebook-pdf-canvas" />
             <div className="ebook-pdf-text-layer" aria-label={`PDF page ${pageIndex + 1}`}>
-              {spans.map((span, idx) => {
-                const highlighted = !!range && span.start < range.end && span.end > range.start;
-                return (
-                  <button
-                    key={`${pageIndex}-${idx}-${span.start}`}
-                    type="button"
-                    className={`ebook-pdf-text-span${highlighted ? " ebook-pdf-text-span--highlight" : ""}`}
-                    style={{
-                      left: span.left,
-                      top: span.top,
-                      width: span.width,
-                      height: span.height,
-                      fontSize: span.height * 0.78,
-                    }}
-                    title="Start reading from this text"
-                    onClick={() => {
-                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text);
-                    }}
-                    onDoubleClick={() => {
-                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, span.start, span.text, "word-dblclick");
-                    }}
-                  >
-                    {span.text}
-                  </button>
-                );
-              })}
+              <PdfHighlightOverlay spans={spans} range={range} />
+              <PdfTextLayer spans={spans} pageIndex={pageIndex} ebookId={ebookId} />
             </div>
           </div>
         </div>
@@ -741,13 +1136,18 @@ function PdfReader({
 }
 
 function extractEpubMediaHtml(html: string): string {
+  return sanitizeEpubMediaHtml(html);
+}
+
+function epubDocTitleFromHtml(html: string): string {
   if (typeof DOMParser === "undefined") return "";
   const doc = new DOMParser().parseFromString(html || "<p></p>", "text/html");
   doc.querySelectorAll("script, style, noscript").forEach((node) => node.remove());
-  const media = Array.from(doc.body.querySelectorAll("img, svg, figure"))
-    .map((node) => node.outerHTML)
-    .join("");
-  return media;
+  const heading =
+    doc.body.querySelector("h1, h2, h3, [role='heading'], title")?.textContent ??
+    doc.querySelector("title")?.textContent ??
+    "";
+  return heading.replace(/\s+/g, " ").trim();
 }
 
 function EpubReader({
@@ -755,16 +1155,21 @@ function EpubReader({
   pageTexts,
   ebookStartChunk,
   ebookSpeechBoundary,
+  ebookTtsActive,
+  onEbookPageChange,
 }: {
   channel: Channel;
   pageTexts: string[];
   ebookStartChunk: number;
   ebookSpeechBoundary: EbookSpeechBoundary | null;
+  ebookTtsActive: boolean;
+  onEbookPageChange?: (pageIndex: number, pageCount: number, meta?: EbookPageChangeMeta) => void;
 }) {
   const articleRef = useRef<HTMLElement | null>(null);
+  const paragraphRef = useRef<HTMLParagraphElement | null>(null);
   const [pageIndex, setPageIndex] = useState(ebookStartChunk);
   const [scale, setScale] = useState(1);
-  const [pages, setPages] = useState<Array<{ html: string; text: string }>>([]);
+  const [pages, setPages] = useState<Array<{ html: string; text: string; title?: string }>>([]);
   const [status, setStatus] = useState("Loading EPUB…");
   const ebookId = channel.ebookId ?? "";
 
@@ -783,17 +1188,27 @@ function EpubReader({
         if (!rootfile) throw new Error("Could not find the EPUB package file.");
         const opf = await zip.file(rootfile)?.async("string");
         if (!opf) throw new Error("Could not read the EPUB package file.");
-        const base = rootfile.includes("/") ? rootfile.slice(0, rootfile.lastIndexOf("/") + 1) : "";
-        const manifest = new Map<string, { href: string; mediaType: string }>();
+        const packageBase = rootfile.includes("/") ? rootfile.slice(0, rootfile.lastIndexOf("/") + 1) : "";
+        const manifest = new Map<string, { href: string; mediaType: string; properties: string }>();
+        const spineTag = opf.match(/<spine\b[^>]*>/i)?.[0] ?? "";
+        const ncxId = spineTag.match(/\btoc\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
         for (const item of opf.matchAll(/<item\b[^>]*>/gi)) {
           const tag = item[0];
           const id = tag.match(/\bid\s*=\s*["']([^"']+)["']/i)?.[1];
           const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1];
           const mediaType = tag.match(/\bmedia-type\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
-          if (id && href) manifest.set(id, { href, mediaType });
+          const properties = tag.match(/\bproperties\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
+          if (id && href) manifest.set(id, { href, mediaType, properties });
         }
-        const resolve = (href: string) => {
-          const parts = `${base}${href}`.split("/");
+        const resolve = (baseDir: string, href: string) => {
+          const cleanHref = href.split("#")[0]?.split("?")[0] ?? "";
+          let decodedHref = cleanHref;
+          try {
+            decodedHref = decodeURIComponent(cleanHref);
+          } catch {
+            decodedHref = cleanHref;
+          }
+          const parts = `${baseDir}${decodedHref}`.split("/");
           const out: string[] = [];
           for (const part of parts) {
             if (!part || part === ".") continue;
@@ -802,10 +1217,50 @@ function EpubReader({
           }
           return out.join("/");
         };
+        const tocTitles = new Map<string, string>();
+        const addTocTitle = (baseDir: string, href: string, title: string) => {
+          const cleanTitle = title.replace(/\s+/g, " ").trim();
+          if (!cleanTitle) return;
+          const path = resolve(baseDir, href);
+          if (!tocTitles.has(path)) tocTitles.set(path, cleanTitle);
+        };
+        const navEntry = Array.from(manifest.values()).find((entry) =>
+          /\bnav\b/i.test(entry.properties) && /\.(xhtml|html|htm|xml)$/i.test(entry.href)
+        );
+        if (navEntry) {
+          const navPath = resolve(packageBase, navEntry.href);
+          const navHtml = await zip.file(navPath)?.async("string");
+          if (navHtml && typeof DOMParser !== "undefined") {
+            const navBase = navPath.includes("/") ? navPath.slice(0, navPath.lastIndexOf("/") + 1) : "";
+            const navDoc = new DOMParser().parseFromString(navHtml, "text/html");
+            const tocNav =
+              Array.from(navDoc.querySelectorAll("nav")).find((nav) =>
+                /toc/i.test(`${nav.getAttribute("epub:type") ?? ""} ${nav.getAttribute("type") ?? ""} ${nav.getAttribute("role") ?? ""}`)
+              ) ?? navDoc.querySelector("nav");
+            tocNav?.querySelectorAll("a[href]").forEach((a) => {
+              addTocTitle(navBase, a.getAttribute("href") ?? "", a.textContent ?? "");
+            });
+          }
+        }
+        const ncxEntry = (ncxId ? manifest.get(ncxId) : null) ??
+          Array.from(manifest.values()).find((entry) => /dtbncx|ncx/i.test(entry.mediaType) || /\.ncx$/i.test(entry.href));
+        if (ncxEntry) {
+          const ncxPath = resolve(packageBase, ncxEntry.href);
+          const ncxXml = await zip.file(ncxPath)?.async("string");
+          if (ncxXml && typeof DOMParser !== "undefined") {
+            const ncxBase = ncxPath.includes("/") ? ncxPath.slice(0, ncxPath.lastIndexOf("/") + 1) : "";
+            const ncxDoc = new DOMParser().parseFromString(ncxXml, "application/xml");
+            Array.from(ncxDoc.querySelectorAll("navPoint")).forEach((point) => {
+              const src = point.querySelector("content")?.getAttribute("src") ?? "";
+              const title = point.querySelector("navLabel text")?.textContent ?? "";
+              addTocTitle(ncxBase, src, title);
+            });
+          }
+        }
         const assetUrls = new Map<string, string>();
         for (const entry of manifest.values()) {
           if (!/^image\//i.test(entry.mediaType) && !/font|css/i.test(entry.mediaType)) continue;
-          const path = resolve(entry.href);
+          const path = resolve(packageBase, entry.href);
           const file = zip.file(path);
           if (!file) continue;
           const blob = await file.async("blob");
@@ -813,23 +1268,41 @@ function EpubReader({
           objectUrls.push(url);
           assetUrls.set(path, url);
         }
-        const built: Array<{ html: string; text: string }> = [];
+        const built: Array<{ html: string; text: string; title?: string }> = [];
         for (const ref of opf.matchAll(/<itemref\b[^>]*>/gi)) {
           const idref = ref[0].match(/\bidref\s*=\s*["']([^"']+)["']/i)?.[1];
           const entry = idref ? manifest.get(idref) : null;
           if (!entry || !/\.(xhtml|html|htm|xml)$/i.test(entry.href)) continue;
-          const path = resolve(entry.href);
+          const path = resolve(packageBase, entry.href);
           let html = await zip.file(path)?.async("string");
           if (!html) continue;
           html = html.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/\s(on\w+)=["'][^"']*["']/gi, "");
+          const chapterBase = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+          const assetUrlForHref = (href: string) => {
+            if (/^(https?:|data:|blob:|#)/i.test(href)) return null;
+            const chapterPath = resolve(chapterBase, href);
+            return assetUrls.get(chapterPath) ?? assetUrls.get(resolve(packageBase, href)) ?? null;
+          };
           html = html.replace(/\b(src|href)=["']([^"']+)["']/gi, (raw, attr: string, href: string) => {
-            if (/^(https?:|data:|blob:|#)/i.test(href)) return raw;
-            const assetPath = resolve(href);
-            const url = assetUrls.get(assetPath);
+            const url = assetUrlForHref(href);
             return url ? `${attr}="${url}"` : raw;
           });
+          html = html.replace(/\bsrcset=["']([^"']+)["']/gi, (raw, srcset: string) => {
+            const mapped = srcset
+              .split(",")
+              .map((part) => {
+                const [href, descriptor] = part.trim().split(/\s+/, 2);
+                if (!href) return "";
+                const url = assetUrlForHref(href);
+                return url ? [url, descriptor].filter(Boolean).join(" ") : part.trim();
+              })
+              .filter(Boolean)
+              .join(", ");
+            return mapped ? `srcset="${mapped}"` : raw;
+          });
           const text = new DOMParser().parseFromString(html, "text/html").body.textContent?.replace(/\s+/g, " ").trim() ?? "";
-          built.push({ html, text });
+          if (!text) continue;
+          built.push({ html, text, title: tocTitles.get(path) ?? epubDocTitleFromHtml(html) });
         }
         if (cancelled) return;
         setPages(built.length ? built : pageTexts.map((text) => ({ html: `<p>${text}</p>`, text })));
@@ -843,6 +1316,10 @@ function EpubReader({
       objectUrls.forEach((url) => URL.revokeObjectURL(url));
     };
   }, [channel.ebookBlob, pageTexts]);
+
+  useEffect(() => {
+    setPageIndex(Math.max(0, Math.min(ebookStartChunk, Math.max(pages.length - 1, 0))));
+  }, [ebookStartChunk, pages.length]);
 
   useEffect(() => {
     const speech = ebookSpeechBoundary;
@@ -872,80 +1349,68 @@ function EpubReader({
   }, [pageIndex]);
   const mediaHtml = useMemo(() => extractEpubMediaHtml(current?.html ?? ""), [current?.html]);
   useEffect(() => {
-    const hit = articleRef.current?.querySelector(".ebook-epub-word--highlight");
-    hit?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    scrollIntoViewIfOutside(articleRef.current, articleRef.current?.querySelector(".ebook-epub-word--highlight") ?? null);
   }, [range]);
+  const browserPages: Array<{ html: string; text: string; title?: string }> = pages.length
+    ? pages
+    : pageTexts.map((text) => ({ html: "", text }));
+  const browserIndices = useMemo(() => visiblePageIndices(pageCount, pageIndex), [pageCount, pageIndex]);
+  const chapterLabel = current?.title?.trim() || `Chapter ${pageIndex + 1}`;
+  useEffect(() => {
+    onEbookPageChange?.(pageIndex, pageCount, { unit: "chapter", label: chapterLabel });
+  }, [chapterLabel, onEbookPageChange, pageCount, pageIndex]);
   return (
     <div className="ebook-real-reader">
       <aside className="ebook-real-sidebar" aria-label="EPUB chapters">
         <div className="ebook-page-browser-title">Contents</div>
         <div className="ebook-real-thumb-list">
-          {(pages.length ? pages : pageTexts.map((text) => ({ html: "", text }))).map((page, idx) => (
+          {browserIndices.map((idx) => {
+            const page = browserPages[idx] ?? { html: "", text: "" };
+            return (
             <button
               key={idx}
               type="button"
               className={`ebook-real-thumb${idx === pageIndex ? " ebook-real-thumb--current" : ""}`}
               onClick={() => goToEpubPage(idx)}
             >
-              <span className="ebook-real-thumb-page">{idx + 1}</span>
-              <span className="ebook-real-thumb-lines">{ebookPartPreview(page.text || `Chapter ${idx + 1}`)}</span>
+              <span className="ebook-real-thumb-page">{page.title?.trim() || `Chapter ${idx + 1}`}</span>
+              <span className="ebook-real-thumb-lines">{ebookPartPreview(page.text || page.title || `Chapter ${idx + 1}`)}</span>
             </button>
-          ))}
+            );
+          })}
         </div>
       </aside>
       <section className="ebook-real-main">
         <div className="ebook-real-toolbar ebook-real-toolbar--top">
-          <button type="button" onClick={() => goToEpubPage(0)} disabled={pageIndex <= 0}>First</button>
-          <button type="button" onClick={() => goToEpubPage(pageIndex - 1)} disabled={pageIndex <= 0}>Prev</button>
+          <button type="button" onClick={() => goToEpubPage(0)} disabled={pageIndex <= 0}>First Chapter</button>
+          <button type="button" onClick={() => goToEpubPage(pageIndex - 1)} disabled={pageIndex <= 0}>Previous</button>
           <span>Chapter {pageIndex + 1} of {pageCount}</span>
           <button type="button" onClick={() => goToEpubPage(pageIndex + 1)} disabled={pageIndex >= pageCount - 1}>Next</button>
-          <button type="button" onClick={() => goToEpubPage(pageCount - 1)} disabled={pageIndex >= pageCount - 1}>Last</button>
-          <button type="button" onClick={() => setScale((s) => Math.max(0.8, Number((s - 0.1).toFixed(1))))}>Zoom -</button>
+          <button type="button" onClick={() => goToEpubPage(pageCount - 1)} disabled={pageIndex >= pageCount - 1}>Last Chapter</button>
+          <button type="button" onClick={() => setScale((s) => Math.max(0.8, Number((s - 0.1).toFixed(1))))}>A-</button>
           <span>{Math.round(scale * 100)}%</span>
-          <button type="button" onClick={() => setScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(1))))}>Zoom +</button>
+          <button type="button" onClick={() => setScale((s) => Math.min(1.8, Number((s + 0.1).toFixed(1))))}>A+</button>
         </div>
         {status ? <div className="ebook-real-status" role="status">{status}</div> : null}
         <article
           ref={articleRef}
-          className="ebook-epub-page"
+          className={`ebook-epub-page${ebookTtsActive ? " ebook-reader-scroll-locked" : ""}`}
           style={{ fontSize: `calc(clamp(1rem, 1.3vw, 1.28rem) * ${scale})` }}
-          onWheel={onPageWheel}
+          onWheel={ebookTtsActive ? preventEbookReaderScroll : onPageWheel}
         >
           {mediaHtml ? (
             <div className="ebook-epub-media" dangerouslySetInnerHTML={{ __html: mediaHtml }} />
           ) : null}
-          <p className="ebook-epub-sync-text">
-            {syncText ? (() => {
-              const parts: ReactNode[] = [];
-              const re = /\s+|\S+/g;
-              let match: RegExpExecArray | null;
-              while ((match = re.exec(syncText)) != null) {
-                const token = match[0];
-                const start = match.index;
-                const end = start + token.length;
-                if (/^\s+$/.test(token)) {
-                  parts.push(token);
-                  continue;
-                }
-                const highlighted = !!range && start < range.end && end > range.start;
-                parts.push(
-                  <button
-                    key={`${pageIndex}-${start}`}
-                    type="button"
-                    className={`ebook-epub-word${highlighted ? " ebook-epub-word--highlight" : ""}`}
-                    onClick={() => {
-                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, start, token);
-                    }}
-                    onDoubleClick={() => {
-                      if (ebookId) dispatchEbookStartAt(ebookId, pageIndex, start, token, "word-dblclick");
-                    }}
-                  >
-                    {token}
-                  </button>
-                );
-              }
-              return parts;
-            })() : "No readable EPUB page found."}
+          <p
+            ref={paragraphRef}
+            className="ebook-epub-sync-text ebook-epub-sync-text--selectable"
+            onDoubleClick={(ev: ReactMouseEvent<HTMLParagraphElement>) => {
+              if (!ebookId || !paragraphRef.current) return;
+              const hit = selectedTextOffsetWithin(paragraphRef.current, ev);
+              if (hit) dispatchEbookStartAt(ebookId, pageIndex, hit.charIndex, hit.word, "word-dblclick");
+            }}
+          >
+            {syncText ? highlightedTextNodes(syncText, range, "ebook-epub-word--highlight") : "No readable EPUB page found."}
           </p>
         </article>
       </section>
@@ -964,6 +1429,8 @@ export function VideoPlayer({
   playbackPane,
   inSplitView = false,
   onLocalLibraryAudioEnded,
+  onRecordingStatusChange,
+  layoutMode = "default",
 }: VideoPlayerProps) {
   const mediaRef = useRef<HTMLVideoElement>(null);
   /** Latest `channel` from props — stream effect cleanup compares against this for library restarts. */
@@ -973,6 +1440,8 @@ export function VideoPlayer({
   onLocalLibraryAudioEndedRef.current = onLocalLibraryAudioEnded;
   const playbackPaneRef = useRef(playbackPane);
   playbackPaneRef.current = playbackPane;
+  const onRecordingStatusChangeRef = useRef(onRecordingStatusChange);
+  onRecordingStatusChangeRef.current = onRecordingStatusChange;
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<MpegtsPlayer | null>(null);
   const externalUrlRef = useRef<string | null>(null);
@@ -985,6 +1454,7 @@ export function VideoPlayer({
   const [recordBusy, setRecordBusy] = useState(false);
   const [recordErr, setRecordErr] = useState<string | null>(null);
   const [recordSavedPath, setRecordSavedPath] = useState<string | null>(null);
+  const [recordingSourceUrl, setRecordingSourceUrl] = useState<string | null>(null);
   const [screenPlaybackOff, setScreenPlaybackOff] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackModeLabel | null>(null);
   const [trackOptions, setTrackOptions] = useState<TrackOption[]>([]);
@@ -1035,15 +1505,13 @@ export function VideoPlayer({
   const [libSeekUiSec, setLibSeekUiSec] = useState(0);
   /** Local library `<video>` paused — drives chrome transport when lyrics cover native controls. */
   const [libTransportPaused, setLibTransportPaused] = useState(true);
-  /** Playback speed for local library audio (audiobooks / music). */
-  const [libPlaybackRate, setLibPlaybackRate] = useState(1);
   const volumePopoverRef = useRef<HTMLDivElement>(null);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
   /** Bump to re-run the stream bind effect for the same radio channel (reconnect). */
   const [radioStreamReloadTick, setRadioStreamReloadTick] = useState(0);
   const [playerChromeNotice, setPlayerChromeNotice] = useState<string | null>(null);
   const [ebookSpeechBoundary, setEbookSpeechBoundary] = useState<EbookSpeechBoundary | null>(null);
-  const ebookCurrentWordRef = useRef<HTMLButtonElement | null>(null);
+  const [ebookTtsActive, setEbookTtsActive] = useState(false);
   const ebookPlayerRef = useRef<HTMLElement | null>(null);
   const [ebookFullscreen, setEbookFullscreen] = useState(false);
 
@@ -1054,6 +1522,8 @@ export function VideoPlayer({
     !!window.iptv?.stopStreamRecord;
 
   const isRadioChannel = !!channel?.id && isRadioStationChannelId(channel.id);
+  const isPodcastChannel = !!channel?.id && isPodcastChannelId(channel.id);
+  const isInternetAudioStream = isRadioChannel || isPodcastChannel;
   const isYoutubeChannel = !!channel?.youtubeVideoId?.trim();
   const isWebVideoPageChannel = !!channel?.webVideoPageUrl?.trim();
   const isEmbeddedWebChannel = isYoutubeChannel || isWebVideoPageChannel;
@@ -1069,26 +1539,71 @@ export function VideoPlayer({
     typeof channel?.ebookStartChunk === "number" && Number.isFinite(channel.ebookStartChunk)
       ? Math.max(0, Math.min(channel.ebookStartChunk, Math.max(ebookChunks.length - 1, 0)))
       : 0;
+  const [ebookPageNav, setEbookPageNav] = useState<EbookPageNav>(() => ({
+    current: ebookStartChunk + 1,
+    total: Math.max(ebookChunks.length, 1),
+    unit: ebookPageNavUnitFromFormat(channel?.ebookFormat),
+  }));
+  const handleEbookPageChange = useCallback((pageIndex: number, pageCount: number, meta?: EbookPageChangeMeta) => {
+    const total = Math.max(1, pageCount);
+    const current = Math.max(1, Math.min(pageIndex + 1, total));
+    setEbookPageNav((prev) => {
+      const unit = meta?.unit ?? prev.unit;
+      const label = meta?.label?.trim() || undefined;
+      if (prev.current === current && prev.total === total && prev.unit === unit && prev.label === label) return prev;
+      return { current, total, unit, label };
+    });
+  }, []);
+  useEffect(() => {
+    if (!channel?.ebookId) return;
+    setEbookPageNav({
+      current: Math.min(ebookStartChunk + 1, Math.max(ebookChunks.length, 1)),
+      total: Math.max(ebookChunks.length, 1),
+      unit: ebookPageNavUnitFromFormat(channel.ebookFormat),
+      label: undefined,
+    });
+  }, [channel?.ebookId]);
   useEffect(() => {
     if (!isEbookChannel || !channel?.ebookId) {
       setEbookSpeechBoundary(null);
+      setEbookTtsActive(false);
       return;
     }
     const onBoundary = (ev: Event) => {
       const detail = (ev as CustomEvent<EbookSpeechBoundary>).detail;
       if (!detail || detail.ebookId !== channel.ebookId) return;
-      setEbookSpeechBoundary(detail);
+      startTransition(() => {
+        setEbookSpeechBoundary((prev) => {
+          if (
+            prev?.ebookId === detail.ebookId &&
+            prev.chunkIndex === detail.chunkIndex &&
+            prev.charIndex === detail.charIndex &&
+            prev.charLength === detail.charLength
+          ) {
+            return prev;
+          }
+          return detail;
+        });
+      });
     };
     window.addEventListener(EBOOK_SPEECH_EVENT, onBoundary);
     return () => window.removeEventListener(EBOOK_SPEECH_EVENT, onBoundary);
   }, [channel?.ebookId, isEbookChannel]);
 
   useEffect(() => {
-    if (!ebookSpeechBoundary) return;
-    const node = ebookCurrentWordRef.current;
-    if (!node) return;
-    node.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
-  }, [ebookSpeechBoundary]);
+    if (!isEbookChannel || !channel?.ebookId) {
+      setEbookTtsActive(false);
+      return;
+    }
+    setEbookTtsActive(false);
+    const onTtsActive = (ev: Event) => {
+      const detail = (ev as CustomEvent<EbookTtsActiveDetail>).detail;
+      if (!detail || detail.ebookId !== channel.ebookId) return;
+      setEbookTtsActive(Boolean(detail.active));
+    };
+    window.addEventListener(EBOOK_TTS_ACTIVE_EVENT, onTtsActive);
+    return () => window.removeEventListener(EBOOK_TTS_ACTIVE_EVENT, onTtsActive);
+  }, [channel?.ebookId, isEbookChannel]);
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -1177,7 +1692,7 @@ export function VideoPlayer({
     setUnderLogoFailed(false);
   }, [channel?.id, channel?.logo]);
 
-  const mediaEqEnabled = isRadioChannel || isLibraryChannel;
+  const mediaEqEnabled = isInternetAudioStream || isLibraryChannel;
 
   useEffect(() => {
     if (!mediaEqEnabled) setRadioEqWebAudioActive(false);
@@ -1199,7 +1714,6 @@ export function VideoPlayer({
     setLibAudioDurationSec(null);
     setLibSeekUiSec(0);
     setLibTransportPaused(true);
-    setLibPlaybackRate(1);
     setVolumePopoverOpen(false);
     setLyricsSpatialBox(null);
   }, [channel?.id]);
@@ -1306,13 +1820,23 @@ export function VideoPlayer({
   }, [isLibraryChannel, channel?.id, channel?.libraryTrackId]);
 
   useEffect(() => {
+    const stopLibraryMedia = () => {
+      const el = mediaRef.current;
+      if (!el) return;
+      el.pause();
+      el.removeAttribute("src");
+      el.querySelectorAll("source[data-iptv-library]").forEach((node) => node.remove());
+      el.load();
+    };
+    window.addEventListener(LIBRARY_CLEARED_EVENT, stopLibraryMedia);
+    return () => window.removeEventListener(LIBRARY_CLEARED_EVENT, stopLibraryMedia);
+  }, []);
+
+  useEffect(() => {
     const el = mediaRef.current;
     if (!el || !isLibraryChannel) return;
-    const r = Number(libPlaybackRate);
-    if (Number.isFinite(r) && r >= 0.5 && r <= 3) {
-      el.playbackRate = r;
-    }
-  }, [isLibraryChannel, libPlaybackRate, channel?.id]);
+    el.playbackRate = 1;
+  }, [isLibraryChannel, channel?.id]);
 
   useEffect(() => {
     if (!volumePopoverOpen) return;
@@ -1334,7 +1858,7 @@ export function VideoPlayer({
   }, [volumePopoverOpen]);
 
   useEffect(() => {
-    if (!isRadioChannel) {
+    if (!isInternetAudioStream) {
       setRadioPlaying(false);
       return;
     }
@@ -1352,7 +1876,41 @@ export function VideoPlayer({
       el.removeEventListener("pause", sync);
       el.removeEventListener("ended", sync);
     };
-  }, [isRadioChannel, channel?.id]);
+  }, [isInternetAudioStream, channel?.id]);
+
+  useEffect(() => {
+    if (!channel?.id || isEbookChannel || isEmbeddedWebChannel) return;
+    const el = mediaRef.current;
+    if (!el) return;
+    const channelId = channel.id;
+    const sync = () => dispatchMediaPlaybackState(channelId, el.paused);
+    sync();
+    el.addEventListener("playing", sync);
+    el.addEventListener("play", sync);
+    el.addEventListener("pause", sync);
+    el.addEventListener("ended", sync);
+    return () => {
+      el.removeEventListener("playing", sync);
+      el.removeEventListener("play", sync);
+      el.removeEventListener("pause", sync);
+      el.removeEventListener("ended", sync);
+    };
+  }, [channel?.id, isEbookChannel, isEmbeddedWebChannel]);
+
+  useEffect(() => {
+    if (!channel?.id || isEbookChannel || isEmbeddedWebChannel) return;
+    const channelId = channel.id;
+    const onToggle = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ channelId?: string }>).detail;
+      if (detail?.channelId !== channelId) return;
+      const el = mediaRef.current;
+      if (!el) return;
+      if (el.paused) void el.play().catch(() => {});
+      else el.pause();
+    };
+    window.addEventListener(MEDIA_PLAYBACK_TOGGLE_EVENT, onToggle);
+    return () => window.removeEventListener(MEDIA_PLAYBACK_TOGGLE_EVENT, onToggle);
+  }, [channel?.id, isEbookChannel, isEmbeddedWebChannel]);
 
   useEffect(() => {
     const ch = channel;
@@ -1383,7 +1941,7 @@ export function VideoPlayer({
       if (tid && typeof indexedDB !== "undefined") {
         try {
           const cached = await getLibraryLyricsCache(tid);
-          if (cached?.pairs?.length && cached.lyricsMatchVersion === LOCAL_LYRICS_MATCH_VERSION && !ac.signal.aborted) {
+          if (isUsableSavedLyricsCache(cached) && !ac.signal.aborted) {
             apiOnlyLyricsPreviewRef.current = false;
             setMp3Lyrics({ kind: "ready", data: mapCachedLibraryLyricsToResult(cached) });
             return;
@@ -1698,11 +2256,16 @@ export function VideoPlayer({
       return;
     }
     try {
-      await saveLocalMp3LyricsResultToCache(tid, mp3Lyrics.data);
+      const saved = await saveLocalMp3LyricsResultToCache(tid, mp3Lyrics.data, { manualSaved: true });
+      if (!saved) {
+        setPlayerChromeNotice("Could not save lyrics to the local database.");
+        return;
+      }
       if (lyricsOverridePairs?.length && lyricsTranslateTarget) {
         await putLibraryLyricsTranslationCache(tid, lyricsTranslateTarget, lyricsOverridePairs);
       }
       apiOnlyLyricsPreviewRef.current = false;
+      setMp3Lyrics({ kind: "ready", data: { ...mp3Lyrics.data, manualSaved: true } });
       setPlayerChromeNotice("Saved the current lyrics and meaning to the local database.");
     } catch (e) {
       setPlayerChromeNotice(e instanceof Error ? e.message : "Could not save lyrics to the local database.");
@@ -1725,6 +2288,10 @@ export function VideoPlayer({
       return;
     }
     if (apiOnlyLyricsPreviewRef.current) {
+      setSongMeaningLoading(false);
+      return;
+    }
+    if (data.manualSaved || data.fromLocalCache) {
       setSongMeaningLoading(false);
       return;
     }
@@ -1776,20 +2343,27 @@ export function VideoPlayer({
   const canStartRecording = recordable && streamOkForRecord && hasDesktopRecordApi && !isYoutubeChannel && !isEbookChannel;
   /** Hide REC and related chrome for local library audio, ebooks, and YouTube embeds. */
   const showRecordChrome = recordable && !isLibraryChannel && !isYoutubeChannel && !isEbookChannel;
+  const showScreenOffChrome = !!channel && !isLibraryChannel && !isInternetAudioStream && !isEbookChannel && !isEmbeddedWebChannel;
+  const effectiveRecordTapPlayUrl =
+    recordingSourceUrl && channel?.url?.trim() === recordingSourceUrl ? recordTapPlayUrl : null;
 
   const recordButtonTitle = !recordable
     ? ""
     : !hasDesktopRecordApi
-      ? "Record live stream to a folder you choose — install the Smart Media player Windows desktop app."
+      ? "Record live stream to a folder you choose — install the Player Windows desktop app."
       : !streamOkForRecord
         ? isWebVideoPageChannel
             ? "This web page is not a direct media stream, so the app cannot record it. Paste a direct .mp4, .webm, .ts, or similar media URL instead."
-          : isRadioChannel
-            ? "This station URL cannot be recorded from the app unless it is a direct http(s) media stream."
+          : isInternetAudioStream
+            ? "This stream URL cannot be recorded from the app unless it is a direct http(s) media stream."
             : "REC needs a direct http(s) media stream URL, not an embedded website page."
-        : isRadioChannel
+        : isInternetAudioStream
           ? "Save the live audio stream to disk (same bytes as playback via one upstream on desktop)."
           : "Save the live IPTV stream, then finalize it as a quality-preserving .mp4 after Stop. Playback stays on the live stream while recording.";
+
+  useEffect(() => {
+    onRecordingStatusChangeRef.current?.(recording);
+  }, [recording]);
 
   useEffect(() => {
     return () => {
@@ -1798,22 +2372,25 @@ export function VideoPlayer({
         void window.iptv.stopStreamRecord(id);
       }
       recordIdRef.current = null;
+      onRecordingStatusChangeRef.current?.(false);
       setRecording(false);
       setRecordTapPlayUrl(null);
+      setRecordingSourceUrl(null);
       setRecordSavedPath(null);
     };
-  }, [channel?.url]);
+  }, []);
 
   useEffect(() => {
     if (screenPlaybackOff) {
       setBufferLine(recording ? "Screen off · recording continues" : "Screen off");
       return;
     }
-    if (!channel?.url?.trim()) {
+    if (!channel?.url?.trim() || isLibraryChannel || isEbookChannel) {
       setBufferLine("—");
       return;
     }
     const last = { ahead: 0, ts: performance.now() };
+    let lastLine = "—";
     const tick = () => {
       const v = mediaRef.current;
       if (!v) return;
@@ -1824,12 +2401,16 @@ export function VideoPlayer({
       last.ahead = ahead;
       last.ts = now;
       const levelKbps = getHlsLevelKbps(hlsRef.current);
-      setBufferLine(formatBufferStatsLine({ aheadSec: ahead, fillSs, levelKbps }));
+      const line = formatBufferStatsLine({ aheadSec: ahead, fillSs, levelKbps });
+      if (line !== lastLine) {
+        lastLine = line;
+        setBufferLine(line);
+      }
     };
     tick();
     const id = window.setInterval(tick, 450);
     return () => clearInterval(id);
-  }, [channel?.url, recording, screenPlaybackOff]);
+  }, [channel?.url, recording, screenPlaybackOff, isLibraryChannel, isEbookChannel]);
 
   const refreshTextTracks = useCallback(() => {
     const video = mediaRef.current;
@@ -1852,10 +2433,13 @@ export function VideoPlayer({
     const urlKey = channel?.url?.trim() ?? null;
     if (prevStreamUrlForResetRef.current !== urlKey) {
       prevStreamUrlForResetRef.current = urlKey;
-      setRecording(false);
       setRecordErr(null);
-      setRecordSavedPath(null);
       setScreenPlaybackOff(false);
+      if (!recordIdRef.current) {
+        setRecording(false);
+        setRecordSavedPath(null);
+        setRecordingSourceUrl(null);
+      }
     }
 
     hlsRef.current?.destroy();
@@ -1875,12 +2459,6 @@ export function VideoPlayer({
     setPlaybackMode(null);
     setTrackOptions([]);
     setSelectedTrack("off");
-
-    if (screenPlaybackOff) {
-      setPlaybackMode(recording ? "Screen off · recording" : null);
-      setBufferLine(recording ? "Screen off · recording continues" : "Screen off");
-      return;
-    }
 
     if (channel?.ebookId) return;
     if (channel?.youtubeVideoId || channel?.webVideoPageUrl) return;
@@ -2070,7 +2648,7 @@ export function VideoPlayer({
         el.addEventListener("error", onNativeError, { once: true });
         el.addEventListener("loadedmetadata", onNativeLoadedMeta, { once: true });
         setPlaybackMode(mode);
-        el.src = recordTapPlayUrl?.trim() || streamUrl;
+        el.src = effectiveRecordTapPlayUrl?.trim() || streamUrl;
         startIptvLoadWatch();
         void el.play().catch(() => {});
         return true;
@@ -2163,7 +2741,12 @@ export function VideoPlayer({
 
       el.removeAttribute("src");
       el.querySelectorAll("source[data-iptv-library]").forEach((node) => node.remove());
-      el.src = url;
+      const srcEl = document.createElement("source");
+      srcEl.setAttribute("data-iptv-library", "1");
+      srcEl.src = url;
+      const typeHint = channel.libraryContentType?.trim();
+      if (typeHint) srcEl.type = typeHint;
+      el.appendChild(srcEl);
 
       el.addEventListener("error", onLibError, { once: true });
       el.addEventListener("loadedmetadata", onLibReady);
@@ -2343,7 +2926,7 @@ export function VideoPlayer({
             else if (r?.remuxed) setPlaybackMode("Local video · MP4 (remux)");
             else if (r?.usedTranscode) setPlaybackMode("Local video · MP4 (transcoded)");
             else setPlaybackMode("Local video · native");
-            el.addEventListener("addtrack", onTracks as EventListener);
+            onTracks();
             void el.play().catch(() => {});
           })
           .catch((e) => {
@@ -2537,7 +3120,7 @@ export function VideoPlayer({
         setError("HLS is not supported in this browser.");
         return;
       }
-    } else if (channel.id.startsWith("radio-") && !isLikelyHls(url)) {
+    } else if (isInternetAudioStream && !isLikelyHls(url)) {
       if (!/^https?:\/\//i.test(url)) {
         setPlaybackMode("URL · blocked");
         setError("This URL scheme is not supported in the browser player (use http(s) streams).");
@@ -2550,7 +3133,7 @@ export function VideoPlayer({
       function onRadioError() {
         el.removeEventListener("loadedmetadata", onRadioLoadedMeta);
         setPlaybackMode(null);
-        setError("Could not play this radio stream URL in the browser.");
+        setError("Could not play this audio stream URL in the browser.");
       }
       el.addEventListener("error", onRadioError, { once: true });
       el.addEventListener("loadedmetadata", onRadioLoadedMeta, { once: true });
@@ -2558,12 +3141,12 @@ export function VideoPlayer({
         el.removeEventListener("error", onRadioError);
         el.removeEventListener("loadedmetadata", onRadioLoadedMeta);
       };
-      const radioPlay = recordTapPlayUrl?.trim() || url;
-      setPlaybackMode(recordTapPlayUrl ? "Radio · record tap" : "Radio · native");
+      const radioPlay = effectiveRecordTapPlayUrl?.trim() || url;
+      setPlaybackMode(effectiveRecordTapPlayUrl ? (isPodcastChannel ? "Podcast · record tap" : "Radio · record tap") : isPodcastChannel ? "Podcast · native" : "Radio · native");
       el.src = radioPlay;
     } else if (isLikelyMpegTsOverHttp(url)) {
       if (isLikelyProgressiveVideoUrl(url)) {
-        tryNativeDirectPlayback(url, recordTapPlayUrl ? "Native · record tap" : "Native · direct");
+        tryNativeDirectPlayback(url, effectiveRecordTapPlayUrl ? "Native · record tap" : "Native · direct");
         skipDefaultFinish = true;
       } else if (!mpegts.isSupported()) {
         setPlaybackMode("MPEG-TS · blocked");
@@ -2571,7 +3154,7 @@ export function VideoPlayer({
           "This channel looks like MPEG-TS. This browser does not support the in-page TS player (mpegts.js). Try Chrome/Edge, or ask your provider for an HLS (m3u8) playlist."
         );
         return;
-      } else if (!bindMpegTsPlayer(url, recordTapPlayUrl)) {
+      } else if (!bindMpegTsPlayer(url, effectiveRecordTapPlayUrl)) {
         setPlaybackMode("MPEG-TS · blocked");
         setError("Could not start the MPEG-TS player in this browser.");
         return;
@@ -2595,7 +3178,7 @@ export function VideoPlayer({
         clearIptvLoadWatch();
         el.removeAttribute("src");
         el.load();
-        if (mpegts.isSupported() && bindMpegTsPlayer(url, recordTapPlayUrl)) {
+        if (mpegts.isSupported() && bindMpegTsPlayer(url, effectiveRecordTapPlayUrl)) {
           setPlaybackMode("MPEG-TS · mpegts.js");
           setError(null);
           startIptvLoadWatch();
@@ -2613,8 +3196,8 @@ export function VideoPlayer({
         el.removeEventListener("error", onNativeError);
         el.removeEventListener("loadedmetadata", onNativeLoadedMeta);
       };
-      setPlaybackMode(recordTapPlayUrl ? "Native · record tap" : "Native · direct");
-      const nativePlay = recordTapPlayUrl?.trim() || url;
+      setPlaybackMode(effectiveRecordTapPlayUrl ? "Native · record tap" : "Native · direct");
+      const nativePlay = effectiveRecordTapPlayUrl?.trim() || url;
       el.src = nativePlay;
       startIptvLoadWatch();
     }
@@ -2648,12 +3231,11 @@ export function VideoPlayer({
   }, [
     channel,
     refreshTextTracks,
-    recordTapPlayUrl,
+    effectiveRecordTapPlayUrl,
     streamProxyOrigin,
     splitIsolateNetwork,
     radioStreamReloadTick,
     channel?.streamResetNonce,
-    screenPlaybackOff,
   ]);
 
   useEffect(() => {
@@ -2757,6 +3339,7 @@ export function VideoPlayer({
         setRecording(true);
         setRecordSavedPath(out.filePath);
         setRecordTapPlayUrl(out.playbackUrl ?? null);
+        setRecordingSourceUrl(channel.url.trim());
       });
     } catch (e) {
       setRecordErr(e instanceof Error ? e.message : String(e));
@@ -2777,15 +3360,11 @@ export function VideoPlayer({
       recordIdRef.current = null;
       setRecording(false);
       setRecordTapPlayUrl(null);
+      setRecordingSourceUrl(null);
       setScreenPlaybackOff(false);
       setRecordBusy(false);
     }
   }, []);
-
-  useEffect(() => {
-    if (!isLibraryChannel || !recording) return;
-    void stopRecording();
-  }, [isLibraryChannel, recording, stopRecording]);
 
   const canRevealRecordingInExplorer =
     typeof window !== "undefined" && typeof window.iptv?.showRecordInFolder === "function";
@@ -2858,15 +3437,15 @@ export function VideoPlayer({
   }, []);
 
   const reloadRadioStream = useCallback(() => {
-    if (!isRadioChannel) return;
+    if (!isInternetAudioStream) return;
     setRadioStreamReloadTick((n) => n + 1);
     setPlayerChromeNotice("Reconnecting stream…");
     window.setTimeout(() => setPlayerChromeNotice(null), 1800);
-  }, [isRadioChannel]);
+  }, [isInternetAudioStream]);
 
   const copyRadioStreamUrl = useCallback(async () => {
     const u = channel?.url?.trim();
-    if (!u || !isRadioChannel) return;
+    if (!u || !isInternetAudioStream) return;
     try {
       await navigator.clipboard.writeText(u);
       setPlayerChromeNotice("Stream URL copied.");
@@ -2875,18 +3454,25 @@ export function VideoPlayer({
       setPlayerChromeNotice("Could not copy — check clipboard permission or use the Edit menu.");
       window.setTimeout(() => setPlayerChromeNotice(null), 3500);
     }
-  }, [channel?.url, isRadioChannel]);
+  }, [channel?.url, isInternetAudioStream]);
 
   const openRadioStreamUrl = useCallback(() => {
     const u = channel?.url?.trim();
-    if (!u || !isRadioChannel) return;
+    if (!u || !isInternetAudioStream) return;
     if (!/^https?:\/\//i.test(u)) {
       setPlayerChromeNotice("Only http(s) URLs can open in a new tab.");
       window.setTimeout(() => setPlayerChromeNotice(null), 3000);
       return;
     }
     window.open(u, "_blank", "noopener,noreferrer");
-  }, [channel?.url, isRadioChannel]);
+  }, [channel?.url, isInternetAudioStream]);
+
+  const toggleInternetAudioPlayback = useCallback(() => {
+    const el = mediaRef.current;
+    if (!el) return;
+    if (el.paused) void el.play().catch(() => {});
+    else el.pause();
+  }, []);
 
   const renderVolumeEq = (extraWrapClass?: string) => {
     if (!onVolumeChange) return null;
@@ -2937,7 +3523,9 @@ export function VideoPlayer({
 
   return (
     <div
-      className={`player-root${inSplitView ? " player-root--split" : ""}`}
+      className={`player-root${inSplitView ? " player-root--split" : ""}${
+        layoutMode === "compactTvDock" ? " player-root--compact-tv-dock" : ""
+      }${layoutMode === "compactReader" ? " player-root--compact-reader" : ""}`}
       ref={playerRootRef}
     >
       <div className="player-top">
@@ -2947,8 +3535,7 @@ export function VideoPlayer({
             <br />
             {paneLabel ? (
               <>
-                Turn on <strong>Split view</strong> in the list header, choose <strong>Left</strong> or{" "}
-                <strong>Right</strong> for the next click, then pick a channel.
+                Choose <strong>Screen 1</strong> or <strong>Screen 2</strong> under next click, then pick a channel.
               </>
             ) : (
               <>
@@ -2959,18 +3546,60 @@ export function VideoPlayer({
             )}
           </div>
         ) : (
-          <div className="video-wrap">
+          <div
+            className={`video-wrap${layoutMode === "compactTvDock" ? " video-wrap--compact-tv-dock" : ""}${
+              isEbookChannel ? " video-wrap--ebook" : ""
+            }${isInternetAudioStream ? " video-wrap--internet-audio" : ""}`}
+          >
+            {layoutMode === "compactTvDock" && channel ? (
+              <div className="compact-tv-dock-bar">
+                <span className="compact-tv-dock-label">{channel.name}</span>
+              </div>
+            ) : null}
             {isEbookChannel ? (
-              <article className="ebook-player" aria-label="Ebook reader" ref={ebookPlayerRef}>
+              <article
+                className={`ebook-player${layoutMode === "compactReader" ? " ebook-player--compact" : ""}`}
+                aria-label="Ebook reader"
+                ref={ebookPlayerRef}
+              >
                 <div className="ebook-player-page">
                   <div className="ebook-player-header">
-                    <div className="ebook-player-header-main">
-                      <span className="ebook-player-kicker">Ebook Reader</span>
-                      <h2 className="ebook-player-title">{channel.name}</h2>
-                      <p className="ebook-player-meta">
-                        {channel.ebookSourceFileName || "Local ebook"} · Reading from part {ebookStartChunk + 1} of{" "}
-                        {Math.max(ebookChunks.length, 1)}
-                      </p>
+                    <div className="ebook-player-header-content">
+                      <div
+                        className={`ebook-player-page-indicator${
+                          ebookPageNav.unit === "chapter" && ebookPageNav.label ? " ebook-player-page-indicator--chapter" : ""
+                        }`}
+                        aria-live="polite"
+                        aria-label={
+                          ebookPageNav.label
+                            ? `${ebookPageNav.label}, ${ebookReadingLabel(ebookPageNav.unit, ebookPageNav.current, ebookPageNav.total)}`
+                            : ebookReadingLabel(ebookPageNav.unit, ebookPageNav.current, ebookPageNav.total)
+                        }
+                      >
+                        {ebookPageNav.unit === "chapter" && ebookPageNav.label ? (
+                          <>
+                            <span className="ebook-player-page-num ebook-player-page-num--title">{ebookPageNav.label}</span>
+                            <div className="ebook-player-page-meta">
+                              <span className="ebook-player-page-reading">
+                                Chapter {ebookPageNav.current} of {ebookPageNav.total}
+                              </span>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <span className="ebook-player-page-num">{ebookPageNav.current}</span>
+                            <div className="ebook-player-page-meta">
+                              <span className="ebook-player-page-reading">
+                                {ebookReadingLabel(ebookPageNav.unit, ebookPageNav.current, ebookPageNav.total)}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                      <div className="ebook-player-header-main">
+                        <h2 className="ebook-player-title">{ebookDisplayTitle(channel.name)}</h2>
+                        <p className="ebook-player-meta">{channel.ebookSourceFileName || "Local ebook"}</p>
+                      </div>
                     </div>
                     <button
                       type="button"
@@ -2979,15 +3608,17 @@ export function VideoPlayer({
                       title={ebookFullscreen ? "Exit ebook fullscreen" : "Read ebook fullscreen"}
                       aria-label={ebookFullscreen ? "Exit ebook fullscreen" : "Read ebook fullscreen"}
                     >
-                      {ebookFullscreen ? "Exit full screen" : "Full screen"}
+                      {ebookFullscreen ? "Exit Reading View" : "Reading View"}
                     </button>
                   </div>
-                  {channel.ebookFormat === "pdf" && channel.ebookBlob instanceof Blob ? (
+                  {channel.ebookFormat === "pdf" ? (
                     <PdfReader
                       channel={channel}
                       pageTexts={ebookChunks}
                       ebookStartChunk={ebookStartChunk}
                       ebookSpeechBoundary={ebookSpeechBoundary}
+                      ebookTtsActive={ebookTtsActive}
+                      onEbookPageChange={handleEbookPageChange}
                     />
                   ) : channel.ebookFormat === "epub" && channel.ebookBlob instanceof Blob ? (
                     <EpubReader
@@ -2995,6 +3626,8 @@ export function VideoPlayer({
                       pageTexts={ebookChunks}
                       ebookStartChunk={ebookStartChunk}
                       ebookSpeechBoundary={ebookSpeechBoundary}
+                      ebookTtsActive={ebookTtsActive}
+                      onEbookPageChange={handleEbookPageChange}
                     />
                   ) : (
                     <EbookPlainTextPage
@@ -3002,19 +3635,36 @@ export function VideoPlayer({
                       ebookChunks={ebookChunks}
                       ebookStartChunk={ebookStartChunk}
                       ebookSpeechBoundary={ebookSpeechBoundary}
-                      ebookCurrentWordRef={ebookCurrentWordRef}
+                      ebookTtsActive={ebookTtsActive}
+                      onEbookPageChange={handleEbookPageChange}
                     />
                   )}
                 </div>
               </article>
             ) : null}
+            {channel && isInternetAudioStream ? (
+              <InternetAudioShowcase
+                channel={channel}
+                kind={isPodcastChannel ? "podcast" : "radio"}
+                playing={radioPlaying}
+                playbackMode={playbackMode}
+                bufferLine={bufferLine}
+                onTogglePlay={toggleInternetAudioPlayback}
+                onCopy={() => void copyRadioStreamUrl()}
+                onOpen={openRadioStreamUrl}
+                onReload={reloadRadioStream}
+              />
+            ) : null}
             <video
               ref={mediaRef}
-              className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff ? " video-el--hidden" : ""}`}
-              controls={!isRadioChannel && !isEmbeddedWebChannel && !isEbookChannel}
+              className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff || isRadioChannel ? " video-el--hidden" : ""}${
+                isPodcastChannel ? " video-el--podcast-stream" : ""
+              }`}
+              controls={(!isRadioChannel || isPodcastChannel) && !isEmbeddedWebChannel && !isEbookChannel}
               playsInline
               preload="auto"
             />
+            {isInternetAudioStream ? renderVolumeEq("volume-eq-wrap--internet-audio") : null}
             {webVideoEmbedSrc ? (
               <iframe
                 key={`${channel.id}-${channel.streamResetNonce ?? 0}`}
@@ -3029,43 +3679,12 @@ export function VideoPlayer({
             {screenPlaybackOff ? (
               <div className="screen-off-panel" role="status" aria-live="polite">
                 <span className="screen-off-title">Screen off</span>
-                <span className="screen-off-subtitle">Recording continues until you press Stop.</span>
+                <span className="screen-off-subtitle">
+                  {recording ? "Audio and recording continue." : "Audio continues. Press Screen on to show video again."}
+                </span>
               </div>
             ) : null}
-            {isRadioChannel ? (
-              <>
-                <div className="radio-on-air-badge" role="status" aria-live="polite">
-                  <span
-                    className={`radio-on-air-dot${!radioPlaying ? " on-air-dot--paused" : ""}`}
-                    aria-hidden
-                  />
-                  Radio
-                </div>
-                <button
-                  type="button"
-                  className="radio-transport-btn"
-                  onClick={() => {
-                    const el = mediaRef.current;
-                    if (!el) return;
-                    if (el.paused) void el.play().catch(() => {});
-                    else el.pause();
-                  }}
-                  aria-label={radioPlaying ? "Pause radio" : "Play radio"}
-                  title={radioPlaying ? "Pause" : "Play"}
-                >
-                  {radioPlaying ? (
-                    <svg className="radio-transport-icon" viewBox="0 0 18 18" width="18" height="18" aria-hidden>
-                      <rect x="3" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
-                      <rect x="11" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
-                    </svg>
-                  ) : (
-                    <svg className="radio-transport-icon" viewBox="0 0 18 18" width="18" height="18" aria-hidden>
-                      <path d="M4 2 L16 9 L4 16 Z" fill="currentColor" />
-                    </svg>
-                  )}
-                </button>
-              </>
-            ) : isLibraryChannel ? (
+            {isLibraryChannel ? (
               <div className="library-on-air-badge" role="status" aria-live="polite">
                 <span
                   className={`library-on-air-dot${libTransportPaused ? " on-air-dot--paused" : ""}`}
@@ -3125,7 +3744,7 @@ export function VideoPlayer({
                       aria-label={lyricsSpatialFullscreen ? "Exit full screen lyrics" : "Full screen lyrics"}
                       title={lyricsSpatialFullscreen ? "Exit full screen (Esc)" : "Full screen lyrics in this player"}
                     >
-                      {lyricsSpatialFullscreen ? "Exit full screen" : "Full screen"}
+                      {lyricsSpatialFullscreen ? "Exit Focus" : "Focus"}
                     </button>
                   </div>
                 </div>
@@ -3237,15 +3856,15 @@ export function VideoPlayer({
               />
             ) : (
               <span className="player-now-playing-logo player-now-playing-logo--placeholder" aria-hidden>
-                {isRadioChannel ? "♪" : "TV"}
+                {isRadioChannel ? "♪" : isPodcastChannel ? "🎙" : "TV"}
               </span>
             )}
             <div className="player-now-playing-text">
               <div className="player-now-playing-name">
                 {isRadioChannel ? <span className="radio-inline-tag">Radio</span> : null}
+                {isPodcastChannel ? <span className="radio-inline-tag">Podcast</span> : null}
                 {isLibraryChannel ? <span className="library-inline-tag">Local audio</span> : null}
                 {isLocalVideoChannel ? <span className="local-video-inline-tag">Local video</span> : null}
-                {isEbookChannel ? <span className="local-video-inline-tag">Ebook</span> : null}
                 {isEmbeddedWebChannel ? (
                   <span className="local-video-inline-tag">{isYoutubeChannel ? "YouTube" : "Web video"}</span>
                 ) : null}
@@ -3259,10 +3878,10 @@ export function VideoPlayer({
         </div>
       ) : null}
 
-      <div className="player-chrome">
+      <div className={`player-chrome${layoutMode === "compactTvDock" || (layoutMode === "compactReader" && isEbookChannel) ? " player-chrome--hidden" : ""}`}>
         {channel ? (
           <>
-            <div className={`now-row${showRecordChrome ? " now-row--with-actions" : ""}`}>
+              <div className={`now-row${showRecordChrome || showScreenOffChrome || recording ? " now-row--with-actions" : ""}`}>
               <div className="now-row-main">
                 {paneLabel ? (
                   <span className="pane-label" title="Player pane">
@@ -3277,9 +3896,31 @@ export function VideoPlayer({
                     {playbackMode}
                   </span>
                 ) : null}
+                {!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel ? (
+                  <label className="cc-toggle cc-toggle--inline">
+                    <input type="checkbox" checked={ccEnabled} onChange={(e) => setCcEnabled(e.target.checked)} />
+                    Show CC
+                  </label>
+                ) : null}
               </div>
-              {showRecordChrome ? (
+              {showRecordChrome || showScreenOffChrome || recording ? (
                 <div className="now-row-actions">
+                  {showRecordChrome && recordSavedPath ? (
+                    canRevealRecordingInExplorer ? (
+                      <button
+                        type="button"
+                        className="record-path record-path--compact record-path--inline record-path--link"
+                        title={`${recordSavedPath}\nClick to open this folder in File Explorer and select the file`}
+                        onClick={openRecordedFileInExplorer}
+                      >
+                        {recordSavedPath.length > 56 ? `…${recordSavedPath.slice(-52)}` : recordSavedPath}
+                      </button>
+                    ) : (
+                      <div className="record-path record-path--compact record-path--inline" title={recordSavedPath}>
+                        {recordSavedPath.length > 56 ? `…${recordSavedPath.slice(-52)}` : recordSavedPath}
+                      </div>
+                    )
+                  ) : null}
                   {recording ? (
                     <button
                       type="button"
@@ -3290,33 +3931,34 @@ export function VideoPlayer({
                     >
                       ■
                     </button>
-                  ) : (
+                  ) : showRecordChrome ? (
+                      <button
+                        type="button"
+                        className="rec-btn"
+                        disabled={recordBusy || !canStartRecording}
+                        title={recordButtonTitle}
+                        onClick={() => void startRecording()}
+                      >
+                        REC
+                      </button>
+                  ) : null}
+                  {showScreenOffChrome ? (
                     <button
                       type="button"
-                      className="rec-btn"
-                      disabled={recordBusy || !canStartRecording}
-                      title={recordButtonTitle}
-                      onClick={() => void startRecording()}
+                      className={`screen-off-btn${screenPlaybackOff ? " screen-off-btn--on" : ""}`}
+                      title={
+                        screenPlaybackOff
+                          ? "Turn the stream screen back on."
+                          : recording
+                            ? "Hide the video while audio playback and recording continue."
+                            : "Hide the video and keep the stream audio playing."
+                      }
+                      aria-pressed={screenPlaybackOff}
+                      onClick={() => setScreenPlaybackOff((v) => !v)}
                     >
-                      REC
+                      {screenPlaybackOff ? "Screen on" : "Screen off"}
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    className={`screen-off-btn${screenPlaybackOff ? " screen-off-btn--on" : ""}`}
-                    disabled={recordBusy || (!recording && !screenPlaybackOff)}
-                    title={
-                      screenPlaybackOff
-                        ? "Turn the stream screen back on."
-                        : recording
-                          ? "Turn off playback video/audio while recording continues in the background."
-                          : "Start recording first, then you can turn the stream screen off."
-                    }
-                    aria-pressed={screenPlaybackOff}
-                    onClick={() => setScreenPlaybackOff((v) => !v)}
-                  >
-                    {screenPlaybackOff ? "Screen on" : "Screen off"}
-                  </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -3432,33 +4074,17 @@ export function VideoPlayer({
                 {isEbookChannel ? channel.ebookSourceFileName || "Local ebook" : channel.url}
               </div>
             ) : null}
-            {showRecordChrome && recordSavedPath ? (
-              canRevealRecordingInExplorer ? (
-                <button
-                  type="button"
-                  className="record-path record-path--compact record-path--link"
-                  title={`${recordSavedPath}\nClick to open this folder in File Explorer and select the file`}
-                  onClick={openRecordedFileInExplorer}
-                >
-                  {recordSavedPath.length > 88 ? `…${recordSavedPath.slice(-84)}` : recordSavedPath}
-                </button>
-              ) : (
-                <div className="record-path record-path--compact" title={recordSavedPath}>
-                  {recordSavedPath.length > 88 ? `…${recordSavedPath.slice(-84)}` : recordSavedPath}
-                </div>
-              )
-            ) : null}
             {showRecordChrome && recordErr ? <div className="record-err record-err--compact">{recordErr}</div> : null}
             {showRecordChrome && !canStartRecording && !recording && (!hasDesktopRecordApi || !streamOkForRecord) ? (
               <p className="record-hint record-hint--inline">
                 {!hasDesktopRecordApi
-                  ? "REC needs the Smart Media player desktop build."
+                  ? "REC needs the Player desktop build."
                   : isWebVideoPageChannel
                     ? "REC needs a direct media URL. Embedded website pages cannot be recorded by the app."
                     : "REC needs a direct http(s) media stream URL."}
               </p>
             ) : null}
-            {onVolumeChange && !isLibraryChannel ? renderVolumeEq() : null}
+            {onVolumeChange && !isLibraryChannel && !isInternetAudioStream ? renderVolumeEq() : null}
             {error ? <div className="error-banner">{error}</div> : null}
             {ytErr ? <div className="yt-search-err">{ytErr}</div> : null}
             {playerChromeNotice ? <div className="player-chrome-notice">{playerChromeNotice}</div> : null}
@@ -3475,7 +4101,7 @@ export function VideoPlayer({
                     title="Search from the file name; desktop can open the first YouTube result in a new window."
                     onClick={() => void openYoutubeForLocalMp3()}
                   >
-                    {ytBusy ? "…" : "YouTube"}
+                    {ytBusy ? "…" : "Find video"}
                   </button>
                   {isLikelyLocalMp3Channel(channel) ? (
                     <>
@@ -3486,7 +4112,7 @@ export function VideoPlayer({
                         title="Load lyrics and meaning only from the saved local database."
                         onClick={() => void loadLyricsFromLocalDbOnly()}
                       >
-                        {mp3Lyrics.kind === "loading" ? "Lyrics…" : "Saved lyrics"}
+                        {mp3Lyrics.kind === "loading" ? "Lyrics…" : "Local lyrics"}
                       </button>
                       <button
                         type="button"
@@ -3513,7 +4139,7 @@ export function VideoPlayer({
                         title="Save the currently shown lyrics and meaning to the local database."
                         onClick={() => void saveShownLyricsToLocalDb()}
                       >
-                        Save lyrics
+                        Save to library
                       </button>
                       {!mp3LyricsHidden && mp3Lyrics.kind !== "idle" ? (
                         <button
@@ -3546,31 +4172,16 @@ export function VideoPlayer({
                   >
                     Start over
                   </button>
-                  <label className="library-audio-speed">
-                    <span className="library-audio-speed__text">Speed</span>
-                    <select
-                      className="library-audio-speed__select"
-                      value={libPlaybackRate}
-                      onChange={(e) => setLibPlaybackRate(Number(e.currentTarget.value))}
-                      aria-label="Playback speed"
-                    >
-                      <option value={0.75}>0.75×</option>
-                      <option value={1}>1×</option>
-                      <option value={1.25}>1.25×</option>
-                      <option value={1.5}>1.5×</option>
-                      <option value={2}>2×</option>
-                    </select>
-                  </label>
                 </div>
               </div>
-            ) : isRadioChannel ? (
+            ) : isInternetAudioStream ? (
               <div className="radio-chrome-toolbar" role="toolbar" aria-label="Stream tools">
                 <button
                   type="button"
                   className="library-audio-tool-btn"
                   onClick={() => void copyRadioStreamUrl()}
                   disabled={!channel?.url?.trim()}
-                  title="Copy the station stream URL to the clipboard"
+                  title="Copy the stream URL to the clipboard"
                 >
                   Copy stream URL
                 </button>
@@ -3605,24 +4216,6 @@ export function VideoPlayer({
                 <button type="button" className="ctrl-btn" onClick={() => subFileRef.current?.click()}>
                   Load subtitles (.vtt / .srt)
                 </button>
-                <label className="cc-toggle">
-                  <input type="checkbox" checked={ccEnabled} onChange={(e) => setCcEnabled(e.target.checked)} />
-                  Show CC
-                </label>
-                <select
-                  className="track-select"
-                  value={selectedTrack}
-                  onChange={(e) => setSelectedTrack(e.target.value)}
-                  disabled={trackOptions.length === 0}
-                  aria-label="Subtitle track"
-                >
-                  <option value="off">Subtitles: off</option>
-                  {trackOptions.map((o) => (
-                    <option key={o.id} value={o.id}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
               </div>
             )}
           </>

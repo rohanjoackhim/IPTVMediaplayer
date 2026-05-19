@@ -13,6 +13,7 @@ import {
   removeEbookLibraryItem,
   removeAudioLibraryTrack,
   trackFromDesktopPick,
+  trackHasPersistedTags,
   type PickedLocalAudioPayload,
   type StoredEbook,
   type StoredAudioTrack,
@@ -24,9 +25,43 @@ import { LyricsChatTranslateSettings } from "./LyricsChatTranslateSettings";
 import { AudioLibraryPlaybackControls } from "./AudioLibraryPlaybackControls";
 import "./LocalAudioPanel.css";
 
-const AUDIO_ACCEPT =
-  "audio/*,.mp3,.m4a,.m4b,.aac,.ogg,.oga,.opus,.wav,.flac,.webm,.mpeg,.mpga,application/octet-stream";
-const EBOOK_ACCEPT = ".pdf,.epub,.txt,.md,.markdown,.html,.htm,.xhtml,application/pdf,text/plain,text/html,application/epub+zip";
+const LIBRARY_AUDIO_EXTENSIONS = /\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac|webm|mpga|mpeg)$/i;
+const LIBRARY_EBOOK_EXTENSIONS = /\.(pdf|epub|txt|md|markdown|html|htm|xhtml)$/i;
+const LIBRARY_ACCEPT =
+  "audio/*,.mp3,.m4a,.m4b,.aac,.ogg,.oga,.opus,.wav,.flac,.webm,.mpeg,.mpga," +
+  ".pdf,.epub,.txt,.md,.markdown,.html,.htm,.xhtml," +
+  "application/pdf,text/plain,text/html,application/epub+zip";
+
+function isEbookLibraryFile(fileName: string, mime = ""): boolean {
+  if (LIBRARY_EBOOK_EXTENSIONS.test(fileName)) return true;
+  return /application\/(pdf|epub\+zip)|text\/(plain|html)/i.test(mime);
+}
+
+function isPdfLibraryFile(fileName: string, mime = ""): boolean {
+  return /\.pdf$/i.test(fileName) || mime === "application/pdf";
+}
+
+function shouldAutoOpenEbookOnImport(fileName: string, mime = ""): boolean {
+  return isEbookLibraryFile(fileName, mime) && !isPdfLibraryFile(fileName, mime);
+}
+
+function isAudioLibraryFile(fileName: string, mime = ""): boolean {
+  if (isEbookLibraryFile(fileName, mime)) return false;
+  if (LIBRARY_AUDIO_EXTENSIONS.test(fileName)) return true;
+  return /^audio\//i.test(mime);
+}
+
+function pickedLibraryFileName(payload: PickedLocalAudioPayload): string {
+  return String(payload.fileName ?? "").trim() || `${payload.name}.mp3`;
+}
+
+function desktopPickToFile(payload: PickedLocalAudioPayload): File {
+  const fileName = pickedLibraryFileName(payload);
+  return new File([payload.data], fileName, {
+    type: payload.mime || "application/octet-stream",
+    lastModified: payload.lastModified || Date.now(),
+  });
+}
 
 type LibraryRow = {
   track: StoredAudioTrack;
@@ -42,7 +77,7 @@ type EbookReaderState = {
   id: string;
   title: string;
   text: string;
-  status: "idle" | "speaking" | "paused";
+  status: "idle" | "preparing" | "speaking" | "paused";
   chunkIndex: number;
   chunkCount: number;
 };
@@ -67,10 +102,12 @@ type NeuralTtsVoice = {
 };
 const EBOOK_RESUME_PREFIX = "iptv-ebook-resume:";
 const EBOOK_SPEECH_EVENT = "iptv-ebook-speech-boundary";
+const EBOOK_TTS_ACTIVE_EVENT = "iptv-ebook-tts-active";
 const EBOOK_START_EVENT = "iptv-ebook-start-at";
 const EBOOK_OCR_TEXT_EVENT = "iptv-ebook-ocr-text";
 const LIBRARY_AUDIO_TOGGLE_EVENT = "iptv-library-audio-toggle";
 const LIBRARY_AUDIO_STATE_EVENT = "iptv-library-audio-state";
+const LIBRARY_CLEARED_EVENT = "iptv-library-cleared";
 const BEST_NEURAL_VOICE_ID = "af_heart";
 const BEST_MALE_NEURAL_VOICE_ID = "am_michael";
 const EBOOK_NEURAL_RATE = 0.92;
@@ -79,6 +116,11 @@ const EBOOK_NEURAL_STYLE: EbookTtsStyle = "warm";
 const EBOOK_NEURAL_RATE_KEY = "iptv-ebook-neural-rate";
 const EBOOK_NEURAL_PITCH_KEY = "iptv-ebook-neural-pitch";
 const EBOOK_NEURAL_GENDER_KEY = "iptv-ebook-neural-gender";
+const EBOOK_TTS_SEGMENT_GROUP_COUNT = 3;
+const EBOOK_TTS_PREFETCH_ENABLED = true;
+const EBOOK_TTS_PREFETCH_AFTER_PROGRESS = 0.72;
+const EBOOK_TTS_PREFETCH_DELAY_AFTER_PLAY_MS = 2500;
+const EBOOK_TTS_PROGRESS_UPDATE_MS = 450;
 
 function loadSavedNumber(key: string, fallback: number, min: number, max: number): number {
   try {
@@ -105,6 +147,17 @@ function loadSavedVoiceGender(): EbookVoiceGender {
   }
 }
 
+function isInterruptedMediaPlayError(error: unknown): boolean {
+  const name = error instanceof DOMException || error instanceof Error ? error.name : "";
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return (
+    name === "AbortError" ||
+    /play\(\) request was interrupted/i.test(message) ||
+    /interrupted by a call to pause/i.test(message) ||
+    /interrupted by a new load request/i.test(message)
+  );
+}
+
 function dispatchEbookSpeechBoundary(detail: {
   ebookId: string;
   chunkIndex: number;
@@ -112,6 +165,15 @@ function dispatchEbookSpeechBoundary(detail: {
   charLength?: number;
 }) {
   window.dispatchEvent(new CustomEvent(EBOOK_SPEECH_EVENT, { detail: { ...detail, pageIndex: detail.chunkIndex } }));
+}
+
+function dispatchEbookTtsActive(ebookId: string | null, active: boolean) {
+  if (!ebookId) return;
+  window.dispatchEvent(new CustomEvent(EBOOK_TTS_ACTIVE_EVENT, { detail: { ebookId, active } }));
+}
+
+function dispatchLibraryCleared() {
+  window.dispatchEvent(new CustomEvent(LIBRARY_CLEARED_EVENT));
 }
 
 type EbookStartDetail = {
@@ -142,6 +204,7 @@ function fileHintForTrack(t: StoredAudioTrack): string {
 }
 
 async function enrichRowWithFileTags(r: LibraryRow): Promise<LibraryRow> {
+  if (trackHasPersistedTags(r.track) || r.tagsTooltip || (r.tagArtist && r.tagTitle)) return r;
   if (!(r.track.blob instanceof Blob)) return r;
   try {
     const tags = await extractAudioTagsDetailed(r.track.blob, fileHintForTrack(r.track));
@@ -154,6 +217,15 @@ async function enrichRowWithFileTags(r: LibraryRow): Promise<LibraryRow> {
   } catch {
     return r;
   }
+}
+
+function rowWithPersistedTags(r: LibraryRow, t: StoredAudioTrack): LibraryRow {
+  return {
+    ...r,
+    tagsTooltip: t.tagsTooltip ?? r.tagsTooltip,
+    tagArtist: t.tagArtist?.trim() ?? r.tagArtist,
+    tagTitle: t.tagTitle?.trim() ?? r.tagTitle,
+  };
 }
 
 function formatResume(sec: number): string {
@@ -187,9 +259,9 @@ function makeLibraryRow(t: StoredAudioTrack): LibraryRow {
     track: t,
     url: URL.createObjectURL(t.blob),
     thumbUrl: thumb,
-    tagsTooltip: null,
-    tagArtist: "",
-    tagTitle: "",
+    tagsTooltip: t.tagsTooltip ?? null,
+    tagArtist: t.tagArtist?.trim() ?? "",
+    tagTitle: t.tagTitle?.trim() ?? "",
   };
 }
 
@@ -238,8 +310,8 @@ function naturalSpeechSegment(text: string, style: EbookTtsStyle): EbookSpeechSe
   const leadingTrim = text.length - source.length;
   const dramatic = style === "dramatic";
   const warm = style === "warm";
-  const maxLen = dramatic ? 130 : warm ? 145 : 170;
-  const minLen = dramatic ? 38 : warm ? 42 : 54;
+  const maxLen = dramatic ? 92 : warm ? 128 : 140;
+  const minLen = dramatic ? 28 : warm ? 36 : 40;
   const punctuation = /[.!?。！？,;:—-]/g;
   let end = Math.min(source.length, maxLen);
   let pauseMs = dramatic ? 220 : warm ? 180 : 140;
@@ -394,9 +466,10 @@ function neuralVoiceForGender(voices: NeuralTtsVoice[], gender: EbookVoiceGender
   const wanted = gender.toLowerCase();
   const builtInBestId = gender === "male" ? BEST_MALE_NEURAL_VOICE_ID : BEST_NEURAL_VOICE_ID;
   return (
-    voices.find((v) => v.id === builtInBestId) ??
     voices.find((v) => String(v.gender ?? "").toLowerCase() === wanted && v.id.startsWith("piper:")) ??
+    voices.find((v) => v.id === builtInBestId) ??
     voices.find((v) => String(v.gender ?? "").toLowerCase() === wanted) ??
+    voices.find((v) => v.id.startsWith("piper:")) ??
     voices.find((v) => v.id === BEST_NEURAL_VOICE_ID) ??
     voices[0] ??
     null
@@ -491,7 +564,6 @@ function channelFromEbook(row: StoredEbook, startChunk: number): Channel {
     id: `ebook-lib-${row.id}`,
     name: row.title,
     url: `ebook:${row.id}`,
-    group: "Ebook",
     ebookId: row.id,
     ebookText: row.text,
     ebookFormat: row.format,
@@ -630,6 +702,10 @@ export interface LocalAudioPanelProps {
   audioLibraryContinuous: boolean;
   onAudioLibraryShuffleChange: (v: boolean) => void;
   onAudioLibraryContinuousChange: (v: boolean) => void;
+  /** Stop any active library track, ebook, or audiobook in the main player when the library is cleared. */
+  onLibraryCleared?: () => void;
+  /** Stop the main player if this specific IndexedDB audio track is currently active. */
+  onLibraryTrackRemoved?: (trackId: string) => void;
 }
 
 export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanelProps>(
@@ -645,6 +721,8 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       audioLibraryContinuous,
       onAudioLibraryShuffleChange,
       onAudioLibraryContinuousChange,
+      onLibraryCleared,
+      onLibraryTrackRemoved,
     },
     ref
   ) {
@@ -661,12 +739,15 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
   const [ebookSpeechPitch, setEbookSpeechPitch] = useState(() => loadSavedNumber(EBOOK_NEURAL_PITCH_KEY, 1, 0.75, 1.25));
   const [ebookSpeechRateDraft, setEbookSpeechRateDraft] = useState(ebookSpeechRate);
   const [ebookSpeechPitchDraft, setEbookSpeechPitchDraft] = useState(ebookSpeechPitch);
+  const [ebookVoiceScaleOpen, setEbookVoiceScaleOpen] = useState<"speed" | "pitch" | null>(null);
+  const ebookVoiceControlsRef = useRef<HTMLDivElement | null>(null);
   const ebookChunksRef = useRef<string[]>([]);
   const ebookChunkIndexRef = useRef(0);
   const ebookChunkCharOffsetRef = useRef(0);
   const ebookNextTimerRef = useRef<number | null>(null);
   const ebookSpeechRunRef = useRef(0);
   const ebookStatusRef = useRef<EbookReaderState["status"]>("idle");
+  const ebookNeuralStatusRef = useRef("");
   const ebookPausedNeedsRestartRef = useRef(false);
   const ebookTtsSettingsRef = useRef("");
   const ebookStopRef = useRef(false);
@@ -675,7 +756,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
   const ebookAudioSegmentRef = useRef<{ runId: number; index: number; safeCharOffset: number; leadingTrim: number; text: string } | null>(null);
   const ebookAudioResumeRef = useRef<{ index: number; charOffset: number; audioTime: number } | null>(null);
   const ebookNeuralPrefetchKeyRef = useRef("");
-  const ebookNeuralWarmupStartedRef = useRef(false);
+  const ebookNeuralPrefetchTimerRef = useRef<number | null>(null);
+  const ebookNeuralReadyRef = useRef<Promise<void> | null>(null);
+  const ebookTtsPlaybackStartedRef = useRef(false);
   const ebookNavigationStartTimerRef = useRef<number | null>(null);
   const hasDesktopPick = typeof window !== "undefined" && typeof window.iptv?.pickLocalAudioFiles === "function";
 
@@ -699,29 +782,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
           setEbookNeuralStatus("");
           return;
         }
-        setEbookNeuralStatus("Neural voice ready.");
-        if (
-          !String(bestVoice?.id ?? "").startsWith("piper:") &&
-          !ebookNeuralWarmupStartedRef.current &&
-          typeof window.iptv?.warmupNeuralTts === "function"
-        ) {
-          ebookNeuralWarmupStartedRef.current = true;
-          window.setTimeout(() => {
-            if (cancelled || document.hidden) {
-              ebookNeuralWarmupStartedRef.current = false;
-              return;
-            }
-            setEbookNeuralStatus("Preparing neural voice...");
-            void window.iptv
-              ?.warmupNeuralTts?.()
-              .then(() => {
-                if (!cancelled) setEbookNeuralStatus("Neural voice ready.");
-              })
-              .catch((ex) => {
-                if (!cancelled) setEbookNeuralStatus(ex instanceof Error ? ex.message : String(ex));
-              });
-          }, 800);
-        }
+        setEbookNeuralStatus("");
       })
       .catch((ex) => {
         if (cancelled) return;
@@ -754,20 +815,78 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     setEbookSpeechPitch((cur) => (Math.abs(cur - next) < 0.001 ? cur : next));
   }, [ebookSpeechPitchDraft]);
 
+  const ebookTtsScaleLocked = ebook?.status === "speaking" || ebook?.status === "preparing";
+
+  useEffect(() => {
+    if (ebookTtsScaleLocked) setEbookVoiceScaleOpen(null);
+  }, [ebookTtsScaleLocked]);
+
+  useEffect(() => {
+    if (!ebookVoiceScaleOpen || ebookTtsScaleLocked) return;
+    const onDocMouseDown = (ev: MouseEvent) => {
+      const host = ebookVoiceControlsRef.current;
+      const target = ev.target;
+      if (!(target instanceof Node)) return;
+      if (host && !host.contains(target)) setEbookVoiceScaleOpen(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") setEbookVoiceScaleOpen(null);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [ebookTtsScaleLocked, ebookVoiceScaleOpen]);
+
+  const setEbookNeuralStatusLight = useCallback((next: string) => {
+    if (ebookNeuralStatusRef.current === next) return;
+    ebookNeuralStatusRef.current = next;
+    setEbookNeuralStatus(next);
+  }, []);
+
+  const ensureNeuralTtsReady = useCallback(async (voiceId: string) => {
+    if (voiceId.startsWith("piper:")) return;
+    if (!window.iptv?.warmupNeuralTts) return;
+    if (!ebookNeuralReadyRef.current) {
+      setEbookNeuralStatusLight("Preparing neural voice (first use may take a minute)...");
+      ebookNeuralReadyRef.current = window.iptv
+        .warmupNeuralTts()
+        .then(() => {
+          setEbookNeuralStatusLight("Neural voice ready.");
+        })
+        .catch((ex) => {
+          ebookNeuralReadyRef.current = null;
+          throw ex;
+        });
+    }
+    await ebookNeuralReadyRef.current;
+  }, [setEbookNeuralStatusLight]);
+
   useEffect(() => {
     ebookStatusRef.current = ebook?.status ?? "idle";
   }, [ebook?.status]);
+
+  useEffect(() => {
+    ebookNeuralStatusRef.current = ebookNeuralStatus;
+  }, [ebookNeuralStatus]);
 
   const stopEbookSpeech = useCallback(() => {
     ebookStopRef.current = true;
     ebookSpeechRunRef.current += 1;
     ebookPausedNeedsRestartRef.current = false;
+    ebookTtsPlaybackStartedRef.current = false;
     ebookAudioResumeRef.current = null;
     ebookAudioSegmentRef.current = null;
     ebookNeuralPrefetchKeyRef.current = "";
     if (ebookNextTimerRef.current != null) {
       window.clearTimeout(ebookNextTimerRef.current);
       ebookNextTimerRef.current = null;
+    }
+    if (ebookNeuralPrefetchTimerRef.current != null) {
+      window.clearTimeout(ebookNeuralPrefetchTimerRef.current);
+      ebookNeuralPrefetchTimerRef.current = null;
     }
     if (ebookNavigationStartTimerRef.current != null) {
       window.clearTimeout(ebookNavigationStartTimerRef.current);
@@ -779,19 +898,21 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       ebookAudioRef.current.load();
     }
     void window.iptv?.cancelNeuralTts?.();
+    dispatchEbookTtsActive(ebookActiveIdRef.current, false);
     setEbook((cur) => (cur ? { ...cur, status: "idle" } : cur));
   }, []);
 
   const speakEbookChunk = useCallback((index: number, charOffset = 0) => {
     const canUseNeuralTts = typeof window !== "undefined" && !!window.iptv?.synthesizeNeuralTts;
     if (!canUseNeuralTts) {
-      setErr("Neural TTS is only available in the Smart Media player desktop app.");
+      setErr("Neural TTS is only available in the Player desktop app.");
       return;
     }
     const chunks = ebookChunksRef.current;
     if (index < 0 || index >= chunks.length) {
       ebookChunkIndexRef.current = chunks.length;
       if (ebookActiveIdRef.current) clearEbookResume(ebookActiveIdRef.current);
+      dispatchEbookTtsActive(ebookActiveIdRef.current, false);
       setEbook((cur) => (cur ? { ...cur, status: "idle", chunkIndex: chunks.length, chunkCount: chunks.length } : cur));
       return;
     }
@@ -808,7 +929,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     if (ebookActiveIdRef.current) saveEbookResumeChunk(ebookActiveIdRef.current, index);
     const remainingText = (chunks[index] ?? "").slice(safeCharOffset);
     const neuralSegmentStyle = EBOOK_NEURAL_STYLE;
-    const naturalSegment = naturalSpeechSegmentGroup(remainingText, neuralSegmentStyle, 3);
+    const naturalSegment = naturalSpeechSegmentGroup(remainingText, neuralSegmentStyle, EBOOK_TTS_SEGMENT_GROUP_COUNT);
     const textToSpeak = naturalSegment?.text ?? remainingText.trimStart();
     if (!textToSpeak) {
       speakEbookChunk(index + 1);
@@ -817,26 +938,40 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     const leadingTrim = remainingText.length - remainingText.trimStart().length;
     const nextCharOffset =
       naturalSegment != null ? safeCharOffset + naturalSegment.nextOffset : (chunks[index] ?? "").length;
-    const synthRate = Math.min(1.35, Math.max(0.65, (ebookSpeechRate * (naturalSegment?.rateFactor ?? 1)) / ebookSpeechPitch));
+    const synthRate = Math.min(1.35, Math.max(0.65, (naturalSegment?.rateFactor ?? 1) / ebookSpeechPitch));
     if (canUseNeuralTts) {
-      const synthesizeNeuralSegment = (text: string, speed = synthRate, prefetch = false) => {
+      const synthesizeNeuralSegment = async (text: string, speed = synthRate, prefetch = false) => {
         const ttsText = prepareTextForNeuralTtsPronunciation(text);
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const res = await window.iptv!.synthesizeNeuralTts({
+            text: ttsText,
+            voice: ebookNeuralVoiceId,
+            speed: Math.min(1.35, Math.max(0.65, speed)),
+            style: neuralSegmentStyle,
+            prefetch,
+          });
+          if (!res.skipped) return res;
+          if (prefetch || ebookSpeechRunRef.current !== runId || ebookStopRef.current) return res;
+          await new Promise((resolve) => window.setTimeout(resolve, 300));
+        }
         return window.iptv!.synthesizeNeuralTts({
           text: ttsText,
           voice: ebookNeuralVoiceId,
           speed: Math.min(1.35, Math.max(0.65, speed)),
           style: neuralSegmentStyle,
-          prefetch,
+          prefetch: false,
         });
       };
       const prefetchNeuralSegment = (nextIndex: number, nextOffset = 0) => {
+        if (!EBOOK_TTS_PREFETCH_ENABLED) return;
+        if (!ebookTtsPlaybackStartedRef.current) return;
         if (document.hidden) return;
         const nextText = chunks[nextIndex];
         if (!nextText || nextIndex < 0 || nextIndex >= chunks.length) return;
         const nextRemaining = nextText.slice(Math.max(0, Math.min(nextOffset, nextText.length)));
-        const nextSegment = naturalSpeechSegmentGroup(nextRemaining, neuralSegmentStyle, 3);
+        const nextSegment = naturalSpeechSegmentGroup(nextRemaining, neuralSegmentStyle, EBOOK_TTS_SEGMENT_GROUP_COUNT);
         if (!nextSegment.text) return;
-        const nextSynthRate = Math.min(1.35, Math.max(0.65, (ebookSpeechRate * nextSegment.rateFactor) / ebookSpeechPitch));
+        const nextSynthRate = Math.min(1.35, Math.max(0.65, nextSegment.rateFactor / ebookSpeechPitch));
         const nextTtsText = prepareTextForNeuralTtsPronunciation(nextSegment.text);
         const prefetchKey = `${nextIndex}:${nextOffset}:${ebookNeuralVoiceId}:${ebookSpeechRate}:${ebookSpeechPitch}:${neuralSegmentStyle}:${nextTtsText}`;
         if (ebookNeuralPrefetchKeyRef.current === prefetchKey) return;
@@ -855,30 +990,56 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         }
         prefetchNeuralSegment(index + 1, 0);
       };
+      const schedulePrefetchUpcomingSegment = () => {
+        if (ebookNeuralPrefetchTimerRef.current != null) return;
+        ebookNeuralPrefetchTimerRef.current = window.setTimeout(() => {
+          ebookNeuralPrefetchTimerRef.current = null;
+          if (ebookSpeechRunRef.current !== runId || ebookStopRef.current) return;
+          prefetchUpcomingSegment();
+        }, 120);
+      };
+      const scheduleAfterSegment = (fn: () => void) => {
+        if (ebookNextTimerRef.current != null) window.clearTimeout(ebookNextTimerRef.current);
+        ebookNextTimerRef.current = window.setTimeout(() => {
+          ebookNextTimerRef.current = null;
+          fn();
+        }, 0);
+      };
       const runAfterSegment = () => {
         if (ebookSpeechRunRef.current !== runId) return;
         if (ebookStopRef.current) return;
         if (ebookChunkIndexRef.current !== index) return;
         if (naturalSegment != null && nextCharOffset < (chunks[index]?.length ?? 0)) {
           ebookChunkCharOffsetRef.current = nextCharOffset;
-          speakEbookChunk(index, nextCharOffset);
+          scheduleAfterSegment(() => speakEbookChunk(index, nextCharOffset));
           return;
         }
         if (ebookActiveIdRef.current) saveEbookResumeChunk(ebookActiveIdRef.current, index + 1);
         ebookChunkCharOffsetRef.current = 0;
-        speakEbookChunk(index + 1);
+        scheduleAfterSegment(() => speakEbookChunk(index + 1));
       };
-      setEbookNeuralStatus(textToSpeak.length > 150 ? "Generating neural voice..." : "Starting neural voice...");
+      setEbookNeuralStatusLight(textToSpeak.length > 150 ? "Generating neural voice..." : "Starting neural voice...");
+      setEbook((cur) => (cur ? { ...cur, status: "preparing" } : cur));
       void (async () => {
         try {
+          await ensureNeuralTtsReady(ebookNeuralVoiceId);
+          if (ebookSpeechRunRef.current !== runId || ebookStopRef.current) return;
           const res = await synthesizeNeuralSegment(textToSpeak);
-          if (ebookSpeechRunRef.current !== runId || ebookStopRef.current || res.canceled) return;
+          if (ebookSpeechRunRef.current !== runId) return;
+          if (ebookStopRef.current || res.canceled) {
+            dispatchEbookTtsActive(ebookActiveIdRef.current, false);
+            setEbook((cur) => (cur ? { ...cur, status: "idle" } : cur));
+            return;
+          }
+          if (res.skipped) {
+            throw new Error("Neural voice engine is busy. Try again in a moment.");
+          }
           if (!res.ok || !res.url) throw new Error("Neural TTS did not return audio.");
           const audio = ebookAudioRef.current ?? new Audio();
           ebookAudioRef.current = audio;
           audio.pause();
           audio.src = res.url;
-          audio.playbackRate = ebookSpeechPitch;
+          audio.playbackRate = Math.min(1.75, Math.max(0.5, ebookSpeechRate * ebookSpeechPitch));
           const pitchedAudio = audio as HTMLAudioElement & {
             preservesPitch?: boolean;
             mozPreservesPitch?: boolean;
@@ -891,6 +1052,8 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
           ebookAudioSegmentRef.current = { runId, index, safeCharOffset, leadingTrim, text: textToSpeak };
           const highlightStart = safeCharOffset + leadingTrim;
           const highlightLength = Math.max(1, textToSpeak.length);
+          let prefetchStarted = false;
+          let lastProgressUpdateAt = 0;
           if (ebookActiveIdRef.current != null) {
             dispatchEbookSpeechBoundary({
               ebookId: ebookActiveIdRef.current,
@@ -902,23 +1065,27 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
           audio.ontimeupdate = () => {
             const segment = ebookAudioSegmentRef.current;
             if (!segment || segment.runId !== runId || ebookActiveIdRef.current == null) return;
+            const now = performance.now();
+            if (now - lastProgressUpdateAt < EBOOK_TTS_PROGRESS_UPDATE_MS) return;
+            lastProgressUpdateAt = now;
             const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (res.durationMs ?? 0) / 1000;
             const progress = duration > 0 ? audio.currentTime / duration : 0;
             const estimate = estimateSpokenCharIndex(segment.text, progress);
             ebookChunkCharOffsetRef.current = segment.safeCharOffset + segment.leadingTrim + estimate.charIndex;
-            dispatchEbookSpeechBoundary({
-              ebookId: ebookActiveIdRef.current,
-              chunkIndex: index,
-              charIndex: segment.safeCharOffset + segment.leadingTrim,
-              charLength: Math.max(estimate.charLength ?? 1, segment.text.length),
-            });
-            if (progress >= 0.35 && audio.duration >= 1.5) {
-              prefetchUpcomingSegment();
+            if (
+              !prefetchStarted &&
+              ebookTtsPlaybackStartedRef.current &&
+              EBOOK_TTS_PREFETCH_ENABLED &&
+              progress >= EBOOK_TTS_PREFETCH_AFTER_PROGRESS
+            ) {
+              prefetchStarted = true;
+              schedulePrefetchUpcomingSegment();
             }
           };
           audio.onended = runAfterSegment;
           audio.onerror = () => {
             if (ebookSpeechRunRef.current !== runId) return;
+            dispatchEbookTtsActive(ebookActiveIdRef.current, false);
             setEbook((cur) => (cur ? { ...cur, status: "idle" } : cur));
             setErr("Neural TTS audio could not be played.");
           };
@@ -926,22 +1093,36 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
             audio.currentTime = Math.max(0, ebookAudioResumeRef.current.audioTime);
             ebookAudioResumeRef.current = null;
           }
-          await audio.play();
-          prefetchUpcomingSegment();
+          dispatchEbookTtsActive(ebookActiveIdRef.current, true);
+          try {
+            await audio.play();
+          } catch (playError) {
+            dispatchEbookTtsActive(ebookActiveIdRef.current, false);
+            if (isInterruptedMediaPlayError(playError) || ebookSpeechRunRef.current !== runId || ebookStopRef.current) {
+              return;
+            }
+            throw playError;
+          }
           if (ebookSpeechRunRef.current !== runId) return;
-          setEbookNeuralStatus(res.cached ? "Playing cached neural voice." : "Playing neural voice.");
+          ebookTtsPlaybackStartedRef.current = true;
+          setEbookNeuralStatusLight(res.cached ? "Playing cached neural voice." : "Playing neural voice.");
           setEbook((cur) => (cur ? { ...cur, status: "speaking", chunkIndex: index + 1, chunkCount: chunks.length } : cur));
+          window.setTimeout(() => {
+            if (ebookSpeechRunRef.current !== runId || ebookStopRef.current) return;
+            schedulePrefetchUpcomingSegment();
+          }, EBOOK_TTS_PREFETCH_DELAY_AFTER_PLAY_MS);
         } catch (ex) {
           if (ebookSpeechRunRef.current !== runId) return;
           const message = ex instanceof Error ? ex.message : String(ex);
-          setEbookNeuralStatus(`Neural TTS failed: ${message}`);
+          dispatchEbookTtsActive(ebookActiveIdRef.current, false);
+          setEbookNeuralStatusLight(`Neural TTS failed: ${message}`);
           setErr(message);
           setEbook((cur) => (cur ? { ...cur, status: "idle" } : cur));
         }
       })();
       return;
     }
-  }, [ebookNeuralVoiceId, ebookSpeechPitch, ebookSpeechRate]);
+  }, [ebookNeuralVoiceId, ebookSpeechPitch, ebookSpeechRate, ensureNeuralTtsReady, setEbookNeuralStatusLight]);
 
   const pauseEbook = useCallback(() => {
     if (!ebookAudioRef.current) return;
@@ -951,6 +1132,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       charOffset: ebookChunkCharOffsetRef.current,
       audioTime: ebookAudioRef.current.currentTime,
     };
+    dispatchEbookTtsActive(ebookActiveIdRef.current, false);
     setEbook((cur) => (cur ? { ...cur, status: "paused" } : cur));
   }, []);
 
@@ -964,7 +1146,12 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         return;
       }
       if (ebookAudioRef.current) {
-        void ebookAudioRef.current.play();
+        dispatchEbookTtsActive(ebookActiveIdRef.current, true);
+        void ebookAudioRef.current.play().catch((playError: unknown) => {
+          dispatchEbookTtsActive(ebookActiveIdRef.current, false);
+          if (isInterruptedMediaPlayError(playError)) return;
+          setErr(playError instanceof Error ? playError.message : String(playError));
+        });
         setEbook((cur) => (cur ? { ...cur, status: "speaking" } : cur));
         return;
       }
@@ -982,14 +1169,25 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       ebookStopRef.current = true;
       ebookSpeechRunRef.current += 1;
       ebookNeuralPrefetchKeyRef.current = "";
-      if (ebookNextTimerRef.current != null) window.clearTimeout(ebookNextTimerRef.current);
-      if (ebookNavigationStartTimerRef.current != null) window.clearTimeout(ebookNavigationStartTimerRef.current);
+      if (ebookNextTimerRef.current != null) {
+        window.clearTimeout(ebookNextTimerRef.current);
+        ebookNextTimerRef.current = null;
+      }
+      if (ebookNeuralPrefetchTimerRef.current != null) {
+        window.clearTimeout(ebookNeuralPrefetchTimerRef.current);
+        ebookNeuralPrefetchTimerRef.current = null;
+      }
+      if (ebookNavigationStartTimerRef.current != null) {
+        window.clearTimeout(ebookNavigationStartTimerRef.current);
+        ebookNavigationStartTimerRef.current = null;
+      }
       if (ebookAudioRef.current) {
         ebookAudioRef.current.pause();
         ebookAudioRef.current.removeAttribute("src");
         ebookAudioRef.current.load();
       }
       void window.iptv?.cancelNeuralTts?.();
+      dispatchEbookTtsActive(ebookActiveIdRef.current, false);
     },
     []
   );
@@ -1005,14 +1203,30 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     } else if (status === "paused") {
       ebookPausedNeedsRestartRef.current = true;
       ebookSpeechRunRef.current += 1;
+        ebookNeuralPrefetchKeyRef.current = "";
+        if (ebookNeuralPrefetchTimerRef.current != null) {
+          window.clearTimeout(ebookNeuralPrefetchTimerRef.current);
+          ebookNeuralPrefetchTimerRef.current = null;
+        }
       if (ebookAudioRef.current) ebookAudioRef.current.pause();
       void window.iptv?.cancelNeuralTts?.();
+        dispatchEbookTtsActive(ebookActiveIdRef.current, false);
     }
   }, [ebookNeuralVoiceId, ebookSpeechPitch, ebookSpeechRate, speakEbookChunk]);
 
   useEffect(() => {
     onIndexedLibraryChannelsChange?.(rows.map((r) => channelFromLibraryTrack(r.track, r.url)));
   }, [rows, onIndexedLibraryChannelsChange]);
+
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+
+  useEffect(
+    () => () => {
+      for (const r of rowsRef.current) revokeRow(r);
+    },
+    []
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -1021,14 +1235,36 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       try {
         const [list, ebooks] = await Promise.all([listAudioLibraryTracks(), listEbookLibraryItems()]);
         if (cancelled) return;
-        setRows((prev) => mergeIdbListIntoRows(prev, list));
+        let workingRows: LibraryRow[] = [];
+        setRows((prev) => {
+          workingRows = mergeIdbListIntoRows(prev, list);
+          return workingRows;
+        });
         setEbookRows(sortEbooks(ebooks));
+
+        const tagUpdates = new Map<string, LibraryRow>();
         for (const t of list) {
           if (cancelled) return;
-          const tagRow = await enrichRowWithFileTags(makeLibraryRow(t));
-          if (!cancelled) {
-            setRows((prev) => prev.map((r) => (r.track.id === t.id ? tagRow : r)));
+          const row = workingRows.find((r) => r.track.id === t.id);
+          if (!row) continue;
+
+          let currentRow = rowWithPersistedTags(row, t);
+          if (!trackHasPersistedTags(t)) {
+            currentRow = await enrichRowWithFileTags(currentRow);
+            try {
+              await persistStoredTrack({
+                ...t,
+                tagArtist: currentRow.tagArtist,
+                tagTitle: currentRow.tagTitle,
+                tagsTooltip: currentRow.tagsTooltip,
+                tagsEnriched: true,
+              });
+            } catch {
+              /* keep in-memory tags */
+            }
+            tagUpdates.set(t.id, currentRow);
           }
+
           if (t.coverArt instanceof Blob && t.coverArt.size > 0) continue;
           const next = await enrichStoredTrackWithCoverArt(t);
           const now = next.coverArt instanceof Blob && next.coverArt.size > 0;
@@ -1039,22 +1275,24 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
             continue;
           }
           if (cancelled) return;
+          const prior = tagUpdates.get(next.id) ?? workingRows.find((r) => r.track.id === next.id);
+          if (prior) revokeRow(prior);
+          const fresh = makeLibraryRow(next);
+          tagUpdates.set(next.id, {
+            ...fresh,
+            tagsTooltip: prior?.tagsTooltip ?? fresh.tagsTooltip,
+            tagArtist: prior?.tagArtist ?? fresh.tagArtist,
+            tagTitle: prior?.tagTitle ?? fresh.tagTitle,
+          });
+        }
+
+        if (!cancelled && tagUpdates.size > 0) {
           setRows((prev) =>
             prev.map((r) => {
-              if (r.track.id !== next.id) return r;
-              revokeRow(r);
-              const fresh = makeLibraryRow(next);
-              return {
-                ...fresh,
-                tagsTooltip: r.tagsTooltip,
-                tagArtist: r.tagArtist,
-                tagTitle: r.tagTitle,
-              };
+              const updated = tagUpdates.get(r.track.id);
+              return updated ?? r;
             })
           );
-          await new Promise<void>((res) => {
-            window.setTimeout(() => res(), 0);
-          });
         }
       } catch (e) {
         if (cancelled) return;
@@ -1068,71 +1306,71 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
   }, []);
 
   const enrichTagsForRows = async (toTag: LibraryRow[]) => {
+    const updates = new Map<string, LibraryRow>();
     for (const row of toTag) {
+      if (trackHasPersistedTags(row.track) || row.tagsTooltip || (row.tagArtist && row.tagTitle)) continue;
       const tagged = await enrichRowWithFileTags(row);
-      setRows((prev) => prev.map((r) => (r.track.id === tagged.track.id ? tagged : r)));
-    }
-  };
-
-  const persistRows = async (built: StoredAudioTrack[]) => {
-    const persistErrs: string[] = [];
-    for (const row of built) {
+      updates.set(tagged.track.id, tagged);
       try {
-        await persistStoredTrack(row);
-      } catch (ex) {
-        persistErrs.push(ex instanceof Error ? ex.message : String(ex));
+        await persistStoredTrack({
+          ...row.track,
+          tagArtist: tagged.tagArtist,
+          tagTitle: tagged.tagTitle,
+          tagsTooltip: tagged.tagsTooltip,
+          tagsEnriched: true,
+        });
+      } catch {
+        /* keep in-memory tags */
       }
     }
-    if (persistErrs.length) {
-      setErr(
-        `Added ${built.length} file(s) for this session, but saving the library failed: ${persistErrs[0]}. Playback still works until you close the app.`
-      );
-    }
+    if (!updates.size) return;
+    setRows((prev) => prev.map((r) => updates.get(r.track.id) ?? r));
   };
 
-  const onPickBrowserFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    e.target.value = "";
-    if (!files?.length) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      const built: StoredAudioTrack[] = [];
-      for (let i = 0; i < files.length; i++) {
-        const f = files[i];
-        if (!f || f.size === 0) continue;
-        built.push(fileToStoredTrack(f));
-      }
-      if (built.length === 0) {
-        setErr("No files were imported (empty selection or zero-byte files).");
-        return;
-      }
-      const enriched: StoredAudioTrack[] = [];
-      for (const t of built) {
-        enriched.push(await enrichStoredTrackWithCoverArt(t));
-      }
-      const newIds = new Set(enriched.map((t) => t.id));
-      setRows((prev) => {
-        const merged = mergeIncomingTracks(prev, enriched);
-        void enrichTagsForRows(merged.filter((r) => newIds.has(r.track.id)));
-        return merged;
-      });
-      await persistRows(enriched);
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : String(ex));
-    } finally {
-      setBusy(false);
-    }
-  };
 
-  const onPickEbookFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    stopEbookSpeech();
-    setBusy(true);
-    setErr(null);
-    try {
+  const importAudioLibraryFiles = useCallback(async (files: File[]) => {
+    const valid = files.filter((file) => file.size > 0);
+    if (!valid.length) return [];
+    const enrichedList: StoredAudioTrack[] = [];
+    for (const file of valid) {
+      const enriched = await enrichStoredTrackWithCoverArt(fileToStoredTrack(file));
+      await persistStoredTrack(enriched);
+      enrichedList.push(enriched);
+    }
+    if (!enrichedList.length) return [];
+    const addedIds = new Set(enrichedList.map((t) => t.id));
+    setRows((prev) => {
+      const merged = mergeIncomingTracks(prev, enrichedList);
+      void enrichTagsForRows(merged.filter((r) => addedIds.has(r.track.id)));
+      return merged;
+    });
+    return enrichedList;
+  }, []);
+
+  const importDesktopAudioPicks = useCallback(async (payloads: PickedLocalAudioPayload[]) => {
+    const valid = payloads
+      .map((item) => normalizePickedPayload(item))
+      .filter((norm): norm is PickedLocalAudioPayload => norm != null);
+    if (!valid.length) return [];
+    const enrichedList: StoredAudioTrack[] = [];
+    for (const norm of valid) {
+      const enriched = await enrichStoredTrackWithCoverArt(trackFromDesktopPick(norm));
+      await persistStoredTrack(enriched);
+      enrichedList.push(enriched);
+    }
+    if (!enrichedList.length) return [];
+    const addedIds = new Set(enrichedList.map((t) => t.id));
+    setRows((prev) => {
+      const merged = mergeIncomingTracks(prev, enrichedList);
+      void enrichTagsForRows(merged.filter((r) => addedIds.has(r.track.id)));
+      return merged;
+    });
+    return enrichedList;
+  }, []);
+
+  const importEbookLibraryFile = useCallback(
+    async (file: File, options?: { openInReader?: boolean }) => {
+      stopEbookSpeech();
       const format = ebookFormatFromFile(file);
       let result: Awaited<ReturnType<typeof extractEbookText>> | null = null;
       try {
@@ -1142,28 +1380,119 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         result = null;
       }
       const title = result?.title ?? file.name.replace(/\.[^/.]+$/, "") ?? file.name ?? "PDF";
-      const pages = result?.pages?.length ? result.pages : [result?.text ?? ""];
-      const text = result?.text ?? pages.join("\n\n");
+      const isPdf = (result?.format ?? format) === "pdf";
+      const pages = result?.pages?.length ? result.pages : isPdf ? ["Open a page to load PDF text for read-aloud."] : [result?.text ?? ""];
+      const text = result?.text?.trim() || (isPdf ? pages[0] ?? "" : pages.join("\n\n"));
       const chunks = [...pages];
-      if (!chunks.length) {
-        chunks.push("");
-      }
+      if (!chunks.length) chunks.push("");
       const row = ebookFromFile(file, title, text, pages, result?.format ?? format);
       await persistEbookLibraryItem(row);
       setEbookRows((prev) => sortEbooks([row, ...prev.filter((r) => r.id !== row.id)]));
       clearEbookResume(row.id);
-      ebookChunksRef.current = chunks;
-      ebookChunkIndexRef.current = 0;
-      ebookActiveIdRef.current = row.id;
-      setEbook({
-        id: row.id,
-        title: row.title,
-        text: row.text,
-        status: "idle",
-        chunkIndex: 0,
-        chunkCount: chunks.length,
+      if (options?.openInReader) {
+        ebookChunksRef.current = chunks;
+        ebookChunkIndexRef.current = 0;
+        ebookActiveIdRef.current = row.id;
+        setEbook({
+          id: row.id,
+          title: row.title,
+          text: row.text,
+          status: "idle",
+          chunkIndex: 0,
+          chunkCount: chunks.length,
+        });
+        onSelectTrack(channelFromEbook(row, 0));
+      }
+      return row;
+    },
+    [onSelectTrack, stopEbookSpeech]
+  );
+
+  const importLibraryFromFiles = useCallback(
+    async (files: File[]) => {
+      const sorted = [...files].sort((a, b) => {
+        const ra = (a as File & { webkitRelativePath?: string }).webkitRelativePath || a.name;
+        const rb = (b as File & { webkitRelativePath?: string }).webkitRelativePath || b.name;
+        return ra.localeCompare(rb, undefined, { sensitivity: "base" });
       });
-      onSelectTrack(channelFromEbook(row, 0));
+      const skipped: string[] = [];
+      const audioFiles: File[] = [];
+      const ebookFiles: File[] = [];
+      for (const file of sorted) {
+        if (!file.size) continue;
+        if (isEbookLibraryFile(file.name, file.type)) ebookFiles.push(file);
+        else if (isAudioLibraryFile(file.name, file.type)) audioFiles.push(file);
+        else skipped.push(file.name);
+      }
+      const audioTracks = await importAudioLibraryFiles(audioFiles);
+      const audioAdded = audioTracks.length;
+      const openSingleEbook =
+        ebookFiles.length === 1 &&
+        audioAdded === 0 &&
+        sorted.length === 1 &&
+        shouldAutoOpenEbookOnImport(ebookFiles[0]!.name, ebookFiles[0]!.type);
+      let ebookAdded = 0;
+      for (const file of ebookFiles) {
+        await importEbookLibraryFile(file, { openInReader: openSingleEbook });
+        ebookAdded += 1;
+      }
+      return { audioAdded, ebookAdded, skipped, total: sorted.length };
+    },
+    [importAudioLibraryFiles, importEbookLibraryFile]
+  );
+
+  const importLibraryFromDesktopPicks = useCallback(
+    async (picked: unknown[]) => {
+      const skipped: string[] = [];
+      const audioItems: PickedLocalAudioPayload[] = [];
+      const ebookItems: PickedLocalAudioPayload[] = [];
+      for (const item of picked) {
+        const norm = normalizePickedPayload(item);
+        if (!norm) continue;
+        const fileName = pickedLibraryFileName(norm);
+        if (isEbookLibraryFile(fileName, norm.mime)) ebookItems.push(norm);
+        else if (isAudioLibraryFile(fileName, norm.mime)) audioItems.push(norm);
+        else skipped.push(fileName);
+      }
+      const audioTracks = await importDesktopAudioPicks(audioItems);
+      const audioAdded = audioTracks.length;
+      const openSingleEbook =
+        ebookItems.length === 1 &&
+        audioAdded === 0 &&
+        picked.length === 1 &&
+        shouldAutoOpenEbookOnImport(pickedLibraryFileName(ebookItems[0]!), ebookItems[0]!.mime);
+      let ebookAdded = 0;
+      for (const item of ebookItems) {
+        await importEbookLibraryFile(desktopPickToFile(item), { openInReader: openSingleEbook });
+        ebookAdded += 1;
+      }
+      return { audioAdded, ebookAdded, skipped, total: picked.length };
+    },
+    [importDesktopAudioPicks, importEbookLibraryFile]
+  );
+
+  const onPickLibraryFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    e.target.value = "";
+    if (!fileList?.length) return;
+    const files = Array.from(fileList).filter((file) => file.size > 0);
+    if (!files.length) {
+      setErr("No files were imported (empty selection or zero-byte files).");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const { audioAdded, ebookAdded, skipped } = await importLibraryFromFiles(files);
+      if (audioAdded === 0 && ebookAdded === 0) {
+        setErr(
+          skipped.length
+            ? `Unsupported file type(s): ${skipped.slice(0, 4).join(", ")}`
+            : "No files were imported (empty selection or zero-byte files)."
+        );
+      } else if (skipped.length) {
+        setErr(`Added ${audioAdded + ebookAdded} file(s). Skipped unsupported: ${skipped.slice(0, 4).join(", ")}`);
+      }
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex));
     } finally {
@@ -1177,27 +1506,17 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     setErr(null);
     try {
       const picked = await window.iptv.pickLocalAudioFiles();
-      const built: StoredAudioTrack[] = [];
-      for (const item of picked) {
-        const norm = normalizePickedPayload(item);
-        if (!norm) continue;
-        built.push(trackFromDesktopPick(norm));
+      if (!picked.length) return;
+      const { audioAdded, ebookAdded, skipped } = await importLibraryFromDesktopPicks(picked);
+      if (audioAdded === 0 && ebookAdded === 0) {
+        setErr(
+          skipped.length
+            ? `Unsupported file type(s): ${skipped.slice(0, 4).join(", ")}`
+            : "No files were added (empty folder, unreadable paths, or zero-byte files)."
+        );
+      } else if (skipped.length) {
+        setErr(`Added ${audioAdded + ebookAdded} file(s). Skipped unsupported: ${skipped.slice(0, 4).join(", ")}`);
       }
-      if (built.length === 0) {
-        setErr("No audio files were added (empty selection, unreadable paths, or zero-byte files).");
-        return;
-      }
-      const enriched: StoredAudioTrack[] = [];
-      for (const t of built) {
-        enriched.push(await enrichStoredTrackWithCoverArt(t));
-      }
-      const newIds = new Set(enriched.map((t) => t.id));
-      setRows((prev) => {
-        const merged = mergeIncomingTracks(prev, enriched);
-        void enrichTagsForRows(merged.filter((r) => newIds.has(r.track.id)));
-        return merged;
-      });
-      await persistRows(enriched);
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex));
     } finally {
@@ -1213,6 +1532,10 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     );
     if (!ok) return;
     stopEbookSpeech();
+    ebookActiveIdRef.current = null;
+    dispatchLibraryCleared();
+    onLibraryCleared?.();
+    setLibraryPlaybackState(null);
     setBusy(true);
     setErr(null);
     try {
@@ -1230,7 +1553,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     } finally {
       setBusy(false);
     }
-  }, [ebookRows, rows, stopEbookSpeech]);
+  }, [ebookRows, onLibraryCleared, rows, stopEbookSpeech]);
 
   useImperativeHandle(ref, () => ({ clearAll: onClearAll }), [onClearAll]);
 
@@ -1245,6 +1568,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     setErr(null);
     try {
       await removeAudioLibraryTrack(id);
+      clearAudioResume(id);
+      onLibraryTrackRemoved?.(id);
+      setLibraryPlaybackState((cur) => (cur?.trackId === id ? null : cur));
       setRows((prev) => {
         const hit = prev.find((r) => r.track.id === id);
         if (hit) revokeRow(hit);
@@ -1335,7 +1661,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     [bumpResumeHints, onSelectTrack, pauseEbookForAudioSelection]
   );
 
-  const loadEbookForSpeech = useCallback((row: StoredEbook, startChunk: number, startChar = 0) => {
+  const loadEbookInReader = useCallback((row: StoredEbook, startChunk: number, startChar = 0, shouldSpeak = false) => {
     stopEbookSpeech();
     const chunks = ebookSpeechPages(row);
     if (!chunks.length) {
@@ -1357,8 +1683,18 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       chunkIndex: safeStart,
       chunkCount: chunks.length,
     });
-    speakEbookChunk(safeStart, safeChar);
+    if (shouldSpeak) speakEbookChunk(safeStart, safeChar);
   }, [onSelectTrack, speakEbookChunk, stopEbookSpeech]);
+
+  const openEbookForReading = useCallback(
+    (row: StoredEbook, ev?: React.MouseEvent) => {
+      ev?.preventDefault();
+      ev?.stopPropagation();
+      bumpResumeHints();
+      loadEbookInReader(row, loadEbookResumeChunk(row.id) ?? 0, 0, false);
+    },
+    [bumpResumeHints, loadEbookInReader]
+  );
 
   useEffect(() => {
     const onOcrText = (ev: Event) => {
@@ -1408,10 +1744,15 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         }
         ebookStopRef.current = true;
         ebookSpeechRunRef.current += 1;
+        ebookTtsPlaybackStartedRef.current = false;
         ebookNeuralPrefetchKeyRef.current = "";
         if (ebookNextTimerRef.current != null) {
           window.clearTimeout(ebookNextTimerRef.current);
           ebookNextTimerRef.current = null;
+        }
+        if (ebookNeuralPrefetchTimerRef.current != null) {
+          window.clearTimeout(ebookNeuralPrefetchTimerRef.current);
+          ebookNeuralPrefetchTimerRef.current = null;
         }
         if (ebookAudioRef.current) {
           ebookAudioRef.current.pause();
@@ -1419,7 +1760,8 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
           ebookAudioRef.current.load();
         }
         void window.iptv?.cancelNeuralTts?.();
-        setEbookNeuralStatus("Preparing selected page...");
+        dispatchEbookTtsActive(ebookActiveIdRef.current, false);
+        setEbookNeuralStatusLight("Preparing selected page...");
         setEbook((cur) =>
           cur
             ? {
@@ -1432,15 +1774,15 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         );
         ebookNavigationStartTimerRef.current = window.setTimeout(() => {
           ebookNavigationStartTimerRef.current = null;
-          loadEbookForSpeech(row, pageIndex, startOffset);
+          loadEbookInReader(row, pageIndex, startOffset, true);
         }, 450);
         return;
       }
-      loadEbookForSpeech(row, pageIndex, startOffset);
+      loadEbookInReader(row, pageIndex, startOffset, true);
     };
     window.addEventListener(EBOOK_START_EVENT, onStartAt);
     return () => window.removeEventListener(EBOOK_START_EVENT, onStartAt);
-  }, [bumpResumeHints, ebookRows, loadEbookForSpeech]);
+  }, [bumpResumeHints, ebookRows, loadEbookInReader, setEbookNeuralStatusLight]);
 
   const playEbookFromStart = useCallback(
     (row: StoredEbook, ev?: React.MouseEvent) => {
@@ -1448,9 +1790,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       ev?.stopPropagation();
       clearEbookResume(row.id);
       bumpResumeHints();
-      loadEbookForSpeech(row, 0);
+      loadEbookInReader(row, 0, 0, true);
     },
-    [bumpResumeHints, loadEbookForSpeech]
+    [bumpResumeHints, loadEbookInReader]
   );
 
   const playEbookResume = useCallback(
@@ -1458,9 +1800,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       ev?.preventDefault();
       ev?.stopPropagation();
       bumpResumeHints();
-      loadEbookForSpeech(row, loadEbookResumeChunk(row.id) ?? 0);
+      loadEbookInReader(row, loadEbookResumeChunk(row.id) ?? 0, 0, true);
     },
-    [bumpResumeHints, loadEbookForSpeech]
+    [bumpResumeHints, loadEbookInReader]
   );
 
   const pauseActiveEbook = useCallback(
@@ -1496,7 +1838,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       <div className="local-audio-toolbar">
         {hasDesktopPick ? (
           <button type="button" className="url-btn" disabled={busy} onClick={() => void onAddDesktop()}>
-            + Add files…
+            Add folder to Library…
           </button>
         ) : (
           <label className={`file-btn local-audio-pick${busy ? " file-btn--disabled" : ""}`}>
@@ -1504,24 +1846,17 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
               type="file"
               className="local-audio-file-input"
               multiple
-              accept={AUDIO_ACCEPT}
+              // @ts-expect-error non-standard but widely supported for folder import
+              webkitdirectory=""
+              directory=""
+              accept={LIBRARY_ACCEPT}
               disabled={busy}
-              onChange={(e) => void onPickBrowserFiles(e)}
+              onChange={(e) => void onPickLibraryFiles(e)}
             />
-            <span className="local-audio-pick-text">+ Add from computer</span>
+            <span className="local-audio-pick-text">Add folder to Library…</span>
           </label>
         )}
-        <label className={`file-btn local-audio-pick${busy ? " file-btn--disabled" : ""}`}>
-          <input
-            type="file"
-            className="local-audio-file-input"
-            accept={EBOOK_ACCEPT}
-            disabled={busy}
-            onChange={(e) => void onPickEbookFile(e)}
-          />
-          <span className="local-audio-pick-text">Read ebook…</span>
-        </label>
-        <div className="ebook-voice-controls" aria-label="Ebook voice settings">
+        <div ref={ebookVoiceControlsRef} className="ebook-voice-controls" aria-label="Ebook voice settings">
           <div className="ebook-voice-toggle" role="group" aria-label="Narrator voice gender">
             <button
               type="button"
@@ -1540,34 +1875,80 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
               Male
             </button>
           </div>
-          <label className="ebook-voice-field">
-            <span>Read speed {ebookSpeechRateDraft.toFixed(2)}x</span>
-            <input
-              type="range"
-              min={0.65}
-              max={1.35}
-              step={0.05}
-              value={ebookSpeechRateDraft}
-              onChange={(e) => setEbookSpeechRateDraft(Number(e.currentTarget.value))}
-              onPointerUp={commitEbookRateDraft}
-              onKeyUp={commitEbookRateDraft}
-              onBlur={commitEbookRateDraft}
-            />
-          </label>
-          <label className="ebook-voice-field">
-            <span>Pitch {ebookSpeechPitchDraft.toFixed(2)}x</span>
-            <input
-              type="range"
-              min={0.75}
-              max={1.25}
-              step={0.05}
-              value={ebookSpeechPitchDraft}
-              onChange={(e) => setEbookSpeechPitchDraft(Number(e.currentTarget.value))}
-              onPointerUp={commitEbookPitchDraft}
-              onKeyUp={commitEbookPitchDraft}
-              onBlur={commitEbookPitchDraft}
-            />
-          </label>
+          <div className={`ebook-voice-scale${ebookTtsScaleLocked ? " ebook-voice-scale--locked" : ""}`}>
+            <button
+              type="button"
+              className={`ebook-voice-scale-btn${ebookVoiceScaleOpen === "speed" ? " ebook-voice-scale-btn--open" : ""}`}
+              aria-label={`Read speed ${ebookSpeechRateDraft.toFixed(2)}x`}
+              aria-expanded={ebookVoiceScaleOpen === "speed"}
+              aria-disabled={ebookTtsScaleLocked}
+              disabled={ebookTtsScaleLocked}
+              title={ebookTtsScaleLocked ? "Pause reading to change speed" : undefined}
+              onClick={() => setEbookVoiceScaleOpen((cur) => (cur === "speed" ? null : "speed"))}
+            >
+              Speed {ebookSpeechRateDraft.toFixed(2)}x
+            </button>
+            {ebookVoiceScaleOpen === "speed" && !ebookTtsScaleLocked ? (
+              <div className="ebook-voice-scale-popover" role="dialog" aria-label="Read speed scale">
+                <div className="ebook-voice-scale-popover-inner">
+                  <span className="ebook-voice-scale-title">Speed</span>
+                  <input
+                    className="ebook-voice-scale-range"
+                    type="range"
+                    min={0.65}
+                    max={1.35}
+                    step={0.05}
+                    value={ebookSpeechRateDraft}
+                    onChange={(e) => setEbookSpeechRateDraft(Number(e.currentTarget.value))}
+                    onPointerUp={commitEbookRateDraft}
+                    onPointerCancel={commitEbookRateDraft}
+                    onMouseUp={commitEbookRateDraft}
+                    onTouchEnd={commitEbookRateDraft}
+                    onKeyUp={commitEbookRateDraft}
+                    onBlur={commitEbookRateDraft}
+                  />
+                  <span className="ebook-voice-scale-readout">{ebookSpeechRateDraft.toFixed(2)}x</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <div className={`ebook-voice-scale${ebookTtsScaleLocked ? " ebook-voice-scale--locked" : ""}`}>
+            <button
+              type="button"
+              className={`ebook-voice-scale-btn${ebookVoiceScaleOpen === "pitch" ? " ebook-voice-scale-btn--open" : ""}`}
+              aria-label={`Pitch ${ebookSpeechPitchDraft.toFixed(2)}x`}
+              aria-expanded={ebookVoiceScaleOpen === "pitch"}
+              aria-disabled={ebookTtsScaleLocked}
+              disabled={ebookTtsScaleLocked}
+              title={ebookTtsScaleLocked ? "Pause reading to change pitch" : undefined}
+              onClick={() => setEbookVoiceScaleOpen((cur) => (cur === "pitch" ? null : "pitch"))}
+            >
+              Pitch {ebookSpeechPitchDraft.toFixed(2)}x
+            </button>
+            {ebookVoiceScaleOpen === "pitch" && !ebookTtsScaleLocked ? (
+              <div className="ebook-voice-scale-popover" role="dialog" aria-label="Pitch scale">
+                <div className="ebook-voice-scale-popover-inner">
+                  <span className="ebook-voice-scale-title">Pitch</span>
+                  <input
+                    className="ebook-voice-scale-range"
+                    type="range"
+                    min={0.75}
+                    max={1.25}
+                    step={0.05}
+                    value={ebookSpeechPitchDraft}
+                    onChange={(e) => setEbookSpeechPitchDraft(Number(e.currentTarget.value))}
+                    onPointerUp={commitEbookPitchDraft}
+                    onPointerCancel={commitEbookPitchDraft}
+                    onMouseUp={commitEbookPitchDraft}
+                    onTouchEnd={commitEbookPitchDraft}
+                    onKeyUp={commitEbookPitchDraft}
+                    onBlur={commitEbookPitchDraft}
+                  />
+                  <span className="ebook-voice-scale-readout">{ebookSpeechPitchDraft.toFixed(2)}x</span>
+                </div>
+              </div>
+            ) : null}
+          </div>
           <span className="ebook-neural-status">
             Neural TTS · {selectedNeuralVoice?.name ?? (ebookVoiceGender === "male" ? "Male voice" : "Female voice")}
             {ebookNeuralStatus ? ` · ${ebookNeuralStatus}` : ""}
@@ -1597,8 +1978,15 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       <div className="local-audio-scroll">
         {rows.length + ebookRows.length === 0 ? (
           <div className="local-audio-empty">
-            No files yet — <strong>{hasDesktopPick ? "Add files…" : "Add from computer"}</strong> or{" "}
-            <strong>Read ebook…</strong>. Imports stay in this profile until you remove them.
+            <p>
+              No files yet — use <strong>Add to Library…</strong> to import songs, audiobooks, or ebooks. Imports stay
+              in this profile until you remove them.
+            </p>
+            <div className="local-audio-empty-formats">
+              <p>Songs: MP3, M4A, AAC, OGG, Opus, WAV, FLAC, WebM</p>
+              <p>Audiobooks: M4B, M4A</p>
+              <p>Ebooks: PDF, EPUB, TXT, Markdown, HTML</p>
+            </div>
           </div>
         ) : (
           <>
@@ -1611,10 +1999,13 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
             const resumeAt = ebookResumeHints.get(book.id);
             const rowClass = active ? "local-audio-row active active--ebook" : "local-audio-row";
             const isSpeaking = active && ebook?.status === "speaking";
+            const isPreparing = active && ebook?.status === "preparing";
             const isPaused = active && ebook?.status === "paused";
             const progress =
               active && ebook
-                ? ebook.status === "idle" && ebook.chunkIndex >= ebook.chunkCount
+                ? isPreparing
+                  ? "Preparing voice…"
+                  : ebook.status === "idle" && ebook.chunkIndex >= ebook.chunkCount
                   ? "Finished"
                   : `Part ${Math.min(ebook.chunkIndex || 1, ebook.chunkCount)} of ${ebook.chunkCount}`
                 : resumeAt != null
@@ -1626,7 +2017,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
                   type="button"
                   className="local-audio-row-hit"
                   title={`${book.sourceFileName} · ${progress}`}
-                  onClick={() => playEbookResume(book)}
+                  onClick={(ev) => openEbookForReading(book, ev)}
                 >
                   <span className="local-audio-icon local-audio-icon--ebook" aria-hidden>
                     E
@@ -1653,7 +2044,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
                     type="button"
                     className={`local-audio-pos-btn local-audio-pos-btn--resume${resumeAt != null || active ? " local-audio-pos-btn--has-time" : ""}`}
                     title={
-                      isSpeaking
+                      isPreparing
+                        ? "Cancel read-out preparation"
+                        : isSpeaking
                         ? "Pause read-out"
                         : isPaused
                           ? "Resume from the paused word"
@@ -1662,7 +2055,9 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
                             : "Start read-out"
                     }
                     aria-label={
-                      isSpeaking
+                      isPreparing
+                        ? `Cancel ${book.title} read-out preparation`
+                        : isSpeaking
                         ? `Pause ${book.title}`
                         : isPaused
                           ? `Resume ${book.title} from paused word`
@@ -1670,13 +2065,22 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
                     }
                     disabled={busy}
                     onClick={(ev) =>
-                      isSpeaking ? pauseActiveEbook(ev) : isPaused ? resumePausedEbook(ev) : playEbookResume(book, ev)
+                      isPreparing
+                        ? (ev.preventDefault(), ev.stopPropagation(), stopEbookSpeech())
+                        : isSpeaking
+                          ? pauseActiveEbook(ev)
+                          : isPaused
+                            ? resumePausedEbook(ev)
+                            : playEbookResume(book, ev)
                     }
                   >
-                    <span className="local-audio-pos-glyph" aria-hidden>
-                      {isSpeaking ? "Ⅱ" : "▶"}
+                    <span
+                      className={`local-audio-pos-glyph${isPreparing ? " local-audio-pos-glyph--loading" : ""}`}
+                      aria-hidden
+                    >
+                      {isPreparing ? "" : isSpeaking ? "Ⅱ" : "▶"}
                     </span>
-                    {resumeAt != null && !isSpeaking ? (
+                    {resumeAt != null && !isSpeaking && !isPreparing ? (
                       <span className="local-audio-pos-time">P{resumeAt + 1}</span>
                     ) : null}
                   </button>

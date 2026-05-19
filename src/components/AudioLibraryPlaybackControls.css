@@ -56,3 +56,30 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+@media (hover: none) and (pointer: coarse) {
+  .audio-playback-controls {
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .audio-playback-icon-btn {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/* AD editorial theme overrides */
+.audio-playback-icon-btn {
+  border-radius: 0;
+  border-color: #111;
+  background: #fff;
+  color: #000;
+}
+
+.audio-playback-icon-btn:hover:not(:disabled),
+.audio-playback-icon-btn--on {
+  background: #000;
+  border-color: #000;
+  color: #fff;
+}
