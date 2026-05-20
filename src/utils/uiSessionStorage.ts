@@ -11,7 +11,7 @@ export type AssignPanePersisted = "L" | "R";
 export type SidebarModePersisted = "tv" | "radio" | "audio";
 
 export interface UiSession {
-  v: 9;
+  v: 10;
   listTab: ListTabPersisted;
   /** Radio sidebar: all stations in country vs favorites only (same URLs as Television favorites). */
   radioListTab: RadioListTabPersisted;
@@ -34,10 +34,16 @@ export interface UiSession {
   volumeRight: number;
   /** Desktop: channel list sidebar width in CSS pixels. */
   sidebarWidthPx: number;
-  /** Radio Web Audio EQ preset; shared across all stations until changed. */
+  /** Radio Web Audio EQ preset. */
   radioEqPreset: EqPresetId;
   /** Per-band dB when `radioEqPreset` is `custom`. */
   radioEqCustomGains: number[];
+  /** Local library (Sound tab) EQ preset — independent from radio/podcast. */
+  libraryEqPreset: EqPresetId;
+  libraryEqCustomGains: number[];
+  /** Podcast tab EQ preset — independent from library/radio. */
+  podcastEqPreset: EqPresetId;
+  podcastEqCustomGains: number[];
   /** Local library audio: pick next track at random when a track ends (with continuous play). */
   audioLibraryShuffle: boolean;
   /** Local library audio: when a track ends, start the next (or random if shuffle) in the library list. */
@@ -47,7 +53,7 @@ export interface UiSession {
 }
 
 const defaultSession: UiSession = {
-  v: 9,
+  v: 10,
   listTab: "all",
   radioListTab: "all",
   podcastListTab: "all",
@@ -65,6 +71,10 @@ const defaultSession: UiSession = {
   sidebarWidthPx: 400,
   radioEqPreset: "flat",
   radioEqCustomGains: parseEqCustomGains(undefined),
+  libraryEqPreset: "flat",
+  libraryEqCustomGains: parseEqCustomGains(undefined),
+  podcastEqPreset: "flat",
+  podcastEqCustomGains: parseEqCustomGains(undefined),
   audioLibraryShuffle: false,
   audioLibraryContinuous: false,
   compactView: false,
@@ -105,8 +115,47 @@ function parseListTab(raw: unknown): ListTabPersisted {
   return "all";
 }
 
-function migrateFromV8(o: Record<string, unknown>): UiSession {
+function migrateFromV9(o: Record<string, unknown>): UiSession {
+  const radioPreset = parseEqPresetId(o.radioEqPreset);
+  const radioCustom = parseEqCustomGains(o.radioEqCustomGains);
   return {
+    v: 10,
+    listTab: parseListTab(o.listTab),
+    radioListTab: parseRadioListTab(o.radioListTab),
+    podcastListTab: parsePodcastListTab(o.podcastListTab),
+    sidebarMode: parseSidebarMode(o.sidebarMode),
+    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
+    podcastCountry: typeof o.podcastCountry === "string" && o.podcastCountry.trim() ? o.podcastCountry : "us",
+    podcastGenreId: parsePodcastGenreId(o.podcastGenreId),
+    query: typeof o.query === "string" ? o.query : "",
+    group: typeof o.group === "string" ? o.group : "All groups",
+    country: typeof o.country === "string" ? o.country : "All countries",
+    splitView: !!o.splitView,
+    assignTarget: o.assignTarget === "R" ? "R" : "L",
+    volumeLeft: vol(o.volumeLeft, 1),
+    volumeRight: vol(o.volumeRight, 1),
+    sidebarWidthPx: clampSidebarWidthPx(
+      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
+    ),
+    radioEqPreset: radioPreset,
+    radioEqCustomGains: radioCustom,
+    libraryEqPreset: parseEqPresetId(o.libraryEqPreset) || radioPreset,
+    libraryEqCustomGains: parseEqCustomGains(o.libraryEqCustomGains).length
+      ? parseEqCustomGains(o.libraryEqCustomGains)
+      : [...radioCustom],
+    podcastEqPreset: parseEqPresetId(o.podcastEqPreset) || radioPreset,
+    podcastEqCustomGains: parseEqCustomGains(o.podcastEqCustomGains).length
+      ? parseEqCustomGains(o.podcastEqCustomGains)
+      : [...radioCustom],
+    audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
+    audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
+    compactView: typeof o.compactView === "boolean" ? o.compactView : false,
+  };
+}
+
+function migrateFromV8(o: Record<string, unknown>): UiSession {
+  return migrateFromV9({
+    ...o,
     v: 9,
     listTab: parseListTab(o.listTab),
     radioListTab: parseRadioListTab(o.radioListTab),
@@ -127,10 +176,14 @@ function migrateFromV8(o: Record<string, unknown>): UiSession {
     ),
     radioEqPreset: parseEqPresetId(o.radioEqPreset),
     radioEqCustomGains: parseEqCustomGains(o.radioEqCustomGains),
+    libraryEqPreset: parseEqPresetId(o.libraryEqPreset),
+    libraryEqCustomGains: parseEqCustomGains(o.libraryEqCustomGains),
+    podcastEqPreset: parseEqPresetId(o.podcastEqPreset),
+    podcastEqCustomGains: parseEqCustomGains(o.podcastEqCustomGains),
     audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
     audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
     compactView: typeof o.compactView === "boolean" ? o.compactView : false,
-  };
+  });
 }
 
 function migrateFromV2(o: Record<string, unknown>): UiSession {
@@ -218,9 +271,10 @@ export function loadUiSession(): UiSession {
     if (o.v === 5) return migrateFromV5(o);
     if (o.v === 6) return migrateFromV6(o);
     if (o.v === 7 || o.v === 8) return migrateFromV8(o);
-    if (o.v !== 9) return { ...defaultSession };
+    if (o.v === 9) return migrateFromV9(o);
+    if (o.v !== 10) return { ...defaultSession };
     return {
-      v: 9,
+      v: 10,
       listTab: parseListTab(o.listTab),
       radioListTab: parseRadioListTab(o.radioListTab),
       podcastListTab: parsePodcastListTab(o.podcastListTab),
@@ -240,6 +294,10 @@ export function loadUiSession(): UiSession {
       ),
       radioEqPreset: parseEqPresetId(o.radioEqPreset),
       radioEqCustomGains: parseEqCustomGains(o.radioEqCustomGains),
+      libraryEqPreset: parseEqPresetId(o.libraryEqPreset),
+      libraryEqCustomGains: parseEqCustomGains(o.libraryEqCustomGains),
+      podcastEqPreset: parseEqPresetId(o.podcastEqPreset),
+      podcastEqCustomGains: parseEqCustomGains(o.podcastEqCustomGains),
       audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
       audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
       compactView: typeof o.compactView === "boolean" ? o.compactView : false,
@@ -253,7 +311,7 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
   try {
     const cur = loadUiSession();
     const next: UiSession = {
-      v: 9,
+      v: 10,
       listTab: partial.listTab ?? cur.listTab,
       radioListTab: partial.radioListTab ?? cur.radioListTab,
       podcastListTab: partial.podcastListTab ?? cur.podcastListTab,
@@ -277,6 +335,16 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
         partial.radioEqCustomGains !== undefined
           ? parseEqCustomGains(partial.radioEqCustomGains)
           : [...cur.radioEqCustomGains],
+      libraryEqPreset: partial.libraryEqPreset ?? cur.libraryEqPreset,
+      libraryEqCustomGains:
+        partial.libraryEqCustomGains !== undefined
+          ? parseEqCustomGains(partial.libraryEqCustomGains)
+          : [...cur.libraryEqCustomGains],
+      podcastEqPreset: partial.podcastEqPreset ?? cur.podcastEqPreset,
+      podcastEqCustomGains:
+        partial.podcastEqCustomGains !== undefined
+          ? parseEqCustomGains(partial.podcastEqCustomGains)
+          : [...cur.podcastEqCustomGains],
       audioLibraryShuffle:
         partial.audioLibraryShuffle !== undefined ? partial.audioLibraryShuffle : cur.audioLibraryShuffle,
       audioLibraryContinuous:

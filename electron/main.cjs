@@ -42,8 +42,9 @@ function loadEnvFromProjectRoot() {
 }
 loadEnvFromProjectRoot();
 const http = require("http");
+const nodeNet = require("net");
 const crypto = require("crypto");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const { Readable } = require("stream");
 const { fileURLToPath, pathToFileURL } = require("url");
 
@@ -843,6 +844,49 @@ function parseLlmUnifiedLyricsJsonText(text, displayName) {
   return { ok: true, error: "", pairs, detectedFranc3: detected, headline, lrclibTrack };
 }
 
+function buildLyricsIdentityUserPrompt(p, extraLines = []) {
+  const metaArtist = typeof p.metaArtist === "string" ? p.metaArtist.trim().slice(0, 200) : "";
+  const metaTitle = typeof p.metaTitle === "string" ? p.metaTitle.trim().slice(0, 200) : "";
+  const metaAlbum = typeof p.metaAlbum === "string" ? p.metaAlbum.trim().slice(0, 200) : "";
+  const displayName = typeof p.displayName === "string" ? p.displayName.trim().slice(0, 400) : "";
+  const sourceFileName = typeof p.sourceFileName === "string" ? p.sourceFileName.trim().slice(0, 240) : "";
+  const altArtist = typeof p.altArtist === "string" ? p.altArtist.trim().slice(0, 200) : "";
+  const altTitle = typeof p.altTitle === "string" ? p.altTitle.trim().slice(0, 200) : "";
+  const playerHeaderLabel =
+    typeof p.playerHeaderLabel === "string" ? p.playerHeaderLabel.trim().slice(0, 240) : "";
+  const durationSec =
+    typeof p.durationSec === "number" && Number.isFinite(p.durationSec) && p.durationSec >= 0
+      ? Math.floor(p.durationSec)
+      : null;
+  const altLine =
+    altArtist || altTitle
+      ? `Alternative artist/title from file or library name (use when tags look corrupted or misspelled): ${[altArtist, altTitle].filter(Boolean).join(" - ")}`
+      : "";
+
+  const panelHeader =
+    playerHeaderLabel ||
+    (metaArtist && metaTitle ? `${metaArtist} — ${metaTitle}` : metaTitle || metaArtist || "");
+
+  return [
+    displayName ? `Library display name: ${displayName}` : "",
+    panelHeader ? `Name shown at top of lyrics panel: ${panelHeader}` : "",
+    `Artist from file tags (ID3 / FLAC Vorbis / MP4): ${metaArtist || "unknown"}`,
+    `Title from file tags: ${metaTitle || "unknown"}`,
+    metaAlbum ? `Album from file tags: ${metaAlbum}` : "",
+    sourceFileName ? `Original file name on disk: ${sourceFileName}` : "",
+    altLine,
+    `Approximate duration (seconds): ${durationSec != null ? String(durationSec) : "unknown"}`,
+    "",
+    "Use the library display name and lyrics panel title above when they match what a listener would search (e.g. on Google).",
+    "Identify the correct song using the tagged artist and title when they look trustworthy.",
+    'If the tagged title looks misspelled, garbled, or not a real song title, prefer the library display name, panel title, file name, or alternative artist/title above (same spelling as a Google search: "Artist - Title").',
+    "Return lyrics only for that exact recording, not a remix, live version, or different song unless clearly indicated.",
+    ...extraLines,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function parseGeminiLyricsMeaningJsonText(text, displayName) {
   let obj;
   const raw = stripLlmMarkdownFences(text);
@@ -1063,14 +1107,6 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
   if (!displayName || displayName.length > 400) {
     throw new Error("Invalid display name for LLM lyrics.");
   }
-  const durationSec =
-    typeof p.durationSec === "number" && Number.isFinite(p.durationSec) && p.durationSec >= 0
-      ? Math.floor(p.durationSec)
-      : null;
-  const metaArtist = typeof p.metaArtist === "string" ? p.metaArtist.trim().slice(0, 200) : "";
-  const metaTitle = typeof p.metaTitle === "string" ? p.metaTitle.trim().slice(0, 200) : "";
-  const metaAlbum = typeof p.metaAlbum === "string" ? p.metaAlbum.trim().slice(0, 200) : "";
-
   const system = [
     "You help a music player show bilingual song lyrics.",
     "You must respond with ONLY a single JSON object (no markdown fences, no commentary before or after).",
@@ -1078,22 +1114,14 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
     'Shape B failure: {"ok":false,"message":"one short reason","pairs":[]}',
     "detectedFranc3 must be ISO 639-3 (three lowercase letters) when you can infer language, else use \"und\".",
     "pairs: each object needs \"orig\" and \"en\" strings; same number of logical lines; no empty orig.",
-    "If you are not confident you have the correct official lyrics, set ok:false.",
+    "If you are not confident you have the correct official lyrics for that exact artist and title, set ok:false.",
+    "Never substitute lyrics from a different song by the same artist or a similarly titled track.",
     "Do not exceed 120 pairs. No LRC timestamps in strings.",
   ].join(" ");
 
-  const user = [
-    `Library display name: ${displayName}`,
-    `Artist from file tags (ID3 / FLAC Vorbis / MP4): ${metaArtist || "unknown"}`,
-    `Title from file tags: ${metaTitle || "unknown"}`,
-    metaAlbum ? `Album from file tags: ${metaAlbum}` : "",
-    `Approximate duration (seconds): ${durationSec != null ? String(durationSec) : "unknown"}`,
-    "",
-    "Use ONLY the tagged artist and title above to identify the song (do not invent a different artist or track from the filename alone).",
+  const user = buildLyricsIdentityUserPrompt(p, [
     "Find the best-matching official lyrics, then supply each line in the original language with an accurate English translation in the same array position.",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ]);
 
   const llmPurpose = "lyrics find + translate";
   try {
@@ -1214,13 +1242,6 @@ ipcMain.handle("iptv-lyrics-gemini-unified-fetch", async (_evt, rawPayload) => {
   if (!displayName || displayName.length > 400) {
     throw new Error("Invalid display name for Gemini lyrics.");
   }
-  const durationSec =
-    typeof p.durationSec === "number" && Number.isFinite(p.durationSec) && p.durationSec >= 0
-      ? Math.floor(p.durationSec)
-      : null;
-  const metaArtist = typeof p.metaArtist === "string" ? p.metaArtist.trim().slice(0, 200) : "";
-  const metaTitle = typeof p.metaTitle === "string" ? p.metaTitle.trim().slice(0, 200) : "";
-  const metaAlbum = typeof p.metaAlbum === "string" ? p.metaAlbum.trim().slice(0, 200) : "";
   const system = [
     "You help a music player show bilingual song lyrics and a short song meaning.",
     "You must respond with ONLY a single JSON object (no markdown fences, no commentary before or after).",
@@ -1231,18 +1252,9 @@ ipcMain.handle("iptv-lyrics-gemini-unified-fetch", async (_evt, rawPayload) => {
     "If you are not confident you have the correct official lyrics, set ok:false.",
     "Do not exceed 120 pairs. No LRC timestamps in strings. Do not quote or invent full extra lyrics in meaning.",
   ].join(" ");
-  const user = [
-    `Library display name: ${displayName}`,
-    `Artist from file tags (ID3 / FLAC Vorbis / MP4): ${metaArtist || "unknown"}`,
-    `Title from file tags: ${metaTitle || "unknown"}`,
-    metaAlbum ? `Album from file tags: ${metaAlbum}` : "",
-    `Approximate duration (seconds): ${durationSec != null ? String(durationSec) : "unknown"}`,
-    "",
-    "Use ONLY the tagged artist and title above to identify the song (do not invent a different artist or track from the filename alone).",
+  const user = buildLyricsIdentityUserPrompt(p, [
     "Find the best-matching official lyrics, translate each line to English, and include a concise explanation of what the song is about.",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ]);
   const purpose = "lyrics find + translate + meaning (Google Gemini)";
   try {
     const rawText = await postGeminiGenerateContent(system, user, purpose, {
@@ -1896,37 +1908,207 @@ function getBundledFfmpegPath() {
   }
 }
 
-function runFfmpeg(ffmpegPath, args) {
+function attachFfmpegStderr(child) {
   const MAX_STDERR_BYTES = 256 * 1024;
-  return new Promise((resolve, reject) => {
-    let stderrSize = 0;
-    const stderrChunks = [];
-    const child = spawn(ffmpegPath, args, { windowsHide: process.platform === "win32" });
-    child.stderr?.on("data", (d) => {
-      if (stderrSize >= MAX_STDERR_BYTES) return;
-      stderrChunks.push(d);
-      stderrSize += d.length;
-    });
+  let stderrSize = 0;
+  const stderrChunks = [];
+  child.stderr?.on("data", (d) => {
+    if (stderrSize >= MAX_STDERR_BYTES) return;
+    stderrChunks.push(d);
+    stderrSize += d.length;
+  });
+  return () =>
+    Buffer.concat(stderrChunks)
+      .toString("utf8")
+      .replace(/\r/g, "")
+      .trim()
+      .slice(-1400);
+}
+
+function spawnFfmpegProcess(ffmpegPath, args) {
+  const child = spawn(ffmpegPath, args, { windowsHide: process.platform === "win32" });
+  const readStderrTail = attachFfmpegStderr(child);
+  const done = new Promise((resolve, reject) => {
     child.on("error", reject);
     child.on("close", (code) => {
       if (code === 0) resolve();
       else {
-        const tail = Buffer.concat(stderrChunks)
-          .toString("utf8")
-          .replace(/\r/g, "")
-          .trim()
-          .slice(-1400);
+        const tail = readStderrTail();
         reject(new Error(tail ? `ffmpeg exited ${code}: ${tail}` : `ffmpeg exited with code ${code}`));
       }
     });
   });
+  done.catch(() => {});
+  return { child, done, readStderrTail };
+}
+
+function runFfmpeg(ffmpegPath, args) {
+  const { done } = spawnFfmpegProcess(ffmpegPath, args);
+  return done;
+}
+
+const whisperStt = require("./whisperStt.cjs");
+whisperStt.initWhisperStt({
+  app,
+  getFfmpegPath: getBundledFfmpegPath,
+  runFfmpeg: (ffmpegPath, args) => runFfmpeg(ffmpegPath, args),
+});
+
+function sleepMs(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function mp4FileLooksPlayable(outPath) {
+  const fsp = fs.promises;
+  try {
+    const st = await fsp.stat(outPath);
+    if (st.size < 262_144) return false;
+    const fh = await fsp.open(outPath, "r");
+    try {
+      const readLen = Math.min(st.size, 524_288);
+      const buf = Buffer.alloc(readLen);
+      await fh.read(buf, 0, readLen, 0);
+      const head = buf.toString("latin1");
+      const hasFtyp = head.includes("ftyp");
+      const hasIndex = head.includes("moov") || head.includes("moof");
+      return hasFtyp && hasIndex;
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** Wait until fragmented MP4 has a moov/ftyp and enough data to start `<video>` while ffmpeg still runs. */
+async function waitForPlayableMp4File(outPath, child, timeoutMs) {
+  const start = Date.now();
+  let closedCode = null;
+  child.once("close", (code) => {
+    closedCode = code;
+  });
+  while (Date.now() - start < timeoutMs) {
+    if (closedCode != null && closedCode !== 0) {
+      throw new Error(`ffmpeg exited ${closedCode} before playback was ready.`);
+    }
+    if (await mp4FileLooksPlayable(outPath)) return;
+    await sleepMs(400);
+  }
+  throw new Error(
+    "Timed out preparing MKV for playback (the stream may be slow or blocked). Try again in a moment."
+  );
+}
+
+/** Wait until FFmpeg has written an HLS playlist plus at least one playable segment. */
+async function waitForPlayableHls(hlsDir, child, timeoutMs) {
+  const playlistPath = path.join(hlsDir, "index.m3u8");
+  const start = Date.now();
+  let closedCode = null;
+  if (child) {
+    child.once("close", (code) => {
+      closedCode = code;
+    });
+  }
+  while (Date.now() - start < timeoutMs) {
+    if (closedCode != null && closedCode !== 0) {
+      throw new Error(`ffmpeg exited ${closedCode} before HLS playback was ready.`);
+    }
+    try {
+      const pst = await fs.promises.stat(playlistPath);
+      if (pst.size > 16) {
+        const text = await fs.promises.readFile(playlistPath, "utf8");
+        if (text.includes("#EXTINF")) {
+          const names = await fs.promises.readdir(hlsDir);
+          for (const name of names) {
+            if (!/^seg\d+\.ts$/i.test(name)) continue;
+            const segSt = await fs.promises.stat(path.join(hlsDir, name));
+            if (segSt.size > 48_000) return;
+          }
+        }
+      }
+    } catch {
+      /* not ready yet */
+    }
+    await sleepMs(400);
+  }
+  throw new Error(
+    "Timed out preparing MKV for playback (the stream may be slow or blocked). Try again in a moment."
+  );
 }
 
 const mkvPrepareInFlight = new Map();
+const mkvPrepareChildren = new Map();
+/** Active or recently finished MKV remux jobs — used to serve growing MP4 over HTTP Range (file:// freezes size). */
+const mkvPlaybackSessions = new Map();
+
+function mkvCacheDir() {
+  return path.join(app.getPath("temp"), "rj-iptv-mkv-cache");
+}
+
+function mkvCacheFilePath(cacheKey) {
+  const key = String(cacheKey ?? "").trim();
+  if (!/^[a-f0-9]{48}$/i.test(key)) return null;
+  const fp = path.join(mkvCacheDir(), `${key}.mp4`);
+  const cacheResolved = path.resolve(mkvCacheDir());
+  const fileResolved = path.resolve(fp);
+  if (fileResolved !== cacheResolved && !fileResolved.startsWith(`${cacheResolved}${path.sep}`)) return null;
+  return fileResolved;
+}
+
+function mkvCacheHlsDir(cacheKey) {
+  const key = String(cacheKey ?? "").trim();
+  if (!/^[a-f0-9]{48}$/i.test(key)) return null;
+  const dir = path.join(mkvCacheDir(), key);
+  const cacheResolved = path.resolve(mkvCacheDir());
+  const dirResolved = path.resolve(dir);
+  if (dirResolved !== cacheResolved && !dirResolved.startsWith(`${cacheResolved}${path.sep}`)) return null;
+  return dirResolved;
+}
+
+function mkvHlsFilePath(cacheKey, fileName) {
+  const dir = mkvCacheHlsDir(cacheKey);
+  if (!dir) return null;
+  const base = path.basename(String(fileName ?? ""));
+  if (base !== "index.m3u8" && !/^seg\d+\.ts$/i.test(base)) return null;
+  const fp = path.join(dir, base);
+  if (!path.resolve(fp).startsWith(`${dir}${path.sep}`)) return null;
+  return fp;
+}
+
+function mkvHttpHlsPlayUrl(cacheKey) {
+  const origin = streamProxyOriginsForIpc?.[0];
+  const token = streamProxySessionToken;
+  const key = String(cacheKey ?? "").trim();
+  if (!origin || !token || !/^[a-f0-9]{48}$/i.test(key)) return null;
+  const base = String(origin).replace(/\/$/, "");
+  const qs = new URLSearchParams({ token });
+  return `${base}/__mkv-playback/${key}/index.m3u8?${qs.toString()}`;
+}
+
+function resolveMkvPlaybackPlayUrl(cacheKey, outPath, streaming) {
+  if (streaming) {
+    const httpUrl = mkvHttpHlsPlayUrl(cacheKey);
+    if (httpUrl) return httpUrl;
+  }
+  return pathToFileURL(outPath).href;
+}
+
+function stopMkvPrepareChild(cacheKey) {
+  const child = mkvPrepareChildren.get(cacheKey);
+  if (!child) return;
+  mkvPrepareChildren.delete(cacheKey);
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    /* noop */
+  }
+}
+
+const MKV_MP4_FRAG_FLAGS = ["-movflags", "frag_keyframe+empty_moov+default_base_moof"];
 const MKV_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 
 async function cleanupMkvCache() {
-  const cacheDir = path.join(app.getPath("temp"), "rj-iptv-mkv-cache");
+  const cacheDir = mkvCacheDir();
   let entries;
   try {
     entries = await fs.promises.readdir(cacheDir, { withFileTypes: true });
@@ -1935,13 +2117,32 @@ async function cleanupMkvCache() {
   }
   const files = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".mp4")) continue;
-    const fp = path.join(cacheDir, entry.name);
-    try {
-      const st = await fs.promises.stat(fp);
-      files.push({ fp, size: st.size, mtimeMs: st.mtimeMs });
-    } catch {
-      /* ignore missing cache files */
+    if (entry.isFile() && entry.name.endsWith(".mp4")) {
+      const fp = path.join(cacheDir, entry.name);
+      try {
+        const st = await fs.promises.stat(fp);
+        files.push({ fp, size: st.size, mtimeMs: st.mtimeMs, isDir: false });
+      } catch {
+        /* ignore */
+      }
+    } else if (entry.isDirectory() && /^[a-f0-9]{48}$/i.test(entry.name)) {
+      const dir = path.join(cacheDir, entry.name);
+      try {
+        const st = await fs.promises.stat(dir);
+        let dirSize = 0;
+        const inner = await fs.promises.readdir(dir, { withFileTypes: true });
+        for (const f of inner) {
+          if (!f.isFile()) continue;
+          try {
+            dirSize += (await fs.promises.stat(path.join(dir, f.name))).size;
+          } catch {
+            /* ignore */
+          }
+        }
+        files.push({ fp: dir, size: dirSize, mtimeMs: st.mtimeMs, isDir: true });
+      } catch {
+        /* ignore */
+      }
     }
   }
   let total = files.reduce((sum, file) => sum + file.size, 0);
@@ -1950,7 +2151,11 @@ async function cleanupMkvCache() {
   for (const file of files) {
     if (total <= MKV_CACHE_MAX_BYTES * 0.8) break;
     try {
-      await fs.promises.unlink(file.fp);
+      if (file.isDir) {
+        await fs.promises.rm(file.fp, { recursive: true, force: true });
+      } else {
+        await fs.promises.unlink(file.fp);
+      }
       total -= file.size;
     } catch {
       /* best-effort cache cleanup */
@@ -1958,65 +2163,8 @@ async function cleanupMkvCache() {
   }
 }
 
-/**
- * Matroska (.mkv) often uses codecs Chromium cannot decode (HEVC, DTS, etc.). Remux or transcode to H.264/AAC MP4
- * via bundled ffmpeg-static (first open may take a while; result is cached under the user temp folder).
- */
-ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
-  const fileUrl = String(fileUrlRaw ?? "").trim();
-  if (!/^file:/i.test(fileUrl)) {
-    return { playUrl: fileUrl, mimeType: "video/mp4", usedTranscode: false };
-  }
-  let inPath;
-  try {
-    inPath = fileURLToPath(fileUrl);
-  } catch {
-    throw new Error("Invalid file URL.");
-  }
-  const ext = path.extname(inPath).toLowerCase();
-  if (ext !== ".mkv" && ext !== ".mka") {
-    return { playUrl: fileUrl, mimeType: undefined, usedTranscode: false };
-  }
-
-  const ffmpegPath = getBundledFfmpegPath();
-  if (!ffmpegPath) {
-    throw new Error(
-      "FFmpeg is not bundled with this app. MKV playback needs a packaged desktop build with ffmpeg-static."
-    );
-  }
-
+async function remuxMkvInputToCachedMp4(ffmpegPath, baseArgs, outPath, opts = {}) {
   const fsp = fs.promises;
-  let st;
-  try {
-    st = await fsp.stat(inPath);
-  } catch {
-    throw new Error("Could not read the video file from disk.");
-  }
-  if (!st.isFile() || st.size === 0) throw new Error("Video file is missing or empty.");
-
-  const fpNorm = assertUserAccessibleMediaPath(inPath);
-  const cacheKey = crypto
-    .createHash("sha256")
-    .update(`${fpNorm}\0${st.size}\0${Number(st.mtimeMs)}`)
-    .digest("hex")
-    .slice(0, 48);
-  const cacheDir = path.join(app.getPath("temp"), "rj-iptv-mkv-cache");
-  await fsp.mkdir(cacheDir, { recursive: true });
-  const outPath = path.join(cacheDir, `${cacheKey}.mp4`);
-
-  try {
-    const ost = await fsp.stat(outPath);
-    if (ost.size > 32_000) {
-      return { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true, fromCache: true };
-    }
-  } catch {
-    /* build */
-  }
-
-  const inflight = mkvPrepareInFlight.get(cacheKey);
-  if (inflight) return inflight;
-
-  const work = (async () => {
   const tryUnlink = async (p) => {
     try {
       await fsp.unlink(p);
@@ -2025,17 +2173,14 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     }
   };
 
-  await tryUnlink(outPath);
-
-  const baseArgs = ["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i", fpNorm];
-
-  const copyWithAudio = ["-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-movflags", "+faststart"];
-  const copyVideoOnly = ["-map", "0:v:0", "-c", "copy", "-an", "-movflags", "+faststart"];
+  const movFlags = ["-movflags", "+faststart"];
+  const copyWithAudio = ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", ...movFlags];
+  const copyVideoOnly = ["-map", "0:v:0?", "-c", "copy", "-an", ...movFlags];
   const x264aac = [
     "-map",
-    "0:v:0",
+    "0:v:0?",
     "-map",
-    "0:a:0",
+    "0:a:0?",
     "-c:v",
     "libx264",
     "-preset",
@@ -2050,39 +2195,354 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     "192k",
     "-ac",
     "2",
-    "-movflags",
-    "+faststart",
+    ...movFlags,
   ];
-  const x264an = ["-map", "0:v:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-an", "-movflags", "+faststart"];
+  const x264an = ["-map", "0:v:0?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-an", ...movFlags];
 
-  const tryEncode = async (extraArgs) => {
-    await tryUnlink(outPath);
-    await runFfmpeg(ffmpegPath, [...baseArgs, ...extraArgs, outPath]);
-  };
+  const encodeAttempts = [
+    { extra: copyWithAudio, usedTranscode: false, remuxed: true },
+    { extra: copyVideoOnly, usedTranscode: false, remuxed: true },
+    { extra: x264aac, usedTranscode: true, remuxed: false },
+    { extra: x264an, usedTranscode: true, remuxed: false },
+  ];
 
-  let result;
-  try {
-    await tryEncode(copyWithAudio);
-    result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
-  } catch {
+  let lastErr = null;
+  for (const attempt of encodeAttempts) {
     await tryUnlink(outPath);
+    const args = [...baseArgs, ...attempt.extra, outPath];
     try {
-      await tryEncode(copyVideoOnly);
-      result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: false, remuxed: true };
-    } catch {
-      await tryUnlink(outPath);
-      try {
-        await tryEncode(x264aac);
-        result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
-      } catch {
-        await tryUnlink(outPath);
-        await tryEncode(x264an);
-        result = { playUrl: pathToFileURL(outPath).href, mimeType: "video/mp4", usedTranscode: true };
-      }
+      await runFfmpeg(ffmpegPath, args);
+      return {
+        playUrl: pathToFileURL(outPath).href,
+        mimeType: "video/mp4",
+        playbackFormat: "mp4",
+        usedTranscode: attempt.usedTranscode,
+        remuxed: attempt.remuxed,
+      };
+    } catch (e) {
+      lastErr = e;
     }
   }
-  void cleanupMkvCache();
-  return result;
+
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Could not prepare MKV for playback.");
+}
+
+/** Remote IPTV VOD: remux to growing HLS (hls.js) — avoids fragmented MP4 duration caps in `<video>`. */
+async function remuxMkvInputToHls(ffmpegPath, baseArgs, hlsDir, opts = {}) {
+  const fsp = fs.promises;
+  const resetHlsDir = async () => {
+    try {
+      await fsp.rm(hlsDir, { recursive: true, force: true });
+    } catch {
+      /* noop */
+    }
+    await fsp.mkdir(hlsDir, { recursive: true });
+  };
+
+  const hlsTail = [
+    "-f",
+    "hls",
+    "-hls_time",
+    "6",
+    "-hls_list_size",
+    "0",
+    "-hls_flags",
+    "independent_segments+append_list+omit_endlist",
+    "-hls_segment_filename",
+    path.join(hlsDir, "seg%05d.ts"),
+    path.join(hlsDir, "index.m3u8"),
+  ];
+
+  const copyWithAudio = ["-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", ...hlsTail];
+  const copyVideoOnly = ["-map", "0:v:0?", "-c", "copy", "-an", ...hlsTail];
+  const x264aac = [
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "21",
+    "-c:a",
+    "aac",
+    "-ar",
+    "48000",
+    "-b:a",
+    "192k",
+    "-ac",
+    "2",
+    ...hlsTail,
+  ];
+  const x264an = [
+    "-map",
+    "0:v:0?",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "21",
+    "-an",
+    ...hlsTail,
+  ];
+
+  const encodeAttempts = [
+    { extra: copyWithAudio, usedTranscode: false, remuxed: true },
+    { extra: copyVideoOnly, usedTranscode: false, remuxed: true },
+    { extra: x264aac, usedTranscode: true, remuxed: false },
+    { extra: x264an, usedTranscode: true, remuxed: false },
+  ];
+
+  let lastErr = null;
+  const cacheKey = opts.cacheKey;
+
+  for (const attempt of encodeAttempts) {
+    await resetHlsDir();
+    const args = [...baseArgs, ...attempt.extra];
+    if (cacheKey) stopMkvPrepareChild(cacheKey);
+    const { child, done } = spawnFfmpegProcess(ffmpegPath, args);
+    if (cacheKey) {
+      mkvPrepareChildren.set(cacheKey, child);
+      mkvPlaybackSessions.set(cacheKey, { hlsDir, child });
+    }
+    try {
+      await waitForPlayableHls(hlsDir, child, opts.prepareTimeoutMs ?? 120_000);
+      void done.finally(() => {
+        if (cacheKey) {
+          mkvPrepareChildren.delete(cacheKey);
+          const session = mkvPlaybackSessions.get(cacheKey);
+          if (session) session.child = null;
+        }
+        void cleanupMkvCache();
+      });
+      const httpPlayUrl = cacheKey ? mkvHttpHlsPlayUrl(cacheKey) : null;
+      if (!httpPlayUrl || !/^https?:\/\//i.test(httpPlayUrl)) {
+        throw new Error("MKV HLS playback URL is not ready (restart the desktop app).");
+      }
+      return {
+        playUrl: httpPlayUrl,
+        mimeType: "application/vnd.apple.mpegurl",
+        playbackFormat: "hls",
+        usedTranscode: attempt.usedTranscode,
+        remuxed: attempt.remuxed,
+        streaming: true,
+      };
+    } catch (e) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* noop */
+      }
+      if (cacheKey) mkvPrepareChildren.delete(cacheKey);
+      lastErr = e;
+    }
+  }
+
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Could not prepare MKV for playback.");
+}
+
+function upstreamUrlFromProxyInput(inputUrl) {
+  try {
+    const u = new URL(inputUrl);
+    if (u.pathname === "/__proxy/stream") {
+      const inner = u.searchParams.get("url");
+      if (inner && /^https?:\/\//i.test(inner)) return inner.trim();
+    }
+  } catch {
+    /* noop */
+  }
+  return String(inputUrl ?? "").trim();
+}
+
+/** Same-origin proxy so FFmpeg can read IPTV hosts that block direct desktop fetches. */
+function localProxyStreamUrl(upstreamUrl) {
+  if (!/^https?:\/\//i.test(upstreamUrl)) return upstreamUrl;
+  const origin = streamProxyOriginsForIpc?.[0];
+  const token = streamProxySessionToken;
+  if (!origin || !token) return upstreamUrl;
+  const base = String(origin).replace(/\/$/, "");
+  const qs = new URLSearchParams({ url: upstreamUrl, token });
+  return `${base}/__proxy/stream?${qs.toString()}`;
+}
+
+function mkvRemoteInputArgs(inputUrl, headerForUrl) {
+  const headersTarget = headerForUrl || inputUrl;
+  return [
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel",
+    "warning",
+    "-y",
+    "-fflags",
+    "+genpts",
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "5",
+    "-probesize",
+    "32M",
+    "-analyzeduration",
+    "10M",
+    "-headers",
+    `${ffmpegHeaderLinesForUrl(headersTarget)}\r\n`,
+    "-i",
+    inputUrl,
+  ];
+}
+
+/**
+ * Matroska (.mkv) often uses codecs Chromium cannot decode (HEVC, DTS, AC-3, etc.). Remux or transcode to H.264/AAC MP4
+ * via bundled ffmpeg-static (first open may take a while; result is cached under the user temp folder).
+ * Supports local `file://` paths and remote `http(s)://` IPTV VOD links.
+ */
+ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
+  const sourceUrl =
+    fileUrlRaw && typeof fileUrlRaw === "object" && typeof fileUrlRaw.url === "string"
+      ? String(fileUrlRaw.url).trim()
+      : String(fileUrlRaw ?? "").trim();
+  if (!sourceUrl) throw new Error("Missing video URL.");
+
+  const isFile = /^file:/i.test(sourceUrl);
+  const upstreamUrl = isFile ? sourceUrl : upstreamUrlFromProxyInput(sourceUrl);
+  const isRemote = /^https?:\/\//i.test(upstreamUrl);
+  if (!isFile && !isRemote) {
+    return { playUrl: sourceUrl, mimeType: undefined, usedTranscode: false };
+  }
+
+  let ext = "";
+  let inPath = null;
+  if (isFile) {
+    try {
+      inPath = fileURLToPath(sourceUrl);
+    } catch {
+      throw new Error("Invalid file URL.");
+    }
+    ext = path.extname(inPath).toLowerCase();
+  } else {
+    try {
+      ext = path.extname(new URL(upstreamUrl).pathname).toLowerCase();
+    } catch {
+      throw new Error("Invalid stream URL.");
+    }
+  }
+
+  let pathname = "";
+  try {
+    pathname = isFile ? inPath.replace(/\\/g, "/").toLowerCase() : new URL(upstreamUrl).pathname.toLowerCase();
+  } catch {
+    pathname = "";
+  }
+  const isXtreamVod = /\/(movie|series)\//i.test(pathname);
+  const nativeBrowserExt = new Set([".mp4", ".webm", ".m4v", ".mov"]);
+  const needsRemux =
+    ext === ".mkv" ||
+    ext === ".mka" ||
+    (isXtreamVod && !nativeBrowserExt.has(ext) && !/\.m3u8$/i.test(ext));
+
+  if (!needsRemux) {
+    return { playUrl: sourceUrl, mimeType: undefined, usedTranscode: false };
+  }
+
+  const ffmpegPath = getBundledFfmpegPath();
+  if (!ffmpegPath) {
+    throw new Error(
+      "FFmpeg is not bundled with this app. MKV playback needs a packaged desktop build with ffmpeg-static."
+    );
+  }
+
+  const fsp = fs.promises;
+  let cacheKey;
+  if (isFile) {
+    let st;
+    try {
+      st = await fsp.stat(inPath);
+    } catch {
+      throw new Error("Could not read the video file from disk.");
+    }
+    if (!st.isFile() || st.size === 0) throw new Error("Video file is missing or empty.");
+    const fpNorm = assertUserAccessibleMediaPath(inPath);
+    cacheKey = crypto
+      .createHash("sha256")
+      .update(`${fpNorm}\0${st.size}\0${Number(st.mtimeMs)}`)
+      .digest("hex")
+      .slice(0, 48);
+  } else {
+    cacheKey = crypto.createHash("sha256").update(upstreamUrl).digest("hex").slice(0, 48);
+  }
+
+  const cacheDir = mkvCacheDir();
+  await fsp.mkdir(cacheDir, { recursive: true });
+  const outPath = path.join(cacheDir, `${cacheKey}.mp4`);
+  const hlsDir = mkvCacheHlsDir(cacheKey);
+
+  if (isRemote && hlsDir) {
+    try {
+      const playlistPath = path.join(hlsDir, "index.m3u8");
+      const pst = await fsp.stat(playlistPath);
+      if (pst.size > 16) {
+        const names = await fsp.readdir(hlsDir);
+        if (names.some((n) => /^seg\d+\.ts$/i.test(n))) {
+          const httpUrl = mkvHttpHlsPlayUrl(cacheKey);
+          if (httpUrl) {
+            return {
+              playUrl: httpUrl,
+              mimeType: "application/vnd.apple.mpegurl",
+              playbackFormat: "hls",
+              usedTranscode: false,
+              fromCache: true,
+              remuxed: true,
+            };
+          }
+        }
+      }
+    } catch {
+      /* build HLS */
+    }
+  }
+
+  if (!isRemote) {
+    try {
+      const ost = await fsp.stat(outPath);
+      if (ost.size > 32_000) {
+        return {
+          playUrl: pathToFileURL(outPath).href,
+          mimeType: "video/mp4",
+          playbackFormat: "mp4",
+          usedTranscode: true,
+          fromCache: true,
+        };
+      }
+    } catch {
+      /* build MP4 */
+    }
+  }
+
+  const inflight = mkvPrepareInFlight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const work = (async () => {
+    const ffmpegInputUrl = isFile ? assertUserAccessibleMediaPath(inPath) : localProxyStreamUrl(upstreamUrl);
+    const baseArgs = isFile
+      ? ["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i", ffmpegInputUrl]
+      : mkvRemoteInputArgs(ffmpegInputUrl, upstreamUrl);
+    if (isRemote && hlsDir) {
+      return remuxMkvInputToHls(ffmpegPath, baseArgs, hlsDir, {
+        cacheKey,
+        prepareTimeoutMs: 120_000,
+      });
+    }
+    const result = await remuxMkvInputToCachedMp4(ffmpegPath, baseArgs, outPath, { cacheKey });
+    void cleanupMkvCache();
+    return result;
   })();
 
   mkvPrepareInFlight.set(cacheKey, work);
@@ -2839,6 +3299,38 @@ ipcMain.handle("iptv-neural-tts-synthesize", async (_evt, rawPayload) => {
   return await neuralTtsInFlight.get(inFlightKey);
 });
 
+/** Desktop: local Whisper model status for live radio captions. */
+ipcMain.handle("iptv-whisper-status", async () => whisperStt.getWhisperStatus());
+
+/** Desktop: load Whisper ONNX model (downloads on first run). */
+ipcMain.handle("iptv-whisper-warmup", async () => whisperStt.warmupWhisper());
+
+/** Desktop: transcribe Float32 PCM mono @ 16 kHz (low-latency live captions). */
+ipcMain.handle("iptv-whisper-transcribe-pcm", async (_evt, rawBuf) => {
+  if (!rawBuf) return { ok: false, error: "No audio data." };
+  if (rawBuf instanceof ArrayBuffer) return whisperStt.transcribePcmFloat32(rawBuf);
+  if (ArrayBuffer.isView(rawBuf)) {
+    return whisperStt.transcribePcmFloat32(
+      rawBuf.buffer.slice(rawBuf.byteOffset, rawBuf.byteOffset + rawBuf.byteLength)
+    );
+  }
+  return { ok: false, error: "Invalid PCM buffer." };
+});
+
+/** Desktop: transcribe one WebM/OGG chunk (legacy MediaRecorder path). */
+ipcMain.handle("iptv-whisper-transcribe-chunk", async (_evt, rawBuf) => {
+  if (!rawBuf) return { ok: false, error: "No audio data." };
+  let buf = rawBuf;
+  if (ArrayBuffer.isView(rawBuf)) {
+    buf = Buffer.from(rawBuf.buffer, rawBuf.byteOffset, rawBuf.byteLength);
+  } else if (rawBuf instanceof ArrayBuffer) {
+    buf = Buffer.from(rawBuf);
+  } else if (!Buffer.isBuffer(rawBuf)) {
+    return { ok: false, error: "Invalid audio buffer." };
+  }
+  return whisperStt.transcribeWebmChunk(buf);
+});
+
 /** Reveal the recorded file in Finder / File Explorer / file manager. */
 ipcMain.handle("iptv-show-record-in-folder", async (_evt, rawPath) => {
   const resolved = assertAllowedRecordRevealPath(rawPath);
@@ -2850,6 +3342,14 @@ app.on("before-quit", () => {
   for (const id of [...streamRecordings.keys()]) {
     teardownRecording(id, true);
   }
+  for (const s of staticServers) {
+    try {
+      s.close();
+    } catch {
+      /* noop */
+    }
+  }
+  staticServers = [];
 });
 
 app.on("certificate-error", (event, _webContents, url, _error, _certificate, callback) => {
@@ -2958,6 +3458,139 @@ function distDir() {
 
 function assertStreamProxyTarget(raw) {
   return assertSafeFetchUrl(raw, "target URL");
+}
+
+async function waitForMkvHlsFile(filePath, child, maxWaitMs) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (child && child.exitCode != null && child.exitCode !== 0) {
+      throw new Error(`ffmpeg exited ${child.exitCode} while preparing playback.`);
+    }
+    try {
+      const st = await fs.promises.stat(filePath);
+      if (st.size > 0) return st;
+      if (child && child.exitCode === 0) return st;
+    } catch (e) {
+      if (e && e.code !== "ENOENT") throw e;
+    }
+    await sleepMs(180);
+  }
+  throw new Error("Timed out waiting for remuxed video data.");
+}
+
+async function tryServeMkvPlayback(req, res) {
+  let u;
+  try {
+    u = new URL(req.url || "/", "http://127.0.0.1");
+  } catch {
+    return false;
+  }
+
+  const mHls = u.pathname.match(/^\/__mkv-playback\/([a-f0-9]{48})\/(index\.m3u8|seg\d+\.ts)$/i);
+  const mMp4 = u.pathname.match(/^\/__mkv-playback\/([a-f0-9]{48})\.mp4$/i);
+  const cacheKey = mHls?.[1] ?? mMp4?.[1];
+  if (!cacheKey) return false;
+
+  try {
+    assertStreamProxySessionToken(req.url || "/");
+  } catch (e) {
+    res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" }).end(e instanceof Error ? e.message : "Forbidden");
+    return true;
+  }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+      "Access-Control-Allow-Headers": req.headers["access-control-request-headers"] || "Range",
+      "Access-Control-Max-Age": "86400",
+    });
+    res.end();
+    return true;
+  }
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { "Content-Type": "text/plain; charset=utf-8" }).end("Method not allowed");
+    return true;
+  }
+
+  let filePath = null;
+  let contentType = "application/octet-stream";
+  if (mHls) {
+    filePath = mkvHlsFilePath(cacheKey, mHls[2]);
+    contentType = mHls[2].toLowerCase().endsWith(".m3u8")
+      ? "application/vnd.apple.mpegurl"
+      : "video/mp2t";
+  } else {
+    filePath = mkvCacheFilePath(cacheKey);
+    contentType = "video/mp4";
+  }
+  if (!filePath) {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" }).end("Not found");
+    return true;
+  }
+
+  const session = mkvPlaybackSessions.get(cacheKey);
+  const child = session?.child ?? null;
+
+  let st;
+  try {
+    st = await waitForMkvHlsFile(filePath, child, mHls ? 90_000 : 45_000);
+  } catch (e) {
+    res
+      .writeHead(503, { "Content-Type": "text/plain; charset=utf-8" })
+      .end(e instanceof Error ? e.message : "MKV playback not ready");
+    return true;
+  }
+
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "no-store",
+    "Content-Type": contentType,
+    "Content-Length": String(st.size),
+  };
+
+  if (req.method === "HEAD") {
+    res.writeHead(200, headers).end();
+    return true;
+  }
+
+  if (mHls && mHls[2].toLowerCase() === "index.m3u8") {
+    try {
+      let text = await fs.promises.readFile(filePath, "utf8");
+      const token = u.searchParams.get("token") || streamProxySessionToken || "";
+      const base = `${u.protocol}//${u.host}/__mkv-playback/${cacheKey}/`;
+      const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+      text = text
+        .split("\n")
+        .map((line) => {
+          const t = line.trim();
+          if (!/^seg\d+\.ts$/i.test(t)) return line;
+          return `${base}${t}${qs}`;
+        })
+        .join("\n");
+      const body = Buffer.from(text, "utf8");
+      headers["Content-Length"] = String(body.length);
+      res.writeHead(200, headers).end(body);
+      return true;
+    } catch (e) {
+      res
+        .writeHead(503, { "Content-Type": "text/plain; charset=utf-8" })
+        .end(e instanceof Error ? e.message : "MKV playlist not ready");
+      return true;
+    }
+  }
+
+  res.writeHead(200, headers);
+  const stream = fs.createReadStream(filePath);
+  stream.on("error", () => {
+    try {
+      res.destroy();
+    } catch {
+      /* noop */
+    }
+  });
+  stream.pipe(res);
+  return true;
 }
 
 async function tryServeStreamProxy(req, res) {
@@ -3146,7 +3779,9 @@ function safeFilePath(root, reqUrl) {
   } catch {
     return null;
   }
-  if (pathname === "/__proxy/stream" || pathname === "/__tap/stream") return null;
+  if (pathname === "/__proxy/stream" || pathname === "/__tap/stream" || pathname.startsWith("/__mkv-playback/")) {
+    return null;
+  }
   const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
   const full = path.resolve(path.join(root, rel));
   const rootResolved = path.resolve(root);
@@ -3158,12 +3793,110 @@ function safeFilePath(root, reqUrl) {
 /** Same origin each launch → browser localStorage for channels/favorites persists. */
 const STATIC_SERVER_PREFERRED_PORT = 48752;
 const STATIC_SERVER_PORT_TRIES = 40;
+/** Max offset for the second static server on the same primary attempt. */
+const STATIC_SERVER_SECOND_PORT_SPAN = 96;
+
+function iptvReservedPortEnd() {
+  return STATIC_SERVER_PREFERRED_PORT + STATIC_SERVER_PORT_TRIES - 1 + STATIC_SERVER_SECOND_PORT_SPAN;
+}
+
+function isTcpPortListening(port, host = "127.0.0.1") {
+  return new Promise((resolve) => {
+    const socket = nodeNet.connect({ port, host });
+    const done = (listening) => {
+      socket.removeAllListeners();
+      try {
+        socket.destroy();
+      } catch {
+        /* noop */
+      }
+      resolve(listening);
+    };
+    socket.setTimeout(400);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+  });
+}
+
+function killListenersOnPort(port) {
+  if (process.platform === "win32") {
+    try {
+      const out = execSync(`netstat -ano | findstr :${port}`, {
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      const pids = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        if (!/LISTENING/i.test(line)) continue;
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (/^\d+$/.test(pid)) pids.add(pid);
+      }
+      for (const pid of pids) {
+        if (pid === String(process.pid)) continue;
+        try {
+          execSync(`taskkill /PID ${pid} /F`, { stdio: "ignore" });
+        } catch {
+          /* noop */
+        }
+      }
+    } catch {
+      /* no listener */
+    }
+    return;
+  }
+  try {
+    const out = execSync(`lsof -tiTCP:${port} -sTCP:LISTEN`, {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    for (const pid of out.trim().split(/\s+/).filter(Boolean)) {
+      if (pid === String(process.pid)) continue;
+      try {
+        process.kill(Number(pid), "SIGTERM");
+      } catch {
+        try {
+          process.kill(Number(pid), "SIGKILL");
+        } catch {
+          /* noop */
+        }
+      }
+    }
+  } catch {
+    /* no listener */
+  }
+}
+
+/** Stop stale listeners in the IPTV port range (e.g. crashed Electron still holding 48752). */
+async function releaseIptvPortsBeforeStart() {
+  const start = STATIC_SERVER_PREFERRED_PORT;
+  const end = iptvReservedPortEnd();
+  const busy = [];
+  for (let port = start; port <= end; port++) {
+    if (await isTcpPortListening(port)) busy.push(port);
+  }
+  if (!busy.length) return;
+  console.warn(
+    `IPTV: freeing ${busy.length} reserved port(s) still listening: ${busy.slice(0, 6).join(", ")}${busy.length > 6 ? "…" : ""}`
+  );
+  for (const port of busy) {
+    killListenersOnPort(port);
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (!(await isTcpPortListening(STATIC_SERVER_PREFERRED_PORT))) return;
+    killListenersOnPort(STATIC_SERVER_PREFERRED_PORT);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
 
 function createStaticRequestHandler(root) {
   return (req, res) => {
     void (async () => {
       try {
         if (await tryServeStreamTap(req, res)) return;
+        if (await tryServeMkvPlayback(req, res)) return;
         if (await tryServeStreamProxy(req, res)) return;
       } catch (e) {
         if (!res.headersSent) {
@@ -3215,13 +3948,14 @@ function startStaticServers(root) {
   }
 
   return (async () => {
+    await releaseIptvPortsBeforeStart();
     streamProxySessionToken = crypto.randomBytes(32).toString("hex");
     for (let i = 0; i < STATIC_SERVER_PORT_TRIES; i++) {
       const port1 = STATIC_SERVER_PREFERRED_PORT + i;
       try {
         const first = await listenOnPort(port1);
         let second = null;
-        for (let k = 1; k <= 96; k++) {
+        for (let k = 1; k <= STATIC_SERVER_SECOND_PORT_SPAN; k++) {
           try {
             second = await listenOnPort(port1 + k);
             break;
@@ -3538,24 +4272,40 @@ async function createWindow() {
   });
 }
 
-app.whenReady().then(() => {
-  installElectronNetworkCompat();
-  installAppMenu();
-  return createWindow();
-});
-
-app.on("window-all-closed", () => {
-  for (const s of staticServers) {
-    try {
-      s.close();
-    } catch {
-      /* noop */
-    }
-  }
-  staticServers = [];
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
   app.quit();
-});
+} else {
+  app.on("second-instance", () => {
+    const windows = BrowserWindow.getAllWindows();
+    if (windows.length > 0) {
+      const win = windows[0];
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    } else if (app.isReady()) {
+      void createWindow();
+    }
+  });
 
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) void createWindow();
-});
+  app.whenReady().then(() => {
+    installElectronNetworkCompat();
+    installAppMenu();
+    return createWindow();
+  });
+
+  app.on("window-all-closed", () => {
+    for (const s of staticServers) {
+      try {
+        s.close();
+      } catch {
+        /* noop */
+      }
+    }
+    staticServers = [];
+    app.quit();
+  });
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
+  });
+}

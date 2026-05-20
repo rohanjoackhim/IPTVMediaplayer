@@ -271,6 +271,193 @@ function sortRows(rows: LibraryRow[]): LibraryRow[] {
   );
 }
 
+const UNKNOWN_ARTIST_KEY = "__unknown__";
+
+function artistKeyForRow(r: LibraryRow): string {
+  const artist = r.tagArtist?.trim();
+  return artist ? artist.toLowerCase() : UNKNOWN_ARTIST_KEY;
+}
+
+function artistLabelForRow(r: LibraryRow): string {
+  return r.tagArtist?.trim() || "Unknown artist";
+}
+
+type AudioListItem =
+  | { kind: "track"; row: LibraryRow }
+  | { kind: "group"; artistKey: string; artistLabel: string; rows: LibraryRow[] };
+
+function buildAudioListItems(rows: LibraryRow[]): AudioListItem[] {
+  const byArtist = new Map<string, LibraryRow[]>();
+  for (const row of rows) {
+    const key = artistKeyForRow(row);
+    const list = byArtist.get(key) ?? [];
+    list.push(row);
+    byArtist.set(key, list);
+  }
+
+  const groups: Extract<AudioListItem, { kind: "group" }>[] = [];
+  const singles: LibraryRow[] = [];
+
+  for (const [key, groupRows] of byArtist) {
+    if (groupRows.length > 1) {
+      const sorted = [...groupRows].sort((a, b) =>
+        a.track.name.localeCompare(b.track.name, undefined, { sensitivity: "base" })
+      );
+      groups.push({
+        kind: "group",
+        artistKey: key,
+        artistLabel: artistLabelForRow(sorted[0]!),
+        rows: sorted,
+      });
+    } else {
+      singles.push(groupRows[0]!);
+    }
+  }
+
+  groups.sort((a, b) =>
+    a.artistLabel.localeCompare(b.artistLabel, undefined, { sensitivity: "base" })
+  );
+  singles.sort((a, b) =>
+    a.track.name.localeCompare(b.track.name, undefined, { sensitivity: "base" })
+  );
+
+  const items: AudioListItem[] = [...groups];
+  for (const row of singles) {
+    items.push({ kind: "track", row });
+  }
+
+  return items;
+}
+
+type LibraryTrackRowProps = {
+  row: LibraryRow;
+  inArtistGroup?: boolean;
+  activeLeftId: string | null;
+  activeRightId: string | null;
+  splitView: boolean;
+  libraryPlaybackState: { trackId: string; paused: boolean } | null;
+  resumeAt: number | undefined;
+  busy: boolean;
+  onPlay: (r: LibraryRow) => void;
+  onPlayFromStart: (r: LibraryRow, ev: React.MouseEvent) => void;
+  onTogglePlayback: (r: LibraryRow, isActive: boolean, ev: React.MouseEvent) => void;
+  onRemove: (id: string, ev: React.MouseEvent) => void;
+};
+
+function LibraryTrackRow({
+  row: r,
+  inArtistGroup = false,
+  activeLeftId,
+  activeRightId,
+  splitView,
+  libraryPlaybackState,
+  resumeAt,
+  busy,
+  onPlay,
+  onPlayFromStart,
+  onTogglePlayback,
+  onRemove,
+}: LibraryTrackRowProps) {
+  const t = r.track;
+  const ch = channelFromLibraryTrack(t, r.url);
+  const leftOn = ch.id === activeLeftId;
+  const rightOn = splitView && ch.id === activeRightId;
+  const active = leftOn || rightOn;
+  const playback = libraryPlaybackState?.trackId === t.id ? libraryPlaybackState : null;
+  const isPlaying = active && playback?.paused !== true;
+  const isPaused = active && playback?.paused === true;
+  const rowClass =
+    active
+      ? `local-audio-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
+      : "local-audio-row";
+  const tagLine = inArtistGroup
+    ? r.tagTitle || ""
+    : r.tagArtist && r.tagTitle
+      ? `${r.tagArtist} — ${r.tagTitle}`
+      : r.tagTitle || r.tagArtist || "";
+  const rowTooltip =
+    r.tagsTooltip?.trim() ||
+    (tagLine ? `Tags: ${tagLine}` : "Reading embedded file tags…");
+
+  return (
+    <div key={t.id} className={rowClass} title={rowTooltip}>
+      <button
+        type="button"
+        className="local-audio-row-hit"
+        title={rowTooltip}
+        onClick={() => onPlay(r)}
+      >
+        {r.thumbUrl ? (
+          <img className="local-audio-thumb" src={r.thumbUrl} alt="" loading="lazy" />
+        ) : (
+          <span className="local-audio-icon" aria-hidden>
+            ♪
+          </span>
+        )}
+        <span className="local-audio-meta">
+          <span className="local-audio-name">{t.name}</span>
+          {tagLine ? <span className="local-audio-tag-line">{tagLine}</span> : null}
+        </span>
+      </button>
+      <div className="local-audio-row-actions" aria-label="Playback">
+        <button
+          type="button"
+          className="local-audio-pos-btn"
+          title="Start from beginning"
+          aria-label={`Start ${t.name} from beginning`}
+          disabled={busy}
+          onClick={(ev) => onPlayFromStart(r, ev)}
+        >
+          <span className="local-audio-pos-glyph" aria-hidden>
+            ↺
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`local-audio-pos-btn local-audio-pos-btn--resume${resumeAt != null || active ? " local-audio-pos-btn--has-time" : ""}`}
+          title={
+            isPlaying
+              ? "Pause song"
+              : isPaused
+                ? "Resume song"
+                : resumeAt != null
+                  ? `Resume at ${formatResume(resumeAt)}`
+                  : "Play song"
+          }
+          aria-label={
+            isPlaying
+              ? `Pause ${t.name}`
+              : isPaused
+                ? `Resume ${t.name}`
+                : resumeAt != null
+                  ? `Resume ${t.name} at ${formatResume(resumeAt)}`
+                  : `Play ${t.name}`
+          }
+          disabled={busy}
+          onClick={(ev) => onTogglePlayback(r, active, ev)}
+        >
+          <span className="local-audio-pos-glyph" aria-hidden>
+            {isPlaying ? "Ⅱ" : "▶"}
+          </span>
+          {resumeAt != null && !isPlaying ? (
+            <span className="local-audio-pos-time">{formatResume(resumeAt)}</span>
+          ) : null}
+        </button>
+      </div>
+      <button
+        type="button"
+        className="local-audio-del"
+        title="Remove from library"
+        aria-label={`Remove ${t.name}`}
+        disabled={busy}
+        onClick={(ev) => void onRemove(t.id, ev)}
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 function splitSpeechText(text: string): string[] {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
@@ -1823,6 +2010,36 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
     return m;
   }, [rows, resumeTick]);
 
+  const audioListItems = useMemo(() => buildAudioListItems(rows), [rows]);
+
+  const [collapsedArtistKeys, setCollapsedArtistKeys] = useState<Set<string>>(() => new Set());
+
+  const toggleArtistGroup = useCallback((artistKey: string) => {
+    setCollapsedArtistKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(artistKey)) next.delete(artistKey);
+      else next.add(artistKey);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const activeChannelId = activeLeftId ?? activeRightId;
+    if (!activeChannelId?.startsWith("audio-lib-")) return;
+    const trackId = activeChannelId.slice("audio-lib-".length);
+    for (const item of audioListItems) {
+      if (item.kind !== "group") continue;
+      if (!item.rows.some((r) => r.track.id === trackId)) continue;
+      setCollapsedArtistKeys((prev) => {
+        if (!prev.has(item.artistKey)) return prev;
+        const next = new Set(prev);
+        next.delete(item.artistKey);
+        return next;
+      });
+      break;
+    }
+  }, [activeLeftId, activeRightId, audioListItems]);
+
   const ebookResumeHints = useMemo(() => {
     const m = new Map<string, number>();
     for (const r of ebookRows) {
@@ -2098,103 +2315,69 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
               </div>
             );
           })}
-          {rows.map((r) => {
-            const t = r.track;
-            const ch = channelFromLibraryTrack(t, r.url);
-            const leftOn = ch.id === activeLeftId;
-            const rightOn = splitView && ch.id === activeRightId;
-            const active = leftOn || rightOn;
-            const playback = libraryPlaybackState?.trackId === t.id ? libraryPlaybackState : null;
-            const isPlaying = active && playback?.paused !== true;
-            const isPaused = active && playback?.paused === true;
-            const rowClass =
-              active
-                ? `local-audio-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
-                : "local-audio-row";
-            const resumeAt = resumeHints.get(t.id);
-            const tagLine =
-              r.tagArtist && r.tagTitle
-                ? `${r.tagArtist} — ${r.tagTitle}`
-                : r.tagTitle || r.tagArtist || "";
-            const rowTooltip =
-              r.tagsTooltip?.trim() ||
-              (tagLine ? `Tags: ${tagLine}` : "Reading embedded file tags…");
+          {audioListItems.map((item) => {
+            if (item.kind === "track") {
+              const r = item.row;
+              return (
+                <LibraryTrackRow
+                  key={r.track.id}
+                  row={r}
+                  activeLeftId={activeLeftId}
+                  activeRightId={activeRightId}
+                  splitView={splitView}
+                  libraryPlaybackState={libraryPlaybackState}
+                  resumeAt={resumeHints.get(r.track.id)}
+                  busy={busy}
+                  onPlay={playRow}
+                  onPlayFromStart={playFromStart}
+                  onTogglePlayback={toggleAudioTrackPlayback}
+                  onRemove={onRemove}
+                />
+              );
+            }
+
+            const collapsed = collapsedArtistKeys.has(item.artistKey);
+            const groupActive = item.rows.some((r) => {
+              const ch = channelFromLibraryTrack(r.track, r.url);
+              return ch.id === activeLeftId || (splitView && ch.id === activeRightId);
+            });
             return (
-              <div key={t.id} className={rowClass} title={rowTooltip}>
+              <section
+                key={`artist-${item.artistKey}`}
+                className={`local-audio-artist-group${collapsed ? " local-audio-artist-group--collapsed" : ""}${groupActive ? " local-audio-artist-group--active" : ""}`}
+              >
                 <button
                   type="button"
-                  className="local-audio-row-hit"
-                  title={rowTooltip}
-                  onClick={() => playRow(r)}
+                  className="local-audio-artist-header"
+                  aria-expanded={!collapsed}
+                  onClick={() => toggleArtistGroup(item.artistKey)}
                 >
-                  {r.thumbUrl ? (
-                    <img className="local-audio-thumb" src={r.thumbUrl} alt="" loading="lazy" />
-                  ) : (
-                    <span className="local-audio-icon" aria-hidden>
-                      ♪
-                    </span>
-                  )}
-                  <span className="local-audio-meta">
-                    <span className="local-audio-name">{t.name}</span>
-                    {tagLine ? <span className="local-audio-tag-line">{tagLine}</span> : null}
+                  <span className="local-audio-artist-chevron" aria-hidden>
+                    {collapsed ? "▶" : "▼"}
                   </span>
+                  <span className="local-audio-artist-name">{item.artistLabel}</span>
+                  <span className="local-audio-artist-count">{item.rows.length}</span>
                 </button>
-                <div className="local-audio-row-actions" aria-label="Playback">
-                  <button
-                    type="button"
-                    className="local-audio-pos-btn"
-                    title="Start from beginning"
-                    aria-label={`Start ${t.name} from beginning`}
-                    disabled={busy}
-                    onClick={(ev) => playFromStart(r, ev)}
-                  >
-                    <span className="local-audio-pos-glyph" aria-hidden>
-                      ↺
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`local-audio-pos-btn local-audio-pos-btn--resume${resumeAt != null || active ? " local-audio-pos-btn--has-time" : ""}`}
-                    title={
-                      isPlaying
-                        ? "Pause song"
-                        : isPaused
-                          ? "Resume song"
-                          : resumeAt != null
-                            ? `Resume at ${formatResume(resumeAt)}`
-                            : "Play song"
-                    }
-                    aria-label={
-                      isPlaying
-                        ? `Pause ${t.name}`
-                        : isPaused
-                          ? `Resume ${t.name}`
-                          : resumeAt != null
-                        ? `Resume ${t.name} at ${formatResume(resumeAt)}`
-                        : `Play ${t.name}`
-                    }
-                    disabled={busy}
-                    onClick={(ev) => toggleAudioTrackPlayback(r, active, ev)}
-                  >
-                    <span className="local-audio-pos-glyph" aria-hidden>
-                      {isPlaying ? "Ⅱ" : "▶"}
-                    </span>
-                    {resumeAt != null && !isPlaying ? (
-                      <span className="local-audio-pos-time">{formatResume(resumeAt)}</span>
-                    ) : null}
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="local-audio-del"
-                  title="Remove from library"
-                  aria-label={`Remove ${t.name}`}
-                  disabled={busy}
-                  onClick={(ev) => void onRemove(t.id, ev)}
-                >
-                  ×
-                </button>
-              </div>
+                {!collapsed
+                  ? item.rows.map((r) => (
+                      <LibraryTrackRow
+                        key={r.track.id}
+                        row={r}
+                        inArtistGroup
+                        activeLeftId={activeLeftId}
+                        activeRightId={activeRightId}
+                        splitView={splitView}
+                        libraryPlaybackState={libraryPlaybackState}
+                        resumeAt={resumeHints.get(r.track.id)}
+                        busy={busy}
+                        onPlay={playRow}
+                        onPlayFromStart={playFromStart}
+                        onTogglePlayback={toggleAudioTrackPlayback}
+                        onRemove={onRemove}
+                      />
+                    ))
+                  : null}
+              </section>
             );
           })}
           </>

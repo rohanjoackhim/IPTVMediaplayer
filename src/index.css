@@ -96,6 +96,7 @@ button {
 
   .channel-scroll,
   .radio-scroll,
+  .podcast-scroll,
   .local-audio-scroll,
   .ebook-player-text,
   .ebook-pdf-scroll,
@@ -109,6 +110,7 @@ button {
 /* Scrollbars — AD-style black accent */
 .channel-scroll,
 .radio-scroll,
+.podcast-scroll,
 .local-audio-scroll {
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.34) transparent;
@@ -116,12 +118,14 @@ button {
 
 .channel-scroll::-webkit-scrollbar,
 .radio-scroll::-webkit-scrollbar,
+.podcast-scroll::-webkit-scrollbar,
 .local-audio-scroll::-webkit-scrollbar {
   width: 8px;
 }
 
 .channel-scroll::-webkit-scrollbar-thumb,
 .radio-scroll::-webkit-scrollbar-thumb,
+.podcast-scroll::-webkit-scrollbar-thumb,
 .local-audio-scroll::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.28);
   border-radius: 99px;
@@ -131,6 +135,7 @@ button {
 
 .channel-scroll::-webkit-scrollbar-thumb:hover,
 .radio-scroll::-webkit-scrollbar-thumb:hover,
+.podcast-scroll::-webkit-scrollbar-thumb:hover,
 .local-audio-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 0, 0, 0.5);
   background-clip: padding-box;

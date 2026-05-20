@@ -120,3 +120,44 @@
   color: var(--danger);
   line-height: 1.4;
 }
+
+.radio-eq-popover-host {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.radio-eq-popover-panel {
+  min-width: 11rem;
+  max-width: min(320px, calc(100vw - 24px));
+}
+
+.radio-eq-popover-label {
+  font-size: 0.625rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.radio-eq-select--popover {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  font-size: 0.75rem;
+}
+
+.radio-eq-sliders--popover {
+  max-height: min(42vh, 280px);
+  overflow-x: auto;
+  overflow-y: auto;
+  padding: 4px 2px 0;
+  gap: 2px;
+}
+
+.radio-eq-band--popover {
+  min-width: 24px;
+}
+
+.radio-eq-band--popover input[type="range"] {
+  height: 64px;
+}

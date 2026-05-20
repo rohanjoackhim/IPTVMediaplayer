@@ -63,6 +63,10 @@ declare global {
         metaArtist?: string;
         metaTitle?: string;
         metaAlbum?: string;
+        sourceFileName?: string;
+        altArtist?: string;
+        altTitle?: string;
+        playerHeaderLabel?: string;
       }) => Promise<unknown>;
       /** Desktop: one-shot Gemini lyrics + meaning JSON. */
       lyricsGeminiUnifiedFetch: (payload: {
@@ -71,6 +75,10 @@ declare global {
         metaArtist?: string;
         metaTitle?: string;
         metaAlbum?: string;
+        sourceFileName?: string;
+        altArtist?: string;
+        altTitle?: string;
+        playerHeaderLabel?: string;
       }) => Promise<unknown>;
       /** Desktop: LLM song meaning / interpretation from artist + title (file tags). */
       lyricsSongMeaningFetch: (payload: {
@@ -119,9 +127,11 @@ declare global {
       ) => Promise<{
         playUrl: string;
         mimeType?: string;
+        playbackFormat?: "hls" | "mp4";
         usedTranscode: boolean;
         fromCache?: boolean;
         remuxed?: boolean;
+        streaming?: boolean;
       }>;
       startStreamRecord: (payload: {
         url: string;
@@ -180,6 +190,23 @@ declare global {
       }>;
       /** Desktop: cancel/supersede pending neural TTS synthesis. */
       cancelNeuralTts: () => Promise<{ ok: boolean }>;
+      /** Desktop: local Whisper STT status for live radio captions. */
+      whisperStatus: () => Promise<{
+        modelId: string;
+        ready: boolean;
+        loading: boolean;
+        error: string | null;
+      }>;
+      /** Desktop: load Whisper model (downloads on first use). */
+      whisperWarmup: () => Promise<{ ok: boolean; modelId?: string; error?: string }>;
+      /** Desktop: transcribe Float32 PCM @ 16 kHz (ArrayBuffer of float32 samples). */
+      whisperTranscribePcm: (
+        pcmArrayBuffer: ArrayBuffer
+      ) => Promise<{ ok: boolean; text?: string; error?: string }>;
+      /** Desktop: transcribe one MediaRecorder WebM chunk (legacy). */
+      whisperTranscribeChunk: (
+        audioWebm: ArrayBuffer
+      ) => Promise<{ ok: boolean; text?: string; error?: string }>;
       /** Desktop: open File Explorer with this file selected. */
       showRecordInFolder: (filePath: string) => Promise<{ ok: true }>;
     };

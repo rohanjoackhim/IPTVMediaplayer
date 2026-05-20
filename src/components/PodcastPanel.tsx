@@ -15,8 +15,8 @@ import {
 import { loadUiSession, saveUiSession, type PodcastListTabPersisted } from "../utils/uiSessionStorage";
 import "./PodcastPanel.css";
 
-const SHOW_ROW_H = 52;
-const EPISODE_ROW_H = 58;
+const SHOW_ROW_H = 42;
+const EPISODE_ROW_H = 42;
 const OVERSCAN = 12;
 const MEDIA_PLAYBACK_TOGGLE_EVENT = "iptv-media-playback-toggle";
 const MEDIA_PLAYBACK_STATE_EVENT = "iptv-media-playback-state";
@@ -82,6 +82,7 @@ export function PodcastPanel({
   const [mediaPlaybackState, setMediaPlaybackState] = useState<{ channelId: string; paused: boolean } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
   const countryCode = useMemo(() => {
     const match = PODCAST_COUNTRIES.find((c) => c.code === podcastCountry);
@@ -155,6 +156,7 @@ export function PodcastPanel({
   }, [shows, podcastListTab]);
 
   const filteredShows = useMemo(() => {
+    if (podcastListTab === "favorites") return tabFilteredShows;
     const q = query.trim().toLowerCase();
     if (!q) return tabFilteredShows;
     return tabFilteredShows.filter((s) => {
@@ -163,7 +165,7 @@ export function PodcastPanel({
       const genre = (s.primaryGenreName || "").toLowerCase();
       return title.includes(q) || author.includes(q) || genre.includes(q);
     });
-  }, [tabFilteredShows, query]);
+  }, [tabFilteredShows, query, podcastListTab]);
 
   const tabFilteredEpisodes = useMemo(() => {
     if (podcastListTab === "favorites") {
@@ -173,10 +175,11 @@ export function PodcastPanel({
   }, [episodeChannels, podcastListTab, favoriteUrls]);
 
   const filteredEpisodes = useMemo(() => {
+    if (podcastListTab === "favorites") return tabFilteredEpisodes;
     const q = episodeQuery.trim().toLowerCase();
     if (!q) return tabFilteredEpisodes;
     return tabFilteredEpisodes.filter(({ ep }) => ep.trackName.toLowerCase().includes(q));
-  }, [tabFilteredEpisodes, episodeQuery]);
+  }, [tabFilteredEpisodes, episodeQuery, podcastListTab]);
 
   const inEpisodeView = selectedShow != null;
   const rowH = inEpisodeView ? EPISODE_ROW_H : SHOW_ROW_H;
@@ -194,8 +197,19 @@ export function PodcastPanel({
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (el) setScrollTop(el.scrollTop);
+    if (!el || scrollRafRef.current != null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (scrollRef.current) setScrollTop(scrollRef.current.scrollTop);
+    });
   }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollRafRef.current != null) window.cancelAnimationFrame(scrollRafRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -290,7 +304,7 @@ export function PodcastPanel({
               </div>
             </div>
           </div>
-        ) : (
+        ) : podcastListTab !== "favorites" ? (
           <div className="podcast-filter-grid">
             <div className="podcast-filter-row">
               <div className="podcast-filter-head">
@@ -338,40 +352,46 @@ export function PodcastPanel({
               </select>
             </div>
           </div>
-        )}
-        <div className="podcast-search-row">
-          <input
-            className="podcast-search"
-            type="search"
-            placeholder={inEpisodeView ? "Search episodes in this show…" : "Search shows in this country…"}
-            value={inEpisodeView ? episodeQuery : query}
-            onChange={(e) => (inEpisodeView ? setEpisodeQuery(e.target.value) : setQuery(e.target.value))}
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {(inEpisodeView ? episodeQuery : query).trim() ? (
-            <button
-              type="button"
-              className="podcast-clear-search"
-              onClick={() => (inEpisodeView ? setEpisodeQuery("") : setQuery(""))}
-              title="Clear search"
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
+        ) : null}
+        {podcastListTab !== "favorites" ? (
+          <div className="podcast-search-row">
+            <input
+              className="podcast-search"
+              type="search"
+              placeholder={inEpisodeView ? "Search episodes in this show…" : "Search shows in this country…"}
+              value={inEpisodeView ? episodeQuery : query}
+              onChange={(e) => (inEpisodeView ? setEpisodeQuery(e.target.value) : setQuery(e.target.value))}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {(inEpisodeView ? episodeQuery : query).trim() ? (
+              <button
+                type="button"
+                className="podcast-clear-search"
+                onClick={() => (inEpisodeView ? setEpisodeQuery("") : setQuery(""))}
+                title="Clear search"
+              >
+                Clear
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div className={`podcast-status${showsErr || episodesErr ? " podcast-status--err" : ""}`}>
           {inEpisodeView
             ? episodesErr
               ? episodesErr
               : loadingEpisodes
                 ? `Loading episodes for ${selectedShow.collectionName}…`
-                : `${filtered.length.toLocaleString()} episode${filtered.length === 1 ? "" : "s"}${episodeQuery.trim() ? " (filtered)" : ""}`
+                : podcastListTab === "favorites"
+                  ? `${filtered.length.toLocaleString()} favorite episode${filtered.length === 1 ? "" : "s"} in this show`
+                  : `${filtered.length.toLocaleString()} episode${filtered.length === 1 ? "" : "s"}${episodeQuery.trim() ? " (filtered)" : ""}`
             : showsErr
               ? showsErr
               : loadingShows
                 ? `Loading ${genreName} podcasts in ${PODCAST_COUNTRIES.find((c) => c.code === countryCode)?.name ?? countryCode}…`
-                : `${filtered.length.toLocaleString()} show${filtered.length === 1 ? "" : "s"}${query.trim() ? " (filtered)" : ""}`}
+                : podcastListTab === "favorites"
+                  ? "Open a show, then use Favorites for starred episodes in that podcast."
+                  : `${filtered.length.toLocaleString()} show${filtered.length === 1 ? "" : "s"}${query.trim() ? " (filtered)" : ""}`}
         </div>
       </div>
 
@@ -390,7 +410,11 @@ export function PodcastPanel({
           role="tab"
           aria-selected={podcastListTab === "favorites"}
           className={`podcast-list-tab${podcastListTab === "favorites" ? " podcast-list-tab--active" : ""}`}
-          onClick={() => setPodcastListTab("favorites")}
+          onClick={() => {
+            setQuery("");
+            setEpisodeQuery("");
+            setPodcastListTab("favorites");
+          }}
         >
           Favorites{favoritesInView > 0 ? ` (${favoritesInView})` : ""}
         </button>
@@ -427,7 +451,7 @@ export function PodcastPanel({
                 const duration = formatPodcastDuration(ep.trackTimeMillis);
                 const date = formatPodcastDate(ep.releaseDate);
                 return (
-                  <div key={ep.trackId} className={rowClass} style={{ top, ["--row-h" as string]: `${rowH}px` }}>
+                  <div key={ep.trackId} className={rowClass} style={{ transform: `translateY(${top}px)` }}>
                     <button type="button" className="podcast-row-hit" onClick={() => onSelectEpisode(ch)}>
                       <PodcastArtwork url={ep.artworkUrl || selectedShow?.artworkUrl} label={ep.trackName} />
                       <span className="podcast-meta">
@@ -447,15 +471,17 @@ export function PodcastPanel({
                       >
                         {isPlaying ? "Ⅱ" : "▶"}
                       </button>
-                      <button
-                        type="button"
-                        className="podcast-remove-btn"
-                        title="Remove from list"
-                        aria-label={`Remove ${ch.name}`}
-                        onClick={(e) => removeEpisode(ep.trackId, e)}
-                      >
-                        ×
-                      </button>
+                      {podcastListTab !== "favorites" ? (
+                        <button
+                          type="button"
+                          className="podcast-remove-btn"
+                          title="Remove from list"
+                          aria-label={`Remove ${ch.name}`}
+                          onClick={(e) => removeEpisode(ep.trackId, e)}
+                        >
+                          ×
+                        </button>
+                      ) : null}
                     </div>
                     <button
                       type="button"
@@ -492,7 +518,7 @@ export function PodcastPanel({
               const rowClass = "podcast-row";
               const subtitle = [s.artistName, s.primaryGenreName].filter(Boolean).join(" · ");
               return (
-                <div key={s.collectionId} className={rowClass} style={{ top, ["--row-h" as string]: `${rowH}px` }}>
+                <div key={s.collectionId} className={rowClass} style={{ transform: `translateY(${top}px)` }}>
                   <button type="button" className="podcast-row-hit" onClick={() => openShow(s)}>
                     <PodcastArtwork url={s.artworkUrl} label={s.collectionName} />
                     <span className="podcast-meta">

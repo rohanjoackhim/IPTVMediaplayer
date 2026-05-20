@@ -61,11 +61,20 @@ export function coerceLlmUnifiedIpcResult(raw: unknown): LlmUnifiedLyricsCoerced
  * Desktop: one LLM call to find lyrics + English lines (same API key as Lyrics translation — LLM).
  * Returns null if IPC missing, no key, or model declines / returns empty (caller should fall back to LRCLIB).
  */
+export type LlmLyricsFetchHints = {
+  sourceFileName?: string;
+  altArtist?: string;
+  altTitle?: string;
+  /** Same as the artist — title line at the top of the lyrics panel. */
+  playerHeaderLabel?: string;
+};
+
 export async function tryUnifiedLlmLyrics(
   displayName: string,
   durationSec: number | null,
   fileMeta: { artist: string; title: string; album?: string } | null,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hints?: LlmLyricsFetchHints
 ): Promise<LlmUnifiedLyricsCoerced | null> {
   const ipc = typeof window !== "undefined" ? window.iptv?.lyricsLlmUnifiedFetch : undefined;
   if (typeof ipc !== "function") return null;
@@ -78,21 +87,15 @@ export async function tryUnifiedLlmLyrics(
       metaArtist: fileMeta?.artist?.trim() || undefined,
       metaTitle: fileMeta?.title?.trim() || undefined,
       metaAlbum: fileMeta?.album?.trim() || undefined,
+      sourceFileName: hints?.sourceFileName?.trim() || undefined,
+      altArtist: hints?.altArtist?.trim() || undefined,
+      altTitle: hints?.altTitle?.trim() || undefined,
+      playerHeaderLabel: hints?.playerHeaderLabel?.trim() || undefined,
     });
   } catch (e) {
     const m = e instanceof Error ? e.message : String(e);
     if (m.includes("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY")) return null;
     throw e;
-  }
-  if (raw && typeof raw === "object") {
-    const o = raw as Record<string, unknown>;
-    if (o.ok === false) {
-      const err =
-        typeof o.error === "string" && o.error.trim()
-          ? o.error.trim()
-          : "LLM could not find lyrics for this track.";
-      throw new Error(err);
-    }
   }
   return coerceLlmUnifiedIpcResult(raw);
 }

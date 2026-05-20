@@ -180,8 +180,6 @@ export interface ChannelBrowserProps {
   /** Television: append channels for disk / browser-picked video files (split view with IPTV). */
   onAddLocalVideoChannels: (channels: Channel[]) => void;
   onRemoveChannel: (channelId: string) => void;
-  parseMessage: string | null;
-  onPlaylistMessage: (message: string | null) => void;
   favoriteUrls: Set<string>;
   onToggleFavoriteChannel: (c: Channel) => void;
   /** Local library: shuffle order when auto-advancing after a track ends. */
@@ -220,8 +218,6 @@ function ChannelBrowserInner({
   onClearList,
   onAddLocalVideoChannels,
   onRemoveChannel,
-  parseMessage,
-  onPlaylistMessage,
   favoriteUrls,
   onToggleFavoriteChannel,
   audioLibraryShuffle,
@@ -354,6 +350,7 @@ function ChannelBrowserInner({
   const localVideosCount = useMemo(() => channels.filter((c) => !!c.localVideoFile).length, [channels]);
 
   const filtered = useMemo(() => {
+    if (listTab === "favorites") return tabFiltered;
     const q = query.trim().toLowerCase();
     return tabFiltered.filter((c) => {
       if (group !== "All groups" && (c.group?.trim() || "") !== group) return false;
@@ -364,7 +361,7 @@ function ChannelBrowserInner({
         (c.country?.toLowerCase().includes(q) ?? false)
       );
     });
-  }, [tabFiltered, query, group]);
+  }, [tabFiltered, query, group, listTab]);
 
   const totalH = filtered.length * ROW_H;
 
@@ -406,15 +403,9 @@ function ChannelBrowserInner({
         lower
       )
     ) {
-      onPlaylistMessage(
-        "That file is a video, not an M3U playlist. Use + Add local video in the Television toolbar."
-      );
       return;
     }
     if (/\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac|webm)$/.test(lower)) {
-      onPlaylistMessage(
-        "That file is audio, not an M3U playlist. Open the Audio tab and add files there (desktop: Add files…)."
-      );
       return;
     }
     const reader = new FileReader();
@@ -427,22 +418,14 @@ function ChannelBrowserInner({
 
   const loadPlaylistFromUrl = async (replace: boolean) => {
     const trimmed = playlistUrl.trim();
-    if (!trimmed) {
-      onPlaylistMessage("Enter an M3U or M3U8 playlist URL (https://…).");
-      return;
-    }
-    onPlaylistMessage("Loading playlist from URL…");
+    if (!trimmed) return;
     setUrlBusy(true);
     try {
       const text = await fetchM3uPlaylist(trimmed);
       saveLastPlaylistUrl(trimmed);
       onLoadM3U(text, replace);
-    } catch (e) {
-      const msg =
-        e instanceof Error
-          ? e.message
-          : "Could not load playlist from URL. In production builds, the server must allow CORS or use a file.";
-      onPlaylistMessage(msg);
+    } catch {
+      /* playlist load failed */
     } finally {
       setUrlBusy(false);
     }
@@ -450,18 +433,10 @@ function ChannelBrowserInner({
 
   const addWebVideoUrl = () => {
     const row = webVideoChannelFromUrl(webVideoUrl);
-    if (!row) {
-      onPlaylistMessage("Enter a valid http(s) video URL or website page that contains video.");
-      return;
-    }
+    if (!row) return;
     onAddLocalVideoChannels([row]);
     setWebVideoUrl("");
     setListTab("all");
-    onPlaylistMessage(
-      row.webVideoPageUrl
-        ? "Added web video page to Television. Some websites block embedded playback."
-        : "Added web video to Television."
-    );
   };
 
   const favCount = favoriteUrls.size;
@@ -624,15 +599,9 @@ function ChannelBrowserInner({
                 Add web video
               </button>
                 </div>
-                {parseMessage ? <div className="message-bar">{parseMessage}</div> : null}
               </div>
             ) : null}
           </div>
-        ) : sidebarMode === "radio" ? (
-          <p className="browser-sub browser-sub--radio">
-            Online radio stations and free podcasts. Use <strong>Radio stations</strong> for live streams, or{" "}
-            <strong>Podcasts</strong> to browse shows and episodes. Favorites (★) work across TV, radio, and podcasts.
-          </p>
         ) : null}
       </header>
 
@@ -652,7 +621,11 @@ function ChannelBrowserInner({
             role="tab"
             aria-selected={listTab === "favorites"}
             className={`browser-tab${listTab === "favorites" ? " active" : ""}`}
-            onClick={() => setListTab("favorites")}
+            onClick={() => {
+              setQuery("");
+              setGroup("All groups");
+              setListTab("favorites");
+            }}
           >
             Favorites{favoritesInLibrary > 0 ? ` (${favoritesInLibrary})` : ""}
           </button>
@@ -713,6 +686,7 @@ function ChannelBrowserInner({
 
       {sidebarMode === "tv" ? (
         <>
+          {listTab !== "favorites" ? (
           <div className="filters">
             <input
               className="search-input"
@@ -734,6 +708,7 @@ function ChannelBrowserInner({
               </div>
             ) : null}
           </div>
+          ) : null}
 
           {listTab === "localVideos" ? (
             <div className="local-videos-toolbar" role="region" aria-label="Local video files">
@@ -747,12 +722,8 @@ function ChannelBrowserInner({
                   const list = e.target.files;
                   e.target.value = "";
                   const rows = channelsFromBrowserVideoFiles(list);
-                  if (!rows.length) {
-                    onPlaylistMessage("No video files were selected (or files were empty).");
-                    return;
-                  }
+                  if (!rows.length) return;
                   flushLocalVideoAdd(rows);
-                  onPlaylistMessage(null);
                 }}
               />
               {hasDesktopVideoPick ? (
@@ -764,14 +735,10 @@ function ChannelBrowserInner({
                       try {
                         const raw = await window.iptv!.pickLocalVideoFiles();
                         const rows = normalizeDesktopLocalVideoRows(raw);
-                        if (!rows.length) {
-                          onPlaylistMessage("No video files were added (empty selection or unreadable files).");
-                          return;
-                        }
+                        if (!rows.length) return;
                         flushLocalVideoAdd(rows);
-                        onPlaylistMessage(null);
-                      } catch (e) {
-                        onPlaylistMessage(e instanceof Error ? e.message : String(e));
+                      } catch {
+                        /* pick cancelled or failed */
                       }
                     })();
                   }}
@@ -806,10 +773,7 @@ function ChannelBrowserInner({
                       </>
                     )
                   ) : (
-                    <>
-                      No favorites match your search or filters. Try clearing the search box or choosing{" "}
-                      <strong>All groups</strong>.
-                    </>
+                    <>No favorites in the current playlist match this view.</>
                   )
                 ) : listTab === "localVideos" ? (
                   localVideosCount === 0 ? (
@@ -923,15 +887,17 @@ function ChannelBrowserInner({
                         >
                           {isPlaying ? "Ⅱ" : "▶"}
                         </button>
-                        <button
-                          type="button"
-                          className="channel-remove-btn"
-                          title="Remove from list"
-                          aria-label={`Remove ${c.name}`}
-                          onClick={(e) => removeChannel(c, e)}
-                        >
-                          ×
-                        </button>
+                        {listTab !== "favorites" ? (
+                          <button
+                            type="button"
+                            className="channel-remove-btn"
+                            title="Remove from list"
+                            aria-label={`Remove ${c.name}`}
+                            onClick={(e) => removeChannel(c, e)}
+                          >
+                            ×
+                          </button>
+                        ) : null}
                       </div>
                       <button
                         type="button"

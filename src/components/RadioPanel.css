@@ -1,3 +1,4 @@
+/* Radio panel — matches PodcastPanel layout, typography, and list chrome. */
 .radio-root {
   display: flex;
   flex-direction: column;
@@ -6,25 +7,25 @@
 }
 
 .radio-header {
-  padding: 14px 18px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.74) 0%, transparent 100%);
 }
 
 .radio-title {
-  margin: 0 0 6px;
+  margin: 0;
   font-family: var(--font-display);
-  font-size: 1.18rem;
+  font-size: 1rem;
   font-weight: 800;
   letter-spacing: -0.04em;
   color: var(--text);
 }
 
 .radio-sub {
-  margin: 0;
-  font-size: 0.75rem;
-  line-height: 1.45;
+  margin: 1px 0 0;
+  font-size: 0.66rem;
+  line-height: 1.25;
   color: var(--text-muted);
 }
 
@@ -38,40 +39,51 @@
 }
 
 .radio-controls {
-  padding: 12px 18px;
+  padding: 8px 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: rgba(246, 246, 244, 0.74);
 }
 
-.radio-country-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.radio-controls--favorites-only {
+  padding: 6px 12px;
+  gap: 0;
 }
 
-.radio-country-head {
+.radio-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.radio-filter-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
 }
 
-.radio-country-head .radio-country-label {
-  margin: 0;
+.radio-filter-label,
+.radio-country-label {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
 
 .radio-refresh-btn {
   flex-shrink: 0;
-  padding: 6px 10px;
+  padding: 4px 7px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--bg-elevated);
   color: var(--text-secondary);
-  font-size: 0.6875rem;
+  font-size: 0.58rem;
   font-weight: 700;
   font-family: inherit;
   letter-spacing: 0.02em;
@@ -89,10 +101,29 @@
   cursor: not-allowed;
 }
 
+.radio-filter-select,
+.radio-country-select {
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.radio-filter-select:focus,
+.radio-country-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+
 .radio-search-row {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -101,59 +132,14 @@
   min-width: 0;
 }
 
-.radio-clear-search {
-  flex-shrink: 0;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-}
-
-.radio-clear-search:hover {
-  color: var(--text-secondary);
-  border-color: var(--accent-border);
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.radio-country-label {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.radio-country-select {
-  width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background: var(--bg-input);
-  color: var(--text);
-  font-size: 0.8125rem;
-  font-weight: 500;
-}
-
-.radio-country-select:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-muted);
-}
-
 .radio-search {
   width: 100%;
-  padding: 10px 12px;
-  border-radius: var(--radius-md);
+  padding: 7px 9px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg-input);
   color: var(--text);
-  font-size: 0.8125rem;
+  font-size: 0.72rem;
 }
 
 .radio-search::placeholder {
@@ -166,9 +152,31 @@
   box-shadow: 0 0 0 3px var(--accent-muted);
 }
 
-.radio-status {
-  font-size: 0.75rem;
+.radio-clear-search {
+  flex-shrink: 0;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.radio-clear-search:hover {
+  color: var(--text-secondary);
+  border-color: var(--accent-border);
+}
+
+.radio-status {
+  font-size: 0.66rem;
+  color: var(--text-muted);
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .radio-status--err {
@@ -178,7 +186,7 @@
 .radio-list-tabs {
   display: flex;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: rgba(229, 229, 227, 0.88);
@@ -186,37 +194,32 @@
 
 .radio-list-tab {
   flex: 1;
-  padding: 10px 12px;
+  padding: 7px 10px;
   border-radius: 999px;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.72rem;
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
-}
-
-.radio-list-tab:hover {
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.58);
 }
 
 .radio-list-tab--active {
   color: #fff;
   background: #111;
   border-color: #111;
-  box-shadow: none;
 }
 
 .radio-scroll {
+  --row-h: 42px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
   background: var(--bg-panel);
+  contain: layout paint style;
 }
 
 .radio-scroll-inner {
@@ -226,6 +229,7 @@
 
 .radio-row {
   position: absolute;
+  top: 0;
   left: 0;
   right: 0;
   height: var(--row-h);
@@ -233,12 +237,16 @@
   align-items: stretch;
   gap: 0;
   padding: 0 8px 0 0;
-  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  color: inherit;
+  width: 100%;
+  border-bottom: 1px solid rgba(97, 66, 34, 0.08);
   transition: background 0.12s ease;
+  will-change: transform;
 }
 
 .radio-row.active {
-  background: var(--accent-muted);
+  background: rgba(28, 28, 30, 0.08);
 }
 
 .radio-row.active--left {
@@ -254,7 +262,7 @@
 }
 
 .radio-row:hover {
-  background: rgba(255, 255, 255, 0.64);
+  background: rgba(255, 255, 255, 0.62);
 }
 
 .radio-row-hit {
@@ -262,8 +270,9 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 4px 0 16px;
+  gap: 8px;
+  padding: 0 4px 0 12px;
+  overflow: hidden;
   border: none;
   background: transparent;
   color: inherit;
@@ -277,9 +286,9 @@
 }
 
 .radio-logo {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
   object-fit: cover;
   background: var(--bg-elevated);
   flex-shrink: 0;
@@ -291,16 +300,23 @@
   align-items: center;
   justify-content: center;
   font-size: 0.9rem;
+  font-weight: 700;
   color: var(--accent-hover);
 }
 
 .radio-meta {
   min-width: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
 }
 
 .radio-name {
-  font-size: 0.875rem;
+  display: block;
+  max-width: 100%;
+  font-size: 0.78rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text);
@@ -310,12 +326,14 @@
 }
 
 .radio-tags {
-  font-size: 0.6875rem;
+  display: block;
+  max-width: 100%;
+  font-size: 0.625rem;
+  font-weight: 500;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-top: 2px;
 }
 
 .radio-row-actions {
@@ -323,11 +341,11 @@
   align-items: stretch;
   flex-shrink: 0;
   gap: 0;
-  margin: 8px 4px 8px 0;
+  margin: 6px 4px 6px 0;
   border: 1px solid var(--border);
   border-radius: 999px;
   overflow: hidden;
-  background: var(--bg-input);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .radio-play-btn,
@@ -344,43 +362,37 @@
 }
 
 .radio-play-btn {
-  min-width: 30px;
-  padding: 0 8px;
+  min-width: 28px;
+  padding: 0 7px;
   font-size: 0.78rem;
 }
 
 .radio-remove-btn {
-  width: 28px;
+  width: 26px;
   border-left: 1px solid var(--border-subtle);
   font-size: 1rem;
 }
 
-.radio-play-btn:hover,
-.radio-remove-btn:hover {
+.radio-play-btn:hover:not(:disabled),
+.radio-remove-btn:hover:not(:disabled) {
   color: var(--text);
   background: rgba(255, 255, 255, 0.58);
 }
 
-.radio-play-btn--paused {
+.radio-play-btn--paused:not(:disabled) {
   color: var(--accent-hover);
-}
-
-.radio-play-btn:focus-visible,
-.radio-remove-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
 }
 
 .radio-fav-btn {
   flex-shrink: 0;
-  width: 40px;
+  width: 34px;
   align-self: stretch;
-  margin: 8px 0;
+  margin: 6px 0;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg-input);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text-muted);
-  font-size: 1rem;
+  font-size: 0.86rem;
   line-height: 1;
   cursor: pointer;
   display: flex;
@@ -401,90 +413,13 @@
 }
 
 .radio-empty {
-  padding: 28px 18px;
+  padding: 24px 18px;
   text-align: center;
+  font-size: 0.8125rem;
+  line-height: 1.5;
   color: var(--text-muted);
-  font-size: 0.875rem;
-  line-height: 1.55;
 }
 
 .radio-empty--err {
-  color: var(--danger);
-}
-
-/* AD editorial theme overrides */
-.radio-header,
-.radio-controls,
-.radio-list-tabs {
-  background: #fff;
-  border-bottom: 1px solid #111;
-}
-
-.radio-title {
-  font-size: 1.32rem;
-  font-family: var(--font);
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.radio-sub,
-.radio-country-label,
-.radio-status {
-  font-size: 0.68rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.radio-refresh-btn,
-.radio-clear-search,
-.radio-country-select,
-.radio-search,
-.radio-list-tab,
-.radio-row-actions,
-.radio-fav-btn {
-  border-radius: 0;
-}
-
-.radio-refresh-btn,
-.radio-clear-search,
-.radio-country-select,
-.radio-search,
-.radio-row-actions,
-.radio-fav-btn {
-  border-color: #111;
-  background: #fff;
-}
-
-.radio-list-tab {
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.radio-list-tab--active {
-  color: #fff;
-  background: #000;
-  border-color: #000;
-}
-
-.radio-scroll {
-  background: #fff;
-}
-
-.radio-row {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.18);
-}
-
-.radio-row.active {
-  background: #f2f2f2;
-}
-
-.radio-row:hover {
-  background: #f7f7f7;
-}
-
-.radio-logo {
-  border-radius: 0;
+  color: #fecaca;
 }

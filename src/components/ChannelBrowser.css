@@ -216,10 +216,6 @@
   max-width: 42ch;
 }
 
-.browser-sub--radio {
-  max-width: none;
-}
-
 .toolbar {
   display: flex;
   flex-wrap: wrap;

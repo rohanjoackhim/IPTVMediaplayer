@@ -1,9 +1,15 @@
-import { memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
+import { memo, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type WheelEvent } from "react";
 import { flushSync } from "react-dom";
 import Hls, { FetchLoader } from "hls.js";
 import mpegts from "mpegts.js";
 import type { Channel } from "../types";
-import { isLikelyHls, isLikelyMpegTsOverHttp, isLikelyProgressiveVideoUrl } from "../utils/streamKind";
+import {
+  isLikelyHls,
+  isLikelyMpegTsOverHttp,
+  isLikelyProgressiveVideoUrl,
+  isMatroskaUrl,
+  needsDesktopFfmpegPlayback,
+} from "../utils/streamKind";
 import { mpegtsIptvConfig, streamRefererForUrl } from "../utils/iptvStreamHeaders";
 import { isAlreadyProxiedStreamUrl, proxiedStreamUrl, shouldUseStreamProxy } from "../utils/proxiedStreamUrl";
 import {
@@ -13,7 +19,6 @@ import {
   recordFileSuffixAndTapType,
 } from "../utils/recordableStream";
 import { formatBufferStatsLine, getBufferedAheadSec } from "../utils/mediaBufferedStats";
-import { srtToWebVtt } from "../utils/srtToWebVtt";
 import { clearAudioResume, loadAudioResumeSeconds, saveAudioResumeSeconds } from "../utils/audioResumeStorage";
 import { clearVideoResume, loadVideoResumeSeconds, saveVideoResumeSeconds } from "../utils/localVideoResumeStorage";
 import { mimeHintForLocalVideoUrl } from "../utils/localVideoMime";
@@ -43,12 +48,27 @@ import {
   resolveTrackMetadataFromLibrary,
   type TrackFileMetadata,
 } from "../utils/resolveTrackMetadata";
-import { getEbookLibraryItemById } from "../utils/audioLibraryDb";
+import { getAudioLibraryTrackById, getEbookLibraryItemById } from "../utils/audioLibraryDb";
 import { loadPdfJs } from "../utils/pdfJsLoader";
 import { LyricsTranslateMenu } from "./LyricsTranslateMenu";
+import { AnchoredPopover } from "./AnchoredPopover";
 import { RadioEqualizer } from "./RadioEqualizer";
+import {
+  ensureElementPlaybackAudible,
+  handoffEqScope,
+  releaseEqForMediaElement,
+} from "../utils/eqAudioGraph";
+import { eqPageScopeForChannel } from "../utils/eqScopeSettings";
+import {
+  canUseRadioLiveCaptions,
+  startRadioLiveCaptions,
+  type RadioCaptionSegment,
+  type RadioLiveCaptionsController,
+} from "../utils/radioLiveCaptions";
+import { RadioLiveCaptionsPanel } from "./RadioLiveCaptionsPanel";
 import "./VideoPlayer.css";
 import "./LyricsTranslateMenu.css";
+import "./RadioLiveCaptionsPanel.css";
 
 function canPlayNativeHls(video: HTMLVideoElement): boolean {
   return video.canPlayType("application/vnd.apple.mpegurl") !== "" ||
@@ -491,6 +511,18 @@ export type PlaybackModeLabel =
   | "Local video · MP4 (cache)"
   | "Local video · MP4 (remux)"
   | "Local video · MP4 (transcoded)"
+  | "MKV · preparing…"
+  | "MKV · HLS (cache)"
+  | "MKV · HLS (remux)"
+  | "MKV · HLS (transcoded)"
+  | "MKV · HLS"
+  | "MKV · MP4 (cache)"
+  | "MKV · MP4 (remux)"
+  | "MKV · MP4 (transcoded)"
+  | "MKV · MP4"
+  | "MKV · native (fallback)"
+  | "MKV · native (direct)"
+  | "VOD · blocked"
   | "URL · blocked";
 
 function InternetAudioShowcase({
@@ -500,9 +532,6 @@ function InternetAudioShowcase({
   playbackMode,
   bufferLine,
   onTogglePlay,
-  onCopy,
-  onOpen,
-  onReload,
 }: {
   channel: Channel;
   kind: "radio" | "podcast";
@@ -510,9 +539,6 @@ function InternetAudioShowcase({
   playbackMode: PlaybackModeLabel | null;
   bufferLine: string | null;
   onTogglePlay: () => void;
-  onCopy: () => void;
-  onOpen: () => void;
-  onReload: () => void;
 }) {
   const isPodcast = kind === "podcast";
   const tags = (channel.radioTags ?? "")
@@ -574,7 +600,9 @@ function InternetAudioShowcase({
           </p>
 
           {isPodcast && description ? (
-            <p className="internet-audio-description">{description.length > 360 ? `${description.slice(0, 360).trim()}...` : description}</p>
+            <p className="internet-audio-description" title={description}>
+              {description}
+            </p>
           ) : null}
 
           {!isPodcast && tags.length ? (
@@ -598,25 +626,18 @@ function InternetAudioShowcase({
             </dl>
           ) : null}
 
-          <div className="internet-audio-actions">
-            <button type="button" className="internet-audio-primary" onClick={onTogglePlay}>
-              {playing ? "Pause" : "Play"}
-            </button>
-            <button type="button" className="internet-audio-secondary" onClick={onCopy}>
-              Copy URL
-            </button>
-            <button type="button" className="internet-audio-secondary" onClick={onOpen}>
-              Open stream
-            </button>
-            <button type="button" className="internet-audio-secondary" onClick={onReload}>
-              Reload
-            </button>
-          </div>
+          {!isPodcast ? (
+            <div className="internet-audio-actions">
+              <button type="button" className="internet-audio-primary" onClick={onTogglePlay}>
+                {playing ? "Pause" : "Play"}
+              </button>
+            </div>
+          ) : null}
 
           <div className="internet-audio-technical">
-            {playbackMode ? <span>{playbackMode}</span> : null}
-            {bufferLine ? <span>{bufferLine}</span> : null}
-            {streamHost ? <span>{streamHost}</span> : null}
+            {playbackMode && isPodcast ? <span>{playbackMode}</span> : null}
+            {!isPodcast && bufferLine ? <span>{bufferLine}</span> : null}
+            {!isPodcast && streamHost ? <span>{streamHost}</span> : null}
           </div>
         </div>
       </div>
@@ -938,6 +959,8 @@ function PdfReader({
       } catch {
         /* noop */
       }
+      setPdfDoc(null);
+      setPdfUtil(null);
     };
   }, [channel.ebookBlob, channel.ebookId]);
 
@@ -1449,6 +1472,8 @@ export function VideoPlayer({
   /** Same bytes as disk recording; only set in desktop after REC (single upstream). */
   const [recordTapPlayUrl, setRecordTapPlayUrl] = useState<string | null>(null);
   const prevStreamUrlForResetRef = useRef<string | null>(null);
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordBusy, setRecordBusy] = useState(false);
@@ -1460,13 +1485,12 @@ export function VideoPlayer({
   const [trackOptions, setTrackOptions] = useState<TrackOption[]>([]);
   const [selectedTrack, setSelectedTrack] = useState<string>("off");
   const [ccEnabled, setCcEnabled] = useState(true);
-  const subFileRef = useRef<HTMLInputElement>(null);
   const [bufferLine, setBufferLine] = useState("—");
   const [underLogoFailed, setUnderLogoFailed] = useState(false);
   /** Radio has no native `<video controls>`; keep UI in sync for the overlay play/pause button. */
   const [radioPlaying, setRadioPlaying] = useState(false);
-  /** When Web Audio EQ is active, `<video>` stays at `volume === 1` and level comes from EQ (radio or local library). */
-  const [radioEqWebAudioActive, setRadioEqWebAudioActive] = useState(false);
+  /** True while the EQ panel has routed audio through Web Audio (radio / podcast / library). */
+  const [eqActive, setEqActive] = useState(false);
   const [ytBusy, setYtBusy] = useState(false);
   const [ytErr, setYtErr] = useState<string | null>(null);
 
@@ -1479,9 +1503,9 @@ export function VideoPlayer({
   const [mp3LyricsHidden, setMp3LyricsHidden] = useState(false);
   /** Artist / title / album from file tags (shown above lyrics). */
   const [lyricsTrackMeta, setLyricsTrackMeta] = useState<TrackFileMetadata | null>(null);
+  const [lyricsCoverUrl, setLyricsCoverUrl] = useState<string | null>(null);
   /** LLM “what this song is about” — separate from lyrics fetch so duration updates do not abort it. */
   const [songMeaningLoading, setSongMeaningLoading] = useState(false);
-  const songMeaningSectionRef = useRef<HTMLElement | null>(null);
   const mp3LyricsPanelRef = useRef<HTMLDivElement | null>(null);
   const playerRootRef = useRef<HTMLDivElement | null>(null);
   /** Expanded lyrics fill this player column only (split view: Player L / R), not the whole monitor. */
@@ -1506,14 +1530,25 @@ export function VideoPlayer({
   /** Local library `<video>` paused — drives chrome transport when lyrics cover native controls. */
   const [libTransportPaused, setLibTransportPaused] = useState(true);
   const volumePopoverRef = useRef<HTMLDivElement>(null);
+  const volumeTriggerRef = useRef<HTMLButtonElement>(null);
+  const volumeAnchoredPanelRef = useRef<HTMLDivElement>(null);
   const [volumePopoverOpen, setVolumePopoverOpen] = useState(false);
-  /** Bump to re-run the stream bind effect for the same radio channel (reconnect). */
-  const [radioStreamReloadTick, setRadioStreamReloadTick] = useState(0);
   const [playerChromeNotice, setPlayerChromeNotice] = useState<string | null>(null);
   const [ebookSpeechBoundary, setEbookSpeechBoundary] = useState<EbookSpeechBoundary | null>(null);
   const [ebookTtsActive, setEbookTtsActive] = useState(false);
   const ebookPlayerRef = useRef<HTMLElement | null>(null);
   const [ebookFullscreen, setEbookFullscreen] = useState(false);
+  const radioCaptionsCtrlRef = useRef<RadioLiveCaptionsController | null>(null);
+  const radioCaptionTranslateAbortRef = useRef<AbortController | null>(null);
+  const radioCaptionTranslateTargetRef = useRef<string | null>(null);
+  const [radioCaptionsEnabled, setRadioCaptionsEnabled] = useState(false);
+  const [radioCaptionSegments, setRadioCaptionSegments] = useState<RadioCaptionSegment[]>([]);
+  const [radioCaptionsStatus, setRadioCaptionsStatus] = useState("");
+  const [radioCaptionsErr, setRadioCaptionsErr] = useState<string | null>(null);
+  const [radioCaptionTranslateTarget, setRadioCaptionTranslateTarget] = useState<string | null>(null);
+  const [radioCaptionTranslateBusy, setRadioCaptionTranslateBusy] = useState(false);
+  const [radioCaptionTranslateErr, setRadioCaptionTranslateErr] = useState<string | null>(null);
+  const [radioCaptionTranslateHint, setRadioCaptionTranslateHint] = useState<string | null>(null);
 
   const hasDesktopRecordApi =
     typeof window !== "undefined" &&
@@ -1630,6 +1665,12 @@ export function VideoPlayer({
     !!channel?.localVideoFile &&
     !!channel.url?.trim() &&
     (/^file:/i.test(channel.url.trim()) || /^blob:/i.test(channel.url.trim()));
+  /** Timeline + scale in white player chrome (not native video controls). */
+  const useChromeSeek =
+    isLibraryChannel ||
+    isPodcastChannel ||
+    isLocalVideoChannel ||
+    (!!channel && !isEbookChannel && !isEmbeddedWebChannel && !isRadioChannel);
   const webVideoEmbedSrc =
     isYoutubeChannel && channel?.youtubeVideoId
       ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(channel.youtubeVideoId)}?autoplay=1&rel=0`
@@ -1683,19 +1724,15 @@ export function VideoPlayer({
     });
   }, []);
 
-  const hideLyricsPanel = useCallback(() => {
-    setLyricsSpatialBox(null);
-    setMp3LyricsHidden(true);
-  }, []);
-
   useEffect(() => {
     setUnderLogoFailed(false);
   }, [channel?.id, channel?.logo]);
 
-  const mediaEqEnabled = isInternetAudioStream || isLibraryChannel;
+  const mediaEqEnabled = (isInternetAudioStream && !isPodcastChannel) || isLibraryChannel;
+  const eqPageScope = eqPageScopeForChannel(channel) ?? "radio";
 
   useEffect(() => {
-    if (!mediaEqEnabled) setRadioEqWebAudioActive(false);
+    if (!mediaEqEnabled) setEqActive(false);
   }, [mediaEqEnabled]);
 
   useEffect(() => {
@@ -1716,7 +1753,24 @@ export function VideoPlayer({
     setLibTransportPaused(true);
     setVolumePopoverOpen(false);
     setLyricsSpatialBox(null);
+    radioCaptionsCtrlRef.current?.stop();
+    radioCaptionsCtrlRef.current = null;
+    radioCaptionTranslateAbortRef.current?.abort();
+    radioCaptionTranslateAbortRef.current = null;
+    setRadioCaptionsEnabled(false);
+    setRadioCaptionSegments([]);
+    setRadioCaptionsStatus("");
+    setRadioCaptionsErr(null);
+    setRadioCaptionTranslateTarget(null);
+    radioCaptionTranslateTargetRef.current = null;
+    setRadioCaptionTranslateBusy(false);
+    setRadioCaptionTranslateErr(null);
+    setRadioCaptionTranslateHint(null);
   }, [channel?.id]);
+
+  useEffect(() => {
+    radioCaptionTranslateTargetRef.current = radioCaptionTranslateTarget;
+  }, [radioCaptionTranslateTarget]);
 
   useEffect(() => {
     if (!isEbookChannel) return;
@@ -1733,7 +1787,7 @@ export function VideoPlayer({
   }, [isEbookChannel]);
 
   useEffect(() => {
-    if (!channel || !isLibraryChannel) {
+    if (!channel || !useChromeSeek) {
       setLibAudioDurationSec(null);
       return;
     }
@@ -1766,11 +1820,11 @@ export function VideoPlayer({
       cancelled = true;
       for (const t of timers) clearTimeout(t);
     };
-  }, [channel?.id, channel?.libraryTrackId, channel?.url]);
+  }, [channel?.id, channel?.libraryTrackId, channel?.url, useChromeSeek]);
 
-  /** Keep library seek bar in sync (full-screen lyrics overlay hides native `<video>` timeline). */
+  /** Keep chrome seek bar in sync (native `<video>` controls hidden for these modes). */
   useEffect(() => {
-    if (!isLibraryChannel) {
+    if (!useChromeSeek) {
       setLibSeekUiSec(0);
       setLibTransportPaused(true);
       return;
@@ -1781,8 +1835,10 @@ export function VideoPlayer({
       const t = el.currentTime;
       if (Number.isFinite(t) && t >= 0) setLibSeekUiSec(t);
       setLibTransportPaused(el.paused);
-      const trackId = channel?.libraryTrackId?.trim();
-      if (trackId) dispatchLibraryAudioState(trackId, el.paused);
+      if (isLibraryChannel) {
+        const trackId = channel?.libraryTrackId?.trim();
+        if (trackId) dispatchLibraryAudioState(trackId, el.paused);
+      }
     };
     sync();
     el.addEventListener("timeupdate", sync);
@@ -1801,7 +1857,7 @@ export function VideoPlayer({
       el.removeEventListener("pause", sync);
       el.removeEventListener("ended", sync);
     };
-  }, [isLibraryChannel, channel?.id, channel?.url, channel?.libraryTrackId]);
+  }, [useChromeSeek, isLibraryChannel, channel?.id, channel?.url, channel?.libraryTrackId]);
 
   useEffect(() => {
     if (!isLibraryChannel) return;
@@ -1824,6 +1880,8 @@ export function VideoPlayer({
       const el = mediaRef.current;
       if (!el) return;
       el.pause();
+      releaseEqForMediaElement(el, volume);
+      setEqActive(false);
       el.removeAttribute("src");
       el.querySelectorAll("source[data-iptv-library]").forEach((node) => node.remove());
       el.load();
@@ -1842,9 +1900,12 @@ export function VideoPlayer({
     if (!volumePopoverOpen) return;
     const onDocMouseDown = (ev: MouseEvent) => {
       const host = volumePopoverRef.current;
+      const panel = volumeAnchoredPanelRef.current;
       const t = ev.target;
       if (!(t instanceof Node)) return;
-      if (host && !host.contains(t)) setVolumePopoverOpen(false);
+      if (host?.contains(t)) return;
+      if (panel?.contains(t)) return;
+      setVolumePopoverOpen(false);
     };
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === "Escape") setVolumePopoverOpen(false);
@@ -1877,6 +1938,96 @@ export function VideoPlayer({
       el.removeEventListener("ended", sync);
     };
   }, [isInternetAudioStream, channel?.id]);
+
+  const translateRadioCaptionLine = useCallback(async (segmentId: number, text: string, targetCode: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    try {
+      const { franc } = await import("franc-min");
+      const detected = franc(trimmed, { minLength: 3 }) || "eng";
+      const fetchJson = createLyricsJsonFetcher();
+      const tr = await translateLineBatchesToLanguage([trimmed], targetCode, detected, fetchJson);
+      const translated = tr.lines[0]?.trim() || trimmed;
+      setRadioCaptionSegments((prev) =>
+        prev.map((s) => (s.id === segmentId ? { ...s, translated } : s))
+      );
+    } catch {
+      /* per-line translation failures are non-fatal */
+    }
+  }, []);
+
+  const onRadioCaptionTranslateLanguage = useCallback(
+    async (targetCode: string) => {
+      if (!radioCaptionSegments.length) return;
+      radioCaptionTranslateAbortRef.current?.abort();
+      const ac = new AbortController();
+      radioCaptionTranslateAbortRef.current = ac;
+      setRadioCaptionTranslateBusy(true);
+      setRadioCaptionTranslateErr(null);
+      setRadioCaptionTranslateHint(null);
+      const langLabel = labelForLyricsTargetCode(targetCode);
+      const lines = radioCaptionSegments.map((s) => s.text);
+      try {
+        const sample = lines.join("\n").slice(0, 3500);
+        const { franc } = await import("franc-min");
+        const detected = franc(sample, { minLength: 10 }) || "eng";
+        const fetchJson = createLyricsJsonFetcher();
+        const tr = await translateLineBatchesToLanguage(lines, targetCode, detected, fetchJson, ac.signal);
+        if (ac.signal.aborted) return;
+        setRadioCaptionSegments((prev) =>
+          prev.map((s, i) => ({ ...s, translated: tr.lines[i]?.trim() || s.text }))
+        );
+        setRadioCaptionTranslateTarget(targetCode);
+        setRadioCaptionTranslateHint(
+          tr.providerHint ? `Translated to ${langLabel} · ${tr.providerHint}` : `Translated to ${langLabel}`
+        );
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        setRadioCaptionTranslateErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!ac.signal.aborted) setRadioCaptionTranslateBusy(false);
+      }
+    },
+    [radioCaptionSegments]
+  );
+
+  useEffect(() => {
+    if (!isRadioChannel || !radioCaptionsEnabled || !radioPlaying || !canUseRadioLiveCaptions()) {
+      radioCaptionsCtrlRef.current?.stop();
+      radioCaptionsCtrlRef.current = null;
+      return;
+    }
+    const el = mediaRef.current;
+    if (!el) return;
+    setRadioCaptionsErr(null);
+    const ctrl = startRadioLiveCaptions(el, {
+      onStatus: setRadioCaptionsStatus,
+      onSegment: (seg) => {
+        setRadioCaptionSegments((prev) => {
+          if (seg.replaceLast && prev.length > 0) {
+            const next = [...prev];
+            const last = next[next.length - 1]!;
+            next[next.length - 1] = {
+              ...last,
+              text: seg.text,
+              at: seg.at,
+              id: seg.id,
+            };
+            return next;
+          }
+          return [...prev.slice(-40), seg];
+        });
+        const target = radioCaptionTranslateTargetRef.current;
+        if (target) void translateRadioCaptionLine(seg.id, seg.text, target);
+      },
+      onError: (msg) => setRadioCaptionsErr(msg),
+    });
+    radioCaptionsCtrlRef.current = ctrl;
+    return () => {
+      ctrl.stop();
+      radioCaptionsCtrlRef.current = null;
+    };
+  }, [isRadioChannel, radioCaptionsEnabled, radioPlaying, channel?.id, translateRadioCaptionLine]);
 
   useEffect(() => {
     if (!channel?.id || isEbookChannel || isEmbeddedWebChannel) return;
@@ -1929,6 +2080,39 @@ export function VideoPlayer({
   }, [channel?.id, channel?.name, channel?.libraryTrackId]);
 
   useEffect(() => {
+    const tid = channel?.libraryTrackId?.trim();
+    if (!tid || !channel || !isLikelyLocalMp3Channel(channel)) {
+      setLyricsCoverUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    void (async () => {
+      try {
+        const row = await getAudioLibraryTrackById(tid);
+        const blob =
+          row?.coverArt instanceof Blob && row.coverArt.size > 0 ? row.coverArt : null;
+        if (!blob || cancelled) return;
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) setLyricsCoverUrl(objectUrl);
+      } catch {
+        if (!cancelled) setLyricsCoverUrl(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) {
+        try {
+          URL.revokeObjectURL(objectUrl);
+        } catch {
+          /* noop */
+        }
+      }
+      setLyricsCoverUrl(null);
+    };
+  }, [channel?.id, channel?.libraryTrackId]);
+
+  useEffect(() => {
     const ch = channel;
     if (!ch || !isLikelyLocalMp3Channel(ch)) {
       setMp3Lyrics({ kind: "idle" });
@@ -1937,11 +2121,18 @@ export function VideoPlayer({
     const ac = new AbortController();
     const run = async () => {
       const tid = ch.libraryTrackId?.trim();
+      const fileMeta = await resolveTrackMetadataFromLibrary(ch.name, tid);
 
       if (tid && typeof indexedDB !== "undefined") {
         try {
           const cached = await getLibraryLyricsCache(tid);
-          if (isUsableSavedLyricsCache(cached) && !ac.signal.aborted) {
+          if (
+            isUsableSavedLyricsCache(cached, {
+              metaArtist: fileMeta.artist,
+              metaTitle: fileMeta.title,
+            }) &&
+            !ac.signal.aborted
+          ) {
             apiOnlyLyricsPreviewRef.current = false;
             setMp3Lyrics({ kind: "ready", data: mapCachedLibraryLyricsToResult(cached) });
             return;
@@ -2308,11 +2499,6 @@ export function VideoPlayer({
         const enriched = await enrichLocalMp3LyricsWithSongMeaning(data, ch.name, tid, ac.signal);
         if (!ac.signal.aborted) {
           setMp3Lyrics({ kind: "ready", data: enriched });
-          if (enriched.songMeaning) {
-            requestAnimationFrame(() => {
-              songMeaningSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-            });
-          }
         }
       } catch (e) {
         if (ac.signal.aborted) return;
@@ -2450,6 +2636,9 @@ export function VideoPlayer({
       URL.revokeObjectURL(externalUrlRef.current);
       externalUrlRef.current = null;
     }
+    const scope = eqPageScopeForChannel(channel);
+    handoffEqScope(video, scope, volumeRef.current);
+    setEqActive(false);
     video.removeAttribute("src");
     video.querySelectorAll("source[data-iptv-library]").forEach((node) => node.remove());
     video.querySelectorAll("track[data-iptv-external]").forEach((node) => node.remove());
@@ -2474,15 +2663,6 @@ export function VideoPlayer({
     const el = video;
 
     let skipDefaultFinish = false;
-    const isMatroskaFileUrl = (u: string) => {
-      try {
-        if (!/^file:/i.test(u)) return false;
-        const pth = decodeURIComponent(new URL(u).pathname).replace(/\\/g, "/").toLowerCase();
-        return pth.endsWith(".mkv") || pth.endsWith(".mka");
-      } catch {
-        return false;
-      }
-    };
 
     const onTracks = () => refreshTextTracks();
 
@@ -2603,6 +2783,15 @@ export function VideoPlayer({
         if (mpegTsIsFormatUnsupported(type, detail, extra) && !nativeFallbackTried && !tapPlayUrl?.trim()) {
           clearIptvLoadWatch();
           setError(null);
+          if (
+            typeof window.iptv?.prepareMkvPlayback === "function" &&
+            needsDesktopFfmpegPlayback(streamUrl)
+          ) {
+            mpegtsRef.current?.destroy();
+            mpegtsRef.current = null;
+            startDesktopRemuxPlayback(streamUrl);
+            return;
+          }
           if (tryNativeDirectPlayback(streamUrl)) return;
         }
 
@@ -2655,6 +2844,147 @@ export function VideoPlayer({
       } catch {
         return false;
       }
+    };
+
+    const startDesktopRemuxPlayback = (sourceUrl: string) => {
+      if (typeof window === "undefined" || typeof window.iptv?.prepareMkvPlayback !== "function") return;
+      skipDefaultFinish = true;
+      setPlaybackMode("MKV · preparing…");
+      setError(null);
+      const bindPreparedMkvHls = (
+        manifestSrc: string,
+        r: { fromCache?: boolean; remuxed?: boolean; usedTranscode?: boolean }
+      ) => {
+        clearIptvLoadWatch();
+        mpegtsRef.current?.destroy();
+        mpegtsRef.current = null;
+        hlsRef.current?.destroy();
+        hlsRef.current = null;
+        el.removeAttribute("src");
+        el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+        el.load();
+
+        if (r.fromCache) setPlaybackMode("MKV · HLS (cache)");
+        else if (r.remuxed) setPlaybackMode("MKV · HLS (remux)");
+        else if (r.usedTranscode) setPlaybackMode("MKV · HLS (transcoded)");
+        else setPlaybackMode("MKV · HLS");
+        setError(null);
+
+        const hls = new Hls({
+          enableWebVTT: true,
+          renderTextTracksNatively: true,
+          lowLatencyMode: false,
+          maxBufferLength: 120,
+          maxMaxBufferLength: 600,
+          manifestLoadingTimeOut: 120_000,
+          levelLoadingTimeOut: 120_000,
+          fragLoadingTimeOut: 120_000,
+        });
+        hlsRef.current = hls;
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          clearIptvLoadWatch();
+          onTracks();
+        });
+        hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracks);
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (!data.fatal) return;
+          clearIptvLoadWatch();
+          setPlaybackMode(null);
+          setError(
+            data.type === Hls.ErrorTypes.NETWORK_ERROR
+              ? "Network error while loading remuxed MKV (HLS). Check your connection and playlist login."
+              : "Could not play this remuxed MKV stream in HLS mode."
+          );
+        });
+        nativeErrCleanup = () => {
+          hls.destroy();
+          hlsRef.current = null;
+          el.removeAttribute("src");
+          el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+        };
+        hls.attachMedia(el);
+        hls.loadSource(manifestSrc);
+        startIptvLoadWatch();
+        void el.play().catch(() => {});
+      };
+
+      const bindPreparedMkv = (
+        playUrl: string,
+        r: {
+          fromCache?: boolean;
+          remuxed?: boolean;
+          usedTranscode?: boolean;
+          playbackFormat?: string;
+        }
+      ) => {
+        if (r.playbackFormat === "hls" || /\.m3u8(\?|#|$)/i.test(playUrl)) {
+          bindPreparedMkvHls(playUrl, r);
+          return;
+        }
+        clearIptvLoadWatch();
+        if (r.fromCache) setPlaybackMode("MKV · MP4 (cache)");
+        else if (r.remuxed) setPlaybackMode("MKV · MP4 (remux)");
+        else if (r.usedTranscode) setPlaybackMode("MKV · MP4 (transcoded)");
+        else setPlaybackMode("MKV · MP4");
+        setError(null);
+        function onMkvReady() {
+          el.removeEventListener("error", onMkvError);
+          clearIptvLoadWatch();
+          onTracks();
+        }
+        function onMkvError() {
+          el.removeEventListener("loadedmetadata", onMkvReady);
+          el.removeEventListener("loadeddata", onMkvReady);
+          el.removeEventListener("canplay", onMkvReady);
+          clearIptvLoadWatch();
+          setPlaybackMode(null);
+          setError(
+            "Video was remuxed but could not play in the browser yet. Wait a few seconds and try again, or check your playlist login and connection to the provider."
+          );
+        }
+        nativeErrCleanup = () => {
+          el.removeEventListener("error", onMkvError);
+          el.removeEventListener("loadedmetadata", onMkvReady);
+          el.removeEventListener("loadeddata", onMkvReady);
+          el.removeEventListener("canplay", onMkvReady);
+          el.removeAttribute("src");
+          el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+        };
+        el.addEventListener("error", onMkvError, { once: true });
+        el.addEventListener("loadedmetadata", onMkvReady);
+        el.addEventListener("loadeddata", onMkvReady);
+        el.addEventListener("canplay", onMkvReady);
+        el.removeAttribute("src");
+        el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+        const srcEl = document.createElement("source");
+        srcEl.setAttribute("data-iptv-mkv", "1");
+        srcEl.src = playUrl;
+        srcEl.type = "video/mp4";
+        el.appendChild(srcEl);
+        el.load();
+        startIptvLoadWatch();
+        void el.play().catch(() => {});
+      };
+      void window.iptv
+        .prepareMkvPlayback(sourceUrl)
+        .then((r) => {
+          if (!effectLive) return;
+          const playUrl =
+            typeof r?.playUrl === "string" && r.playUrl.trim() ? r.playUrl.trim() : sourceUrl;
+          bindPreparedMkv(playUrl, r ?? {});
+        })
+        .catch((e) => {
+          if (!effectLive) return;
+          clearIptvLoadWatch();
+          setPlaybackMode(null);
+          const msg = e instanceof Error ? e.message : String(e);
+          setError(
+            msg.includes("ffmpeg")
+              ? `VOD prepare failed: ${msg}`
+              : msg ||
+                  "Could not prepare this movie for playback. Check that the stream URL is valid and your playlist login still works."
+          );
+        });
     };
 
     if (channel.libraryTrackId?.trim() && url.toLowerCase().startsWith("blob:")) {
@@ -2908,7 +3238,7 @@ export function VideoPlayer({
       };
 
       const canPrepareMkv =
-        isMatroskaFileUrl(url) && typeof window !== "undefined" && typeof window.iptv?.prepareMkvPlayback === "function";
+        isMatroskaUrl(url) && typeof window !== "undefined" && typeof window.iptv?.prepareMkvPlayback === "function";
 
       if (canPrepareMkv) {
         skipDefaultFinish = true;
@@ -3144,6 +3474,19 @@ export function VideoPlayer({
       const radioPlay = effectiveRecordTapPlayUrl?.trim() || url;
       setPlaybackMode(effectiveRecordTapPlayUrl ? (isPodcastChannel ? "Podcast · record tap" : "Radio · record tap") : isPodcastChannel ? "Podcast · native" : "Radio · native");
       el.src = radioPlay;
+      const primeInternetAudio = () => {
+        void ensureElementPlaybackAudible(el, volumeRef.current);
+      };
+      el.addEventListener("loadeddata", primeInternetAudio);
+      el.addEventListener("canplay", primeInternetAudio);
+      el.addEventListener("playing", primeInternetAudio);
+      const prevNativeCleanup = nativeErrCleanup;
+      nativeErrCleanup = () => {
+        prevNativeCleanup?.();
+        el.removeEventListener("loadeddata", primeInternetAudio);
+        el.removeEventListener("canplay", primeInternetAudio);
+        el.removeEventListener("playing", primeInternetAudio);
+      };
     } else if (isLikelyMpegTsOverHttp(url)) {
       if (isLikelyProgressiveVideoUrl(url)) {
         tryNativeDirectPlayback(url, effectiveRecordTapPlayUrl ? "Native · record tap" : "Native · direct");
@@ -3161,6 +3504,16 @@ export function VideoPlayer({
       } else {
         startIptvLoadWatch();
         setPlaybackMode("MPEG-TS · mpegts.js");
+      }
+    } else if (needsDesktopFfmpegPlayback(url)) {
+      if (typeof window.iptv?.prepareMkvPlayback === "function") {
+        startDesktopRemuxPlayback(url);
+      } else {
+        setPlaybackMode("VOD · blocked");
+        setError(
+          "This movie/VOD link needs the desktop app (Electron) with FFmpeg to remux MKV or provider VOD streams. Live .ts channels still work in the browser."
+        );
+        return;
       }
     } else if (!/^https?:\/\//i.test(url)) {
       setPlaybackMode("URL · blocked");
@@ -3218,6 +3571,13 @@ export function VideoPlayer({
         mpegtsRetryTimer = null;
       }
       nativeErrCleanup?.();
+      nativeErrCleanup = null;
+      try {
+        el.pause();
+      } catch {
+        /* noop */
+      }
+      releaseEqForMediaElement(el, volumeRef.current);
       el.removeEventListener("addtrack", onTracks as EventListener);
       hlsRef.current?.destroy();
       hlsRef.current = null;
@@ -3227,6 +3587,11 @@ export function VideoPlayer({
         URL.revokeObjectURL(externalUrlRef.current);
         externalUrlRef.current = null;
       }
+      el.removeAttribute("src");
+      el.querySelectorAll("source[data-iptv-library], source[data-iptv-local-video]").forEach((node) =>
+        node.remove()
+      );
+      el.load();
     };
   }, [
     channel,
@@ -3234,7 +3599,6 @@ export function VideoPlayer({
     effectiveRecordTapPlayUrl,
     streamProxyOrigin,
     splitIsolateNetwork,
-    radioStreamReloadTick,
     channel?.streamResetNonce,
   ]);
 
@@ -3247,12 +3611,25 @@ export function VideoPlayer({
     if (!v) return;
     const vol = typeof volume === "number" && Number.isFinite(volume) ? volume : 1;
     const clamped = Math.min(1, Math.max(0, vol));
-    if (mediaEqEnabled && radioEqWebAudioActive) {
-      v.volume = 1;
-      return;
-    }
-    v.volume = clamped;
-  }, [volume, channel?.id, mediaEqEnabled, radioEqWebAudioActive]);
+    void ensureElementPlaybackAudible(v, clamped);
+  }, [volume, channel?.id, eqActive]);
+
+  useEffect(() => {
+    const v = mediaRef.current;
+    if (!v || !isInternetAudioStream) return;
+    const prime = () => {
+      const vol = typeof volume === "number" && Number.isFinite(volume) ? volume : 1;
+      void ensureElementPlaybackAudible(v, Math.min(1, Math.max(0, vol)));
+    };
+    v.addEventListener("playing", prime);
+    v.addEventListener("loadeddata", prime);
+    v.addEventListener("canplay", prime);
+    return () => {
+      v.removeEventListener("playing", prime);
+      v.removeEventListener("loadeddata", prime);
+      v.removeEventListener("canplay", prime);
+    };
+  }, [channel?.id, volume, isInternetAudioStream]);
 
   useEffect(() => {
     const video = mediaRef.current;
@@ -3272,49 +3649,6 @@ export function VideoPlayer({
       t.mode = "showing";
     }
   }, [selectedTrack, ccEnabled, trackOptions]);
-
-  const onSubtitleFile = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file || !mediaRef.current) return;
-
-    const video = mediaRef.current;
-    video.querySelectorAll("track[data-iptv-external]").forEach((node) => node.remove());
-    if (externalUrlRef.current) {
-      URL.revokeObjectURL(externalUrlRef.current);
-      externalUrlRef.current = null;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = typeof reader.result === "string" ? reader.result : "";
-      const isSrt = file.name.toLowerCase().endsWith(".srt");
-      const vtt = isSrt ? srtToWebVtt(text) : text;
-      const blob = new Blob([vtt], { type: "text/vtt" });
-      const objectUrl = URL.createObjectURL(blob);
-      externalUrlRef.current = objectUrl;
-
-      const track = document.createElement("track");
-      track.kind = "subtitles";
-      track.label = file.name.replace(/\.[^.]+$/, "") || "Custom";
-      track.src = objectUrl;
-      track.default = true;
-      track.setAttribute("data-iptv-external", "1");
-      video.appendChild(track);
-
-      refreshTextTracks();
-      let lastSub = -1;
-      for (let i = 0; i < video.textTracks.length; i++) {
-        const t = video.textTracks[i];
-        if (t.kind === "subtitles" || t.kind === "captions") lastSub = i;
-      }
-      if (lastSub >= 0) {
-        setSelectedTrack(`native-${lastSub}`);
-        setCcEnabled(true);
-      }
-    };
-    reader.readAsText(file, "UTF-8");
-  };
 
   const startRecording = useCallback(async () => {
     if (isLibraryChannel) return;
@@ -3436,37 +3770,6 @@ export function VideoPlayer({
     setLibSeekUiSec(0);
   }, []);
 
-  const reloadRadioStream = useCallback(() => {
-    if (!isInternetAudioStream) return;
-    setRadioStreamReloadTick((n) => n + 1);
-    setPlayerChromeNotice("Reconnecting stream…");
-    window.setTimeout(() => setPlayerChromeNotice(null), 1800);
-  }, [isInternetAudioStream]);
-
-  const copyRadioStreamUrl = useCallback(async () => {
-    const u = channel?.url?.trim();
-    if (!u || !isInternetAudioStream) return;
-    try {
-      await navigator.clipboard.writeText(u);
-      setPlayerChromeNotice("Stream URL copied.");
-      window.setTimeout(() => setPlayerChromeNotice(null), 2000);
-    } catch {
-      setPlayerChromeNotice("Could not copy — check clipboard permission or use the Edit menu.");
-      window.setTimeout(() => setPlayerChromeNotice(null), 3500);
-    }
-  }, [channel?.url, isInternetAudioStream]);
-
-  const openRadioStreamUrl = useCallback(() => {
-    const u = channel?.url?.trim();
-    if (!u || !isInternetAudioStream) return;
-    if (!/^https?:\/\//i.test(u)) {
-      setPlayerChromeNotice("Only http(s) URLs can open in a new tab.");
-      window.setTimeout(() => setPlayerChromeNotice(null), 3000);
-      return;
-    }
-    window.open(u, "_blank", "noopener,noreferrer");
-  }, [channel?.url, isInternetAudioStream]);
-
   const toggleInternetAudioPlayback = useCallback(() => {
     const el = mediaRef.current;
     if (!el) return;
@@ -3474,12 +3777,194 @@ export function VideoPlayer({
     else el.pause();
   }, []);
 
-  const renderVolumeEq = (extraWrapClass?: string) => {
-    if (!onVolumeChange) return null;
+  const toggleChromePlayPause = useCallback(() => {
+    if (isLibraryChannel) {
+      toggleLibraryPlayPause();
+      return;
+    }
+    if (isInternetAudioStream) {
+      toggleInternetAudioPlayback();
+      return;
+    }
+    const el = mediaRef.current;
+    if (!el) return;
+    if (el.paused) void el.play().catch(() => {});
+    else el.pause();
+  }, [isLibraryChannel, isInternetAudioStream, toggleLibraryPlayPause, toggleInternetAudioPlayback]);
+
+  const playbackBadgeTitle =
+    "How this stream is played: HLS via hls.js, HLS via the browser, MPEG-TS via mpegts.js (MSE), or a direct URL in the native video element.";
+
+  const renderLibraryTrackToolCluster = () => {
+    if (!channel || !isLibraryChannel) return null;
+    const mp3Tools = isLikelyLocalMp3Channel(channel);
     return (
-      <div className={extraWrapClass ? `volume-eq-wrap ${extraWrapClass}` : "volume-eq-wrap"}>
+      <div className="now-row-library-cluster" role="toolbar" aria-label="Track tools">
+        <button
+          type="button"
+          className="playback-badge playback-badge--btn"
+          disabled={ytBusy || youtubeSearchQueryFromTrackName(channel.name).trim().length < 2}
+          aria-busy={ytBusy}
+          title="Search from the file name; desktop can open the first YouTube result in a new window."
+          onClick={() => void openYoutubeForLocalMp3()}
+        >
+          {ytBusy ? "…" : "Find video"}
+        </button>
+        {mp3Tools ? (
+          <>
+            <button
+              type="button"
+              className="playback-badge playback-badge--btn"
+              disabled={mp3Lyrics.kind === "loading"}
+              title="Load lyrics and meaning only from the saved local database."
+              onClick={() => void loadLyricsFromLocalDbOnly()}
+            >
+              {mp3Lyrics.kind === "loading" ? "…" : "Local lyrics"}
+            </button>
+            <button
+              type="button"
+              className="playback-badge playback-badge--btn"
+              disabled={mp3Lyrics.kind === "loading"}
+              title="Fetch lyrics and meaning only from DeepSeek / the OpenAI-compatible key. This does not save over the local database."
+              onClick={() => void fetchLyricsFromDeepSeekOnly()}
+            >
+              DeepSeek
+            </button>
+            <button
+              type="button"
+              className="playback-badge playback-badge--btn"
+              disabled={mp3Lyrics.kind === "loading"}
+              title="Fetch lyrics and meaning only from Gemini. This does not save over the local database."
+              onClick={() => void fetchLyricsFromGeminiOnly()}
+            >
+              Gemini
+            </button>
+            <button
+              type="button"
+              className="playback-badge playback-badge--btn"
+              disabled={mp3Lyrics.kind !== "ready" || !mp3Lyrics.data.pairs.length}
+              title="Save the currently shown lyrics and meaning to the local database."
+              onClick={() => void saveShownLyricsToLocalDb()}
+            >
+              Save lyrics
+            </button>
+          </>
+        ) : null}
+        <button
+          type="button"
+          className="playback-badge playback-badge--btn"
+          onClick={() => skipLibraryToStart()}
+          title="Jump to the beginning of this track"
+        >
+          Start over
+        </button>
+      </div>
+    );
+  };
+
+  const renderChromeSeekRow = () => (
+    <div className="library-seek-row" aria-label="Playback position">
+      <span className="library-seek-label">Position</span>
+      <div className="library-seek-main">
+        <input
+          type="range"
+          className="library-seek-slider"
+          min={0}
+          max={libAudioDurationSec != null && libAudioDurationSec > 1.5 ? libAudioDurationSec : 1}
+          step={0.1}
+          disabled={!(libAudioDurationSec != null && libAudioDurationSec > 1.5)}
+          value={
+            libAudioDurationSec != null && libAudioDurationSec > 1.5
+              ? Math.min(Math.max(0, libSeekUiSec), libAudioDurationSec)
+              : 0
+          }
+          aria-valuetext={`${formatPlaybackClock(libSeekUiSec)} of ${
+            libAudioDurationSec != null && libAudioDurationSec > 1.5
+              ? formatPlaybackClock(libAudioDurationSec)
+              : "unknown"
+          }`}
+          onInput={(e) => {
+            const el = mediaRef.current;
+            const dur = libAudioDurationSec;
+            if (!el || dur == null || !(dur > 1.5)) return;
+            const v = Number(e.currentTarget.value);
+            if (!Number.isFinite(v)) return;
+            el.currentTime = Math.min(Math.max(0, v), dur);
+            setLibSeekUiSec(el.currentTime);
+          }}
+        />
+        {librarySeekScaleTicks ? (
+          <div className="library-seek-scale" aria-hidden>
+            {librarySeekScaleTicks.map((sec, i) => (
+              <span key={i} className="library-seek-scale-tick">
+                {formatPlaybackClockHMS(sec)}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div className="library-seek-scale library-seek-scale--placeholder" aria-hidden>
+            —
+          </div>
+        )}
+      </div>
+      <span className="library-seek-times">
+        {formatPlaybackClock(libSeekUiSec)} /{" "}
+        {libAudioDurationSec != null && libAudioDurationSec > 1.5
+          ? formatPlaybackClock(libAudioDurationSec)
+          : "—"}
+      </span>
+      <button
+        type="button"
+        className="library-seek-play-btn"
+        title={libTransportPaused ? "Play" : "Pause"}
+        aria-label={libTransportPaused ? "Play" : "Pause"}
+        onClick={() => void toggleChromePlayPause()}
+      >
+        {libTransportPaused ? (
+          <svg className="library-transport-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+            <path d="M4 2 L16 9 L4 16 Z" fill="currentColor" />
+          </svg>
+        ) : (
+          <svg className="library-transport-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+            <rect x="3" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
+            <rect x="11" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+
+  const renderVolumeEq = (extraWrapClass?: string, opts?: { showVolume?: boolean }) => {
+    const showVolume = opts?.showVolume !== false;
+    if (!showVolume && !mediaEqEnabled) return null;
+    if (showVolume && !onVolumeChange) return null;
+    const libraryAnchored = extraWrapClass?.includes("volume-eq-wrap--library-inline") ?? false;
+    const volumePanelInner = (
+      <div className="volume-popover-panel-inner">
+        <span className="volume-popover-title">Volume</span>
+        <input
+          type="range"
+          className="volume-popover-slider"
+          min={0}
+          max={1}
+          step={0.01}
+          value={volume}
+          aria-valuetext={`${Math.round(volume * 100)} percent`}
+          onChange={(e) => onVolumeChange!(Number(e.currentTarget.value))}
+        />
+        <span className="volume-popover-readout">{Math.round(volume * 100)}%</span>
+      </div>
+    );
+    return (
+      <div
+        className={`volume-eq-wrap${extraWrapClass ? ` ${extraWrapClass}` : ""}${
+          !showVolume ? " volume-eq-wrap--eq-only" : ""
+        }`}
+      >
+        {showVolume && onVolumeChange ? (
         <div className="volume-popover-host" ref={volumePopoverRef}>
           <button
+            ref={volumeTriggerRef}
             type="button"
             className="volume-popover-trigger"
             aria-expanded={volumePopoverOpen}
@@ -3492,30 +3977,35 @@ export function VideoPlayer({
             </span>
             <span className="volume-popover-pct">{Math.round(volume * 100)}%</span>
           </button>
-          {volumePopoverOpen ? (
+          {volumePopoverOpen && libraryAnchored ? (
+            <AnchoredPopover
+              open={volumePopoverOpen}
+              anchorRef={volumeTriggerRef}
+              panelRef={volumeAnchoredPanelRef}
+              role="dialog"
+              aria-label="Volume"
+              align="end"
+              preferAbove
+              className="volume-popover-panel volume-popover-panel--anchored"
+            >
+              {volumePanelInner}
+            </AnchoredPopover>
+          ) : null}
+          {volumePopoverOpen && !libraryAnchored ? (
             <div className="volume-popover-panel" role="dialog" aria-label="Volume">
-              <div className="volume-popover-panel-inner">
-                <span className="volume-popover-title">Volume</span>
-                <input
-                  type="range"
-                  className="volume-popover-slider"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={volume}
-                  aria-valuetext={`${Math.round(volume * 100)} percent`}
-                  onChange={(e) => onVolumeChange(Number(e.currentTarget.value))}
-                />
-                <span className="volume-popover-readout">{Math.round(volume * 100)}%</span>
-              </div>
+              {volumePanelInner}
             </div>
           ) : null}
         </div>
+        ) : null}
         <RadioEqualizer
           mediaRef={mediaRef}
           eqEnabled={mediaEqEnabled}
+          eqScope={eqPageScope}
           volume={volume}
-          onWebAudioRoutingActive={setRadioEqWebAudioActive}
+          streamKey={channel?.id}
+          onEqActiveChange={setEqActive}
+          anchoredPopover={libraryAnchored}
         />
       </div>
     );
@@ -3643,28 +4133,73 @@ export function VideoPlayer({
               </article>
             ) : null}
             {channel && isInternetAudioStream ? (
-              <InternetAudioShowcase
-                channel={channel}
-                kind={isPodcastChannel ? "podcast" : "radio"}
-                playing={radioPlaying}
-                playbackMode={playbackMode}
-                bufferLine={bufferLine}
-                onTogglePlay={toggleInternetAudioPlayback}
-                onCopy={() => void copyRadioStreamUrl()}
-                onOpen={openRadioStreamUrl}
-                onReload={reloadRadioStream}
-              />
+              <div
+                className={`internet-audio-layout${
+                  isRadioChannel ? " internet-audio-layout--radio-split" : ""
+                }`}
+              >
+                <div className="internet-audio-layout-station">
+                  <InternetAudioShowcase
+                    channel={channel}
+                    kind={isPodcastChannel ? "podcast" : "radio"}
+                    playing={radioPlaying}
+                    playbackMode={playbackMode}
+                    bufferLine={bufferLine}
+                    onTogglePlay={toggleInternetAudioPlayback}
+                  />
+                </div>
+                {isRadioChannel ? (
+                  <div className="internet-audio-layout-captions">
+                    <RadioLiveCaptionsPanel
+                      layout="split"
+                      enabled={radioCaptionsEnabled}
+                status={radioCaptionsStatus}
+                error={radioCaptionsErr}
+                segments={radioCaptionSegments}
+                translateBusy={radioCaptionTranslateBusy}
+                translateTarget={radioCaptionTranslateTarget}
+                translateHint={radioCaptionTranslateHint}
+                translateErr={radioCaptionTranslateErr}
+                onToggle={() => {
+                  if (!radioCaptionsEnabled && !canUseRadioLiveCaptions()) {
+                    setRadioCaptionsErr("Live captions need the desktop app with local Whisper.");
+                    return;
+                  }
+                  setRadioCaptionsEnabled((on) => {
+                    if (on) {
+                      setRadioCaptionsStatus("");
+                      setRadioCaptionsErr(null);
+                    } else {
+                      setRadioCaptionsStatus("");
+                      setRadioCaptionsErr(null);
+                    }
+                    return !on;
+                  });
+                }}
+                      onClear={() => {
+                        radioCaptionTranslateAbortRef.current?.abort();
+                        setRadioCaptionSegments([]);
+                        setRadioCaptionsStatus("");
+                        setRadioCaptionsErr(null);
+                        setRadioCaptionTranslateTarget(null);
+                        radioCaptionTranslateTargetRef.current = null;
+                        setRadioCaptionTranslateBusy(false);
+                        setRadioCaptionTranslateErr(null);
+                        setRadioCaptionTranslateHint(null);
+                      }}
+                      onSelectTranslateLanguage={(code) => void onRadioCaptionTranslateLanguage(code)}
+                    />
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             <video
               ref={mediaRef}
-              className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff || isRadioChannel ? " video-el--hidden" : ""}${
-                isPodcastChannel ? " video-el--podcast-stream" : ""
-              }`}
-              controls={(!isRadioChannel || isPodcastChannel) && !isEmbeddedWebChannel && !isEbookChannel}
+              className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff || isInternetAudioStream ? " video-el--hidden" : ""}`}
+              controls={!useChromeSeek && !isEmbeddedWebChannel && !isEbookChannel}
               playsInline
               preload="auto"
             />
-            {isInternetAudioStream ? renderVolumeEq("volume-eq-wrap--internet-audio") : null}
             {webVideoEmbedSrc ? (
               <iframe
                 key={`${channel.id}-${channel.streamResetNonce ?? 0}`}
@@ -3756,22 +4291,18 @@ export function VideoPlayer({
                 {lyricsTranslateHint && !lyricsTranslateErr ? (
                   <p className="mp3-lyrics-translate-status">{lyricsTranslateHint}</p>
                 ) : null}
-                {lyricsDisplayMeta ? (
-                  <header className="mp3-lyrics-track-meta" aria-label="Track">
-                    <p className="mp3-lyrics-track-line">
-                      {[lyricsDisplayMeta.artist, lyricsDisplayMeta.title, lyricsDisplayMeta.album]
-                        .filter((s) => s.length > 0)
-                        .join(" - ")}
-                    </p>
-                  </header>
-                ) : null}
-                {mp3Lyrics.kind === "error" ? (
-                  <div className="mp3-lyrics-err-body">{mp3Lyrics.message}</div>
-                ) : null}
-                {mp3Lyrics.kind === "ready" ? (
+                <div className="mp3-lyrics-panel-main">
+                  <div className="mp3-lyrics-col-lyrics">
+                    {mp3Lyrics.kind === "loading" ? (
+                      <p className="mp3-lyrics-loading">Fetching lyrics…</p>
+                    ) : null}
+                    {mp3Lyrics.kind === "error" ? (
+                      <div className="mp3-lyrics-err-body">{mp3Lyrics.message}</div>
+                    ) : null}
+                    {mp3Lyrics.kind === "ready" ? (
                   <div className="mp3-lyrics-body">
                     {mp3Lyrics.data.pairs.length === 0 ? (
-                      <p className="mp3-lyrics-empty">No lyric lines for this title.</p>
+                      <p className="mp3-lyrics-empty">No lyrics found for this title.</p>
                     ) : (
                       lyricsDisplayPairs.map((p, idx) => {
                         const same = p.orig.trim() === p.en.trim();
@@ -3792,30 +4323,55 @@ export function VideoPlayer({
                         );
                       })
                     )}
-                    {mp3Lyrics.data.pairs.length > 0 &&
+                  </div>
+                    ) : null}
+                  </div>
+                  <aside className="mp3-lyrics-col-aside" aria-label="Album art and song meaning">
+                    {lyricsDisplayMeta ? (
+                      <div className="mp3-lyrics-aside-meta">
+                        {lyricsDisplayMeta.title ? (
+                          <p className="mp3-lyrics-aside-title">{lyricsDisplayMeta.title}</p>
+                        ) : null}
+                        {lyricsDisplayMeta.artist ? (
+                          <p className="mp3-lyrics-aside-artist">{lyricsDisplayMeta.artist}</p>
+                        ) : null}
+                        {lyricsDisplayMeta.album ? (
+                          <p className="mp3-lyrics-aside-album">{lyricsDisplayMeta.album}</p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div className="mp3-lyrics-art-wrap">
+                      {lyricsCoverUrl ? (
+                        <img className="mp3-lyrics-art" src={lyricsCoverUrl} alt="" loading="lazy" />
+                      ) : (
+                        <span className="mp3-lyrics-art mp3-lyrics-art--placeholder" aria-hidden>
+                          ♪
+                        </span>
+                      )}
+                    </div>
+                    {mp3Lyrics.kind === "ready" &&
+                    mp3Lyrics.data.pairs.length > 0 &&
                     (songMeaningLoading ||
                       mp3Lyrics.data.songMeaning ||
                       mp3Lyrics.data.songMeaningError) ? (
-                      <section
-                        ref={songMeaningSectionRef}
-                        className="mp3-lyrics-meaning"
-                        aria-label="Song meaning"
-                      >
+                      <section className="mp3-lyrics-meaning mp3-lyrics-meaning--aside" aria-label="Song meaning">
                         <h3 className="mp3-lyrics-meaning-title">What this song is about</h3>
-                        {songMeaningLoading ? (
-                          <p className="mp3-lyrics-meaning-loading">Asking the LLM…</p>
-                        ) : null}
-                        {!songMeaningLoading && mp3Lyrics.data.songMeaning ? (
-                          <p className="mp3-lyrics-meaning-body">{mp3Lyrics.data.songMeaning}</p>
-                        ) : null}
-                        {!songMeaningLoading && mp3Lyrics.data.songMeaningError ? (
-                          <p className="mp3-lyrics-meaning-error" role="status">
-                            {mp3Lyrics.data.songMeaningError}
-                          </p>
-                        ) : null}
+                        <div className="mp3-lyrics-meaning-scroll">
+                          {songMeaningLoading ? (
+                            <p className="mp3-lyrics-meaning-loading">Asking the LLM…</p>
+                          ) : null}
+                          {!songMeaningLoading && mp3Lyrics.data.songMeaning ? (
+                            <p className="mp3-lyrics-meaning-body">{mp3Lyrics.data.songMeaning}</p>
+                          ) : null}
+                          {!songMeaningLoading && mp3Lyrics.data.songMeaningError ? (
+                            <p className="mp3-lyrics-meaning-error" role="status">
+                              {mp3Lyrics.data.songMeaningError}
+                            </p>
+                          ) : null}
+                        </div>
                       </section>
                     ) : null}
-                    {lyricsSourceSummary ? (
+                    {mp3Lyrics.kind === "ready" && lyricsSourceSummary ? (
                       <footer className="mp3-lyrics-llm-usage" aria-label="Lyrics and meaning sources">
                         <p className="mp3-lyrics-llm-usage-title">Sources</p>
                         <p className="mp3-lyrics-llm-usage-line">
@@ -3829,8 +4385,8 @@ export function VideoPlayer({
                         </p>
                       </footer>
                     ) : null}
-                  </div>
-                ) : null}
+                  </aside>
+                </div>
               </div>
             ) : null}
           </div>
@@ -3888,19 +4444,41 @@ export function VideoPlayer({
                     {paneLabel}
                   </span>
                 ) : null}
-                {playbackMode ? (
+                {isLibraryChannel ? (
+                  renderLibraryTrackToolCluster()
+                ) : isRadioChannel || isPodcastChannel ? (
+                  <div className="now-row-playback-cluster">
+                    {playbackMode ? (
+                      <span
+                        className={`playback-badge${playbackMode.includes("blocked") ? " playback-badge--warn" : ""}`}
+                        title={playbackBadgeTitle}
+                      >
+                        {playbackMode}
+                      </span>
+                    ) : null}
+                    {renderVolumeEq("volume-eq-wrap--chrome-inline")}
+                  </div>
+                ) : playbackMode ? (
                   <span
                     className={`playback-badge${playbackMode.includes("blocked") ? " playback-badge--warn" : ""}`}
-                    title="How this stream is played: HLS via hls.js, HLS via the browser, MPEG-TS via mpegts.js (MSE), or a direct URL in the native video element."
+                    title={playbackBadgeTitle}
                   >
                     {playbackMode}
                   </span>
                 ) : null}
-                {!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel ? (
-                  <label className="cc-toggle cc-toggle--inline">
-                    <input type="checkbox" checked={ccEnabled} onChange={(e) => setCcEnabled(e.target.checked)} />
-                    Show CC
-                  </label>
+                {(onVolumeChange && !isLibraryChannel && !isInternetAudioStream) ||
+                (!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel) ? (
+                  <div className="now-row-playback-cluster">
+                    {!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel ? (
+                      <label className="cc-toggle cc-toggle--inline">
+                        <input type="checkbox" checked={ccEnabled} onChange={(e) => setCcEnabled(e.target.checked)} />
+                        Show CC
+                      </label>
+                    ) : null}
+                    {onVolumeChange && !isLibraryChannel && !isInternetAudioStream
+                      ? renderVolumeEq("volume-eq-wrap--chrome-inline")
+                      : null}
+                  </div>
                 ) : null}
               </div>
               {showRecordChrome || showScreenOffChrome || recording ? (
@@ -3965,63 +4543,10 @@ export function VideoPlayer({
             <div className="buffer-stats" title="Buffered seconds ahead, buffer fill rate (s/s), optional HLS level bitrate">
               {bufferLine}
             </div>
-            {isLibraryChannel ? (
+            {useChromeSeek ? (
               <>
-                <div className="library-seek-row" aria-label="Playback position">
-                  <span className="library-seek-label">Position</span>
-                  <div className="library-seek-main">
-                    <input
-                      type="range"
-                      className="library-seek-slider"
-                      min={0}
-                      max={
-                        libAudioDurationSec != null && libAudioDurationSec > 1.5
-                          ? libAudioDurationSec
-                          : 1
-                      }
-                      step={0.1}
-                      disabled={!(libAudioDurationSec != null && libAudioDurationSec > 1.5)}
-                      value={
-                        libAudioDurationSec != null && libAudioDurationSec > 1.5
-                          ? Math.min(Math.max(0, libSeekUiSec), libAudioDurationSec)
-                          : 0
-                      }
-                      aria-valuetext={`${formatPlaybackClock(libSeekUiSec)} of ${
-                        libAudioDurationSec != null && libAudioDurationSec > 1.5
-                          ? formatPlaybackClock(libAudioDurationSec)
-                          : "unknown"
-                      }`}
-                      onInput={(e) => {
-                        const el = mediaRef.current;
-                        const dur = libAudioDurationSec;
-                        if (!el || dur == null || !(dur > 1.5)) return;
-                        const v = Number(e.currentTarget.value);
-                        if (!Number.isFinite(v)) return;
-                        el.currentTime = Math.min(Math.max(0, v), dur);
-                        setLibSeekUiSec(el.currentTime);
-                      }}
-                    />
-                    {librarySeekScaleTicks ? (
-                      <div className="library-seek-scale" aria-hidden>
-                        {librarySeekScaleTicks.map((sec, i) => (
-                          <span key={i} className="library-seek-scale-tick">
-                            {formatPlaybackClockHMS(sec)}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="library-seek-scale library-seek-scale--placeholder" aria-hidden>
-                        —
-                      </div>
-                    )}
-                  </div>
-                  <span className="library-seek-times">
-                    {formatPlaybackClock(libSeekUiSec)} /{" "}
-                    {libAudioDurationSec != null && libAudioDurationSec > 1.5
-                      ? formatPlaybackClock(libAudioDurationSec)
-                      : "—"}
-                  </span>
-                </div>
+                {renderChromeSeekRow()}
+                {isLibraryChannel ? (
                 <div className="library-controls-bar">
                   <div className="library-transport-row library-transport-row--compact" aria-label="Playback controls">
                     <button
@@ -4067,6 +4592,7 @@ export function VideoPlayer({
                     {renderVolumeEq("volume-eq-wrap--library-inline")}
                   </div>
                 </div>
+                ) : null}
               </>
             ) : null}
             {channel && !isLibraryChannel ? (
@@ -4084,140 +4610,9 @@ export function VideoPlayer({
                     : "REC needs a direct http(s) media stream URL."}
               </p>
             ) : null}
-            {onVolumeChange && !isLibraryChannel && !isInternetAudioStream ? renderVolumeEq() : null}
             {error ? <div className="error-banner">{error}</div> : null}
             {ytErr ? <div className="yt-search-err">{ytErr}</div> : null}
             {playerChromeNotice ? <div className="player-chrome-notice">{playerChromeNotice}</div> : null}
-            {isLibraryChannel ? (
-              <div className="library-audio-toolbar" role="toolbar" aria-label="Track tools">
-                <div className="library-audio-toolbar__group library-audio-toolbar__group--primary">
-                  <button
-                    type="button"
-                    className="library-audio-tool-btn library-audio-tool-btn--yt"
-                    disabled={
-                      ytBusy || youtubeSearchQueryFromTrackName(channel.name).trim().length < 2
-                    }
-                    aria-busy={ytBusy}
-                    title="Search from the file name; desktop can open the first YouTube result in a new window."
-                    onClick={() => void openYoutubeForLocalMp3()}
-                  >
-                    {ytBusy ? "…" : "Find video"}
-                  </button>
-                  {isLikelyLocalMp3Channel(channel) ? (
-                    <>
-                      <button
-                        type="button"
-                        className="library-audio-tool-btn"
-                        disabled={mp3Lyrics.kind === "loading"}
-                        title="Load lyrics and meaning only from the saved local database."
-                        onClick={() => void loadLyricsFromLocalDbOnly()}
-                      >
-                        {mp3Lyrics.kind === "loading" ? "Lyrics…" : "Local lyrics"}
-                      </button>
-                      <button
-                        type="button"
-                        className="library-audio-tool-btn"
-                        disabled={mp3Lyrics.kind === "loading"}
-                        title="Fetch lyrics and meaning only from DeepSeek / the OpenAI-compatible key. This does not save over the local database."
-                        onClick={() => void fetchLyricsFromDeepSeekOnly()}
-                      >
-                        DeepSeek lyrics
-                      </button>
-                      <button
-                        type="button"
-                        className="library-audio-tool-btn"
-                        disabled={mp3Lyrics.kind === "loading"}
-                        title="Fetch lyrics and meaning only from Gemini. This does not save over the local database."
-                        onClick={() => void fetchLyricsFromGeminiOnly()}
-                      >
-                        Gemini lyrics
-                      </button>
-                      <button
-                        type="button"
-                        className="library-audio-tool-btn"
-                        disabled={mp3Lyrics.kind !== "ready" || !mp3Lyrics.data.pairs.length}
-                        title="Save the currently shown lyrics and meaning to the local database."
-                        onClick={() => void saveShownLyricsToLocalDb()}
-                      >
-                        Save to library
-                      </button>
-                      {!mp3LyricsHidden && mp3Lyrics.kind !== "idle" ? (
-                        <button
-                          type="button"
-                          className="library-audio-tool-btn"
-                          onClick={hideLyricsPanel}
-                          title="Hide the lyrics panel"
-                        >
-                          Hide lyrics
-                        </button>
-                      ) : mp3LyricsHidden && mp3Lyrics.kind !== "idle" ? (
-                        <button
-                          type="button"
-                          className="library-audio-tool-btn"
-                          onClick={() => setMp3LyricsHidden(false)}
-                          title="Show the lyrics panel"
-                        >
-                          Show lyrics
-                        </button>
-                      ) : null}
-                    </>
-                  ) : null}
-                </div>
-                <div className="library-audio-toolbar__group library-audio-toolbar__group--secondary">
-                  <button
-                    type="button"
-                    className="library-audio-tool-btn"
-                    onClick={() => skipLibraryToStart()}
-                    title="Jump to the beginning of this track"
-                  >
-                    Start over
-                  </button>
-                </div>
-              </div>
-            ) : isInternetAudioStream ? (
-              <div className="radio-chrome-toolbar" role="toolbar" aria-label="Stream tools">
-                <button
-                  type="button"
-                  className="library-audio-tool-btn"
-                  onClick={() => void copyRadioStreamUrl()}
-                  disabled={!channel?.url?.trim()}
-                  title="Copy the stream URL to the clipboard"
-                >
-                  Copy stream URL
-                </button>
-                <button
-                  type="button"
-                  className="library-audio-tool-btn"
-                  onClick={openRadioStreamUrl}
-                  disabled={!/^https?:\/\//i.test(channel?.url?.trim() ?? "")}
-                  title="Open the stream URL in your default browser"
-                >
-                  Open stream
-                </button>
-                <button
-                  type="button"
-                  className="library-audio-tool-btn"
-                  onClick={reloadRadioStream}
-                  disabled={!channel?.url?.trim()}
-                  title="Tear down the player and reconnect (useful after a stall)"
-                >
-                  Reload stream
-                </button>
-              </div>
-            ) : (
-              <div className="controls-row">
-                <input
-                  ref={subFileRef}
-                  type="file"
-                  accept=".vtt,.srt,text/vtt,application/x-subrip"
-                  className="hidden-input"
-                  onChange={onSubtitleFile}
-                />
-                <button type="button" className="ctrl-btn" onClick={() => subFileRef.current?.click()}>
-                  Load subtitles (.vtt / .srt)
-                </button>
-              </div>
-            )}
           </>
         ) : null}
       </div>

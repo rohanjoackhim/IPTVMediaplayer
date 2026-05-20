@@ -19,6 +19,7 @@
     "dist:mac:universal": "npm run build && electron-builder --mac --universal"
   },
   "dependencies": {
+    "@xenova/transformers": "^2.17.2",
     "dotenv": "^16.6.1",
     "ffmpeg-static": "^5.2.0",
     "franc-min": "^6.2.0",
@@ -29,7 +30,8 @@
     "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "wavefile": "^11.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
@@ -52,11 +54,14 @@
     "files": [
       "dist/**/*",
       "electron/main.cjs",
+      "electron/whisperStt.cjs",
       "electron/preload.cjs",
       "package.json",
       "node_modules/ffmpeg-static/**/*",
       "node_modules/kokoro-js/**/*",
       "node_modules/@huggingface/**/*",
+      "node_modules/@xenova/**/*",
+      "node_modules/wavefile/**/*",
       "node_modules/phonemizer/**/*",
       "node_modules/onnxruntime-common/**/*",
       "node_modules/onnxruntime-node/**/*",
@@ -71,6 +76,7 @@
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/onnxruntime-node/**",
+      "node_modules/@xenova/**",
       "node_modules/onnxruntime-web/**",
       "node_modules/sharp/**",
       "node_modules/@img/**",

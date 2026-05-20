@@ -1,6 +1,7 @@
 import { getAudioLibraryTrackById } from "./audioLibraryDb";
 import { extractAudioMetadata } from "./extractAudioMetadata";
 import { guessArtistAndTrackFromFilename } from "./artistTitleFromFilename";
+import { identityFromFilenameLabel, pickBestLyricsIdentity } from "./lyricsTrackIdentity";
 
 export interface TrackFileMetadata {
   artist: string;
@@ -44,34 +45,52 @@ function pickIdentityFromTags(
  */
 export async function resolveTrackMetadataFromLibrary(
   displayName: string,
-  libraryTrackId?: string | null
+  libraryTrackId?: string | null,
+  opts?: { preferFilename?: boolean }
 ): Promise<TrackFileMetadata> {
+  const displayMeta = identityFromFilenameLabel(displayName);
   const tid = String(libraryTrackId ?? "").trim();
+
+  let tagMeta: TrackFileMetadata | null = null;
+  let fileMeta: TrackFileMetadata | null = null;
+
   if (tid) {
     try {
       const row = await getAudioLibraryTrackById(tid);
       if (row) {
+        const fileLabel = row.sourceFileName?.trim() || row.name?.trim() || "";
+        if (fileLabel) {
+          fileMeta = identityFromFilenameLabel(fileLabel);
+        }
         const persistedArtist = row.tagArtist?.trim() ?? "";
         const persistedTitle = row.tagTitle?.trim() ?? "";
         if (persistedArtist || persistedTitle) {
-          return {
+          tagMeta = {
             artist: persistedArtist,
             title: persistedTitle || displayName.trim(),
             album: "",
             source: "tags",
           };
-        }
-        if (row.blob instanceof Blob) {
-          const hint = row.sourceFileName?.trim() || `${row.name}${guessExtFromMime(row.contentType)}`;
+        } else if (row.blob instanceof Blob) {
+          const hint = fileLabel || `${row.name}${guessExtFromMime(row.contentType)}`;
           const meta = await extractAudioMetadata(row.blob, hint);
-          return pickIdentityFromTags(meta, displayName);
+          tagMeta = pickIdentityFromTags(meta, displayName);
         }
       }
     } catch {
       /* fall through */
     }
   }
-  return pickIdentityFromTags({ title: "", artist: "", album: "" }, displayName);
+
+  if (opts?.preferFilename) {
+    return fileMeta?.artist.trim() && fileMeta?.title.trim()
+      ? fileMeta
+      : displayMeta.artist.trim() && displayMeta.title.trim()
+        ? displayMeta
+        : fileMeta ?? tagMeta ?? displayMeta;
+  }
+
+  return pickBestLyricsIdentity(tagMeta, fileMeta, displayMeta);
 }
 
 /** Label for LRCLIB / LLM when tags supply artist + title. */

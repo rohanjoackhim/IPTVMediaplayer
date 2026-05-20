@@ -90,16 +90,35 @@ function buildPlansForOneLabel(label: string): LrclibSearchPlan[] {
   return plans;
 }
 
+function buildTitleOnlyPlans(title: string): LrclibSearchPlan[] {
+  const t = normalizeLyricsTitleSource(title);
+  if (t.length < 3) return [];
+  const words = t.split(/\s+/).filter(Boolean);
+  const plans: LrclibSearchPlan[] = [
+    { mode: "q", q: t.slice(0, 200) },
+    { mode: "trackArtist", trackName: t.slice(0, 120), artistName: "Unknown Artist" },
+  ];
+  if (words.length > 3) {
+    plans.push({ mode: "q", q: words.slice(0, 8).join(" ").slice(0, 200) });
+  }
+  return plans;
+}
+
 function buildPlansFromFileMetadata(fileMeta: LyricsFileMetadata): LrclibSearchPlan[] {
   const artist = normalizeLyricsTitleSource(fileMeta.artist || "");
   const title = normalizeLyricsTitleSource(fileMeta.title || "");
-  if (!artist || !title) return [];
+  if (!title) return [];
+  if (!artist) return buildTitleOnlyPlans(title);
   const label = `${artist} - ${title}`;
   const plans = buildPlansForOneLabel(label);
   const extra: LrclibSearchPlan[] = [
     { mode: "trackArtist", trackName: title.slice(0, 120), artistName: artist.slice(0, 120) },
+    { mode: "trackArtist", trackName: title.slice(0, 120), artistName: artist.slice(0, 80) },
+    { mode: "trackArtist", trackName: artist.slice(0, 120), artistName: title.slice(0, 120) },
+    { mode: "q", q: `${artist} - ${title}`.slice(0, 200) },
     { mode: "q", q: `${artist} ${title}`.slice(0, 200) },
     { mode: "q", q: `${title} ${artist}`.slice(0, 200) },
+    { mode: "q", q: `${title} - ${artist}`.slice(0, 200) },
   ];
   if (fileMeta.album?.trim()) {
     extra.push({ mode: "q", q: `${artist} ${title} ${normalizeLyricsTitleSource(fileMeta.album)}`.slice(0, 200) });
@@ -112,7 +131,7 @@ function buildPlansFromFileMetadata(fileMeta: LyricsFileMetadata): LrclibSearchP
  */
 export function buildLrclibSearchPlans(
   displayName: string,
-  fileMeta?: LyricsFileMetadata | null
+  fileMeta?: LyricsFileMetadata | LyricsFileMetadata[] | null
 ): LrclibSearchPlan[] {
   const seen = new Set<string>();
   const deduped: LrclibSearchPlan[] = [];
@@ -124,10 +143,20 @@ export function buildLrclibSearchPlans(
     deduped.push(p);
   };
 
-  if (fileMeta?.artist?.trim() && fileMeta?.title?.trim()) {
-    for (const p of buildPlansFromFileMetadata(fileMeta)) push(p);
+  const pushMeta = (m: LyricsFileMetadata) => {
+    if (m.title?.trim()) {
+      for (const p of buildPlansFromFileMetadata(m)) push(p);
+    } else if (m.artist?.trim()) {
+      for (const p of buildPlansForOneLabel(m.artist)) push(p);
+    }
+  };
+
+  if (Array.isArray(fileMeta)) {
+    for (const m of fileMeta) pushMeta(m);
+  } else if (fileMeta) {
+    pushMeta(fileMeta);
   }
   for (const p of buildPlansForOneLabel(displayName)) push(p);
 
-  return deduped.slice(0, 30);
+  return deduped.slice(0, 42);
 }

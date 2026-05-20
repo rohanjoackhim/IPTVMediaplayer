@@ -1,8 +1,9 @@
 import type { LibraryLyricsCacheRow } from "./audioLibraryDb";
-import { getLibraryLyricsCache, putLibraryLyricsCache } from "./audioLibraryDb";
+import { getAudioLibraryTrackById, getLibraryLyricsCache, putLibraryLyricsCache } from "./audioLibraryDb";
 import { fetchLyricsLlmEndpointInfo, hasLyricsLlmKey, hasSongMeaningKey } from "./lyricsLlmEndpointLabel";
 import { createLyricsJsonFetcher } from "./lyricsJsonFetch";
-import { tryUnifiedLlmLyrics } from "./llmUnifiedLyricsIpc";
+import { lyricsMetadataDiffers, tokenSimilarityForLyrics } from "./lyricsTrackIdentity";
+import { tryUnifiedLlmLyrics, type LlmUnifiedLyricsCoerced } from "./llmUnifiedLyricsIpc";
 import { fetchSongMeaningFromLlm } from "./llmSongMeaningIpc";
 import type { LyricsFileMetadata } from "./lyricsQueryVariants";
 import { lrclibFindBestLyrics } from "./lrclibSearchLyrics";
@@ -38,7 +39,27 @@ export interface LocalMp3LyricsResult {
   fromLocalCache?: boolean;
 }
 
-export const LOCAL_LYRICS_MATCH_VERSION = 2;
+/** Bump when lyrics matching logic changes so stale IndexedDB lyrics are refetched. */
+export const LOCAL_LYRICS_MATCH_VERSION = 5;
+
+function buildLrclibSearchMetas(
+  fileMeta: TrackFileMetadata,
+  altMeta: TrackFileMetadata
+): LyricsFileMetadata[] {
+  const primary = toLyricsFileMetadata(fileMeta);
+  const metas: LyricsFileMetadata[] = [primary];
+  const alt = toLyricsFileMetadata(altMeta);
+  if (lyricsMetadataDiffers(fileMeta, altMeta)) {
+    metas.push(alt);
+    if (primary.title?.trim() && alt.artist?.trim()) {
+      metas.push({ artist: alt.artist, title: primary.title, album: primary.album });
+    }
+    if (primary.artist?.trim() && alt.title?.trim()) {
+      metas.push({ artist: primary.artist, title: alt.title, album: primary.album });
+    }
+  }
+  return metas;
+}
 
 function applyLyricsLlmMeta(
   result: LocalMp3LyricsResult,
@@ -70,6 +91,64 @@ function toLyricsFileMetadata(meta: TrackFileMetadata): LyricsFileMetadata {
   };
 }
 
+async function librarySourceFileName(trackId: string): Promise<string> {
+  const tid = trackId.trim();
+  if (!tid) return "";
+  try {
+    const row = await getAudioLibraryTrackById(tid);
+    return row?.sourceFileName?.trim() || row?.name?.trim() || "";
+  } catch {
+    return "";
+  }
+}
+
+async function buildLlmLyricsFetchHints(
+  displayName: string,
+  fileMeta: TrackFileMetadata,
+  trackId: string
+): Promise<{
+  sourceFileName?: string;
+  altArtist?: string;
+  altTitle?: string;
+  playerHeaderLabel?: string;
+}> {
+  const sourceFileName = await librarySourceFileName(trackId);
+  const altMeta = await resolveTrackMetadataFromLibrary(displayName, trackId, { preferFilename: true });
+  const altLyrics = toLyricsFileMetadata(altMeta);
+  return {
+    sourceFileName: sourceFileName || undefined,
+    altArtist: altLyrics.artist || undefined,
+    altTitle: altLyrics.title || undefined,
+    playerHeaderLabel: lrclibLabelFromMetadata(fileMeta, displayName) || undefined,
+  };
+}
+
+/** LLM lyrics with filename hints; retries with filename-only metadata when tags disagree. */
+async function tryUnifiedLlmLyricsWithRetries(
+  displayName: string,
+  durationSec: number | null,
+  fileMeta: TrackFileMetadata,
+  lyricsMeta: LyricsFileMetadata,
+  signal: AbortSignal | undefined,
+  trackId: string
+): Promise<LlmUnifiedLyricsCoerced | null> {
+  const hints = await buildLlmLyricsFetchHints(displayName, fileMeta, trackId);
+
+  let unified = await tryUnifiedLlmLyrics(displayName, durationSec, lyricsMeta, signal, hints);
+  if (unified?.pairs.length) return unified;
+
+  const altMeta = await resolveTrackMetadataFromLibrary(displayName, trackId, { preferFilename: true });
+  const altLyrics = toLyricsFileMetadata(altMeta);
+  if (lyricsMetadataDiffers(fileMeta, altMeta)) {
+    unified = await tryUnifiedLlmLyrics(displayName, durationSec, altLyrics, signal, {
+      sourceFileName: hints.sourceFileName,
+      playerHeaderLabel: lrclibLabelFromMetadata(altMeta, displayName) || hints.playerHeaderLabel,
+    });
+    if (unified?.pairs.length) return unified;
+  }
+  return null;
+}
+
 /** Map IndexedDB lyrics row → UI result (caller should load cache before fetch). */
 export function mapCachedLibraryLyricsToResult(cached: LibraryLyricsCacheRow): LocalMp3LyricsResult {
   const a = cached.metaArtist?.trim() ?? "";
@@ -95,8 +174,30 @@ export function mapCachedLibraryLyricsToResult(cached: LibraryLyricsCacheRow): L
   };
 }
 
-export function isUsableSavedLyricsCache(cached: LibraryLyricsCacheRow | null | undefined): cached is LibraryLyricsCacheRow {
-  return !!cached?.pairs?.length;
+function lyricsMetaMatchesCache(
+  cached: LibraryLyricsCacheRow,
+  metaArtist?: string,
+  metaTitle?: string
+): boolean {
+  const wantArtist = metaArtist?.trim() ?? "";
+  const wantTitle = metaTitle?.trim() ?? "";
+  if (!wantArtist && !wantTitle) return true;
+  const gotArtist = cached.metaArtist?.trim() ?? "";
+  const gotTitle = cached.metaTitle?.trim() ?? "";
+  if (!gotArtist && !gotTitle) return true;
+  if (wantArtist && gotArtist && tokenSimilarityForLyrics(wantArtist, gotArtist) < 0.42) return false;
+  if (wantTitle && gotTitle && tokenSimilarityForLyrics(wantTitle, gotTitle) < 0.42) return false;
+  return true;
+}
+
+export function isUsableSavedLyricsCache(
+  cached: LibraryLyricsCacheRow | null | undefined,
+  opts?: { metaArtist?: string; metaTitle?: string }
+): cached is LibraryLyricsCacheRow {
+  if (!cached?.pairs?.length) return false;
+  const v = cached.lyricsMatchVersion ?? 0;
+  if (v < LOCAL_LYRICS_MATCH_VERSION) return false;
+  return lyricsMetaMatchesCache(cached, opts?.metaArtist, opts?.metaTitle);
 }
 
 /** Add LLM song meaning when missing (e.g. older cached lyrics). */
@@ -283,12 +384,17 @@ export async function fetchGeminiLyricsForLocalMp3(
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const trackId = opts?.libraryTrackId?.trim() || "";
   const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
+  const hints = await buildLlmLyricsFetchHints(displayName, fileMeta, trackId);
   const raw = await ipc({
     displayName,
     durationSec,
     metaArtist: fileMeta.artist || undefined,
     metaTitle: fileMeta.title || undefined,
     metaAlbum: fileMeta.album || undefined,
+    sourceFileName: hints.sourceFileName,
+    altArtist: hints.altArtist,
+    altTitle: hints.altTitle,
+    playerHeaderLabel: hints.playerHeaderLabel,
   });
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const result = coerceGeminiLyricsResult(raw, fileMeta, displayName);
@@ -307,7 +413,14 @@ export async function fetchDeepSeekLyricsForLocalMp3(
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
   const trackId = opts?.libraryTrackId?.trim() || "";
   const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
-  const unified = await tryUnifiedLlmLyrics(displayName, durationSec, toLyricsFileMetadata(fileMeta), signal);
+  const unified = await tryUnifiedLlmLyricsWithRetries(
+    displayName,
+    durationSec,
+    fileMeta,
+    toLyricsFileMetadata(fileMeta),
+    signal,
+    trackId
+  );
   if (!unified?.pairs.length) {
     throw new Error("DeepSeek could not find lyrics for this track.");
   }
@@ -378,16 +491,24 @@ export async function fetchBilingualLyricsForLocalMp3(
 
   const trackId = opts?.libraryTrackId?.trim() || "";
   const fileMeta = await resolveTrackMetadataFromLibrary(displayName, trackId);
-  const lyricsMeta = toLyricsFileMetadata(fileMeta);
+  const altMeta = await resolveTrackMetadataFromLibrary(displayName, trackId, { preferFilename: true });
+  const searchMetas = buildLrclibSearchMetas(fileMeta, altMeta);
   const useLlmFallback = await hasLyricsLlmKey();
 
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-  const best = await lrclibFindBestLyrics(displayName, durationSec, fetchJson, signal, lyricsMeta);
+  let best = await lrclibFindBestLyrics(displayName, durationSec, fetchJson, signal, searchMetas);
   if (!best) {
     if (useLlmFallback) {
       try {
-        const unified = await tryUnifiedLlmLyrics(displayName, durationSec, lyricsMeta, signal);
+        const unified = await tryUnifiedLlmLyricsWithRetries(
+          displayName,
+          durationSec,
+          fileMeta,
+          toLyricsFileMetadata(fileMeta),
+          signal,
+          trackId
+        );
         if (unified && unified.pairs.length > 0) {
           const shortHeadline =
             fileMeta.artist?.trim() && fileMeta.title?.trim()

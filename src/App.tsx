@@ -68,26 +68,6 @@ function saveChannels(channels: Channel[]) {
   }
 }
 
-const PARSE_MESSAGE_KEY = "iptv-parse-message";
-
-function loadParseMessage(): string | null {
-  try {
-    const s = localStorage.getItem(PARSE_MESSAGE_KEY);
-    return s && s.trim() ? s : null;
-  } catch {
-    return null;
-  }
-}
-
-function saveParseMessage(msg: string | null) {
-  try {
-    if (msg?.trim()) localStorage.setItem(PARSE_MESSAGE_KEY, msg.trim());
-    else localStorage.removeItem(PARSE_MESSAGE_KEY);
-  } catch {
-    /* noop */
-  }
-}
-
 function minPlayerWidthPx(): number {
   if (typeof window === "undefined") return 300;
   const w = window.innerWidth;
@@ -167,7 +147,6 @@ export default function App() {
   const [assignTarget, setAssignTarget] = useState(() => loadUiSession().assignTarget);
   const [volumeLeft, setVolumeLeft] = useState(() => loadUiSession().volumeLeft);
   const [volumeRight, setVolumeRight] = useState(() => loadUiSession().volumeRight);
-  const [parseMessage, setParseMessage] = useState<string | null>(() => loadParseMessage());
   const [favoriteUrls, setFavoriteUrls] = useState<Set<string>>(() => loadFavoriteUrls());
   const [audioLibraryShuffle, setAudioLibraryShuffle] = useState(() => loadUiSession().audioLibraryShuffle);
   const [audioLibraryContinuous, setAudioLibraryContinuous] = useState(
@@ -198,10 +177,6 @@ export default function App() {
       }
     });
   }, [splitView]);
-
-  useEffect(() => {
-    saveParseMessage(parseMessage);
-  }, [parseMessage]);
 
   useEffect(() => {
     if (!isDemoChannels(channels)) saveChannels(channels);
@@ -243,6 +218,14 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  useEffect(() => {
+    try {
+      localStorage.removeItem("iptv-parse-message");
+    } catch {
+      /* noop */
+    }
+  }, []);
+
   /** Refetch last playlist URL on launch when one is saved (channels + favorites stay in local storage). */
   useEffect(() => {
     const url = loadLastPlaylistUrl();
@@ -251,13 +234,8 @@ export default function App() {
     void fetchM3uPlaylist(url)
       .then((text) => {
         if (cancelled) return;
-        const { channels: next, errors } = parseM3U(text);
-        if (next.length) {
-          setChannels(next);
-          setParseMessage(
-            `Reloaded ${next.length} channel(s) from saved playlist URL.${errors.length ? " " + errors.join(" ") : ""}`
-          );
-        }
+        const { channels: next } = parseM3U(text);
+        if (next.length) setChannels(next);
       })
       .catch(() => {
         /* keep channels from localStorage */
@@ -398,18 +376,11 @@ export default function App() {
         return next;
       });
     }
-    setParseMessage("Reset local stream session for the selected player. Provider-side blocks still require a valid provider/account connection.");
   }, [assignTarget, rememberLastPlayed, splitView]);
 
   const onLoadM3U = useCallback((text: string, replace: boolean) => {
     const { channels: next, errors } = parseM3U(text);
-    if (errors.length && next.length === 0) {
-      setParseMessage(errors.join(" "));
-      return;
-    }
-    setParseMessage(
-      next.length ? `Loaded ${next.length} channel(s).${errors.length ? " " + errors.join(" ") : ""}` : null
-    );
+    if (errors.length && next.length === 0) return;
     setChannels((prev) => {
       if (replace) {
         revokeLocalVideoBlobUrls(prev);
@@ -448,22 +419,11 @@ export default function App() {
     setActive((cur) => (cur && sidebarModeForChannel(cur) === "tv" ? null : cur));
     setLastTvChannel(null);
     setChannelRight(null);
-    setParseMessage("Playlist cleared.");
   }, []);
 
   const onAddLocalVideoChannels = useCallback((incoming: Channel[]) => {
     if (!incoming.length) return;
     setChannels((prev) => [...incoming, ...prev]);
-    const webVideoCount = incoming.filter((c) => !!c.youtubeVideoId || !!c.webVideoPageUrl).length;
-    if (webVideoCount > 0) {
-      setParseMessage(
-        `Added ${webVideoCount} web video${webVideoCount === 1 ? "" : "s"} at the top of the Television list. Website pages play only when the site allows embedded playback.`
-      );
-      return;
-    }
-    setParseMessage(
-      `Added ${incoming.length} local video file(s) at the top of the list (see the Local videos tab). Playback position is saved per file. To use two players, enable split screen from File > Preferences.`
-    );
   }, []);
 
   const onRemoveChannel = useCallback((channelId: string) => {
@@ -474,7 +434,6 @@ export default function App() {
     setActive((cur) => (cur?.id === channelId ? null : cur));
     setChannelRight((cur) => (cur?.id === channelId ? null : cur));
     setLastTvChannel((cur) => (cur?.id === channelId ? null : cur));
-    setParseMessage(`Removed "${removed.name}" from Television.`);
   }, [channels]);
 
   const libraryAudioChannels = useMemo(
@@ -611,8 +570,6 @@ export default function App() {
               onClearList={onClearList}
               onAddLocalVideoChannels={onAddLocalVideoChannels}
               onRemoveChannel={onRemoveChannel}
-              parseMessage={parseMessage}
-              onPlaylistMessage={setParseMessage}
               favoriteUrls={favoriteUrls}
               onToggleFavoriteChannel={toggleFavoriteChannel}
               audioLibraryShuffle={audioLibraryShuffle}

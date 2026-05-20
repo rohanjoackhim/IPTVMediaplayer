@@ -79,6 +79,15 @@ contextBridge.exposeInMainWorld("iptv", {
 
   cancelNeuralTts: () => ipcRenderer.invoke("iptv-neural-tts-cancel"),
 
+  /** Desktop: local Whisper STT for live radio captions. */
+  whisperStatus: () => ipcRenderer.invoke("iptv-whisper-status"),
+
+  whisperWarmup: () => ipcRenderer.invoke("iptv-whisper-warmup"),
+
+  whisperTranscribePcm: (pcmArrayBuffer) => ipcRenderer.invoke("iptv-whisper-transcribe-pcm", pcmArrayBuffer),
+
+  whisperTranscribeChunk: (audioWebm) => ipcRenderer.invoke("iptv-whisper-transcribe-chunk", audioWebm),
+
   /** Desktop: reveal the saved recording in File Explorer. */
   showRecordInFolder: (filePath) => ipcRenderer.invoke("iptv-show-record-in-folder", filePath),
 

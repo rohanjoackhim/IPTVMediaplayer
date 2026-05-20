@@ -11,7 +11,7 @@ import {
 import { loadUiSession, saveUiSession, type RadioListTabPersisted } from "../utils/uiSessionStorage";
 import "./RadioPanel.css";
 
-const ROW_H = 52;
+const ROW_H = 42;
 const OVERSCAN = 12;
 const MEDIA_PLAYBACK_TOGGLE_EVENT = "iptv-media-playback-toggle";
 const MEDIA_PLAYBACK_STATE_EVENT = "iptv-media-playback-state";
@@ -71,6 +71,7 @@ export function RadioPanel({
   const [mediaPlaybackState, setMediaPlaybackState] = useState<{ channelId: string; paused: boolean } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -131,6 +132,7 @@ export function RadioPanel({
   }, [stations, radioListTab, favoriteUrls]);
 
   const filtered = useMemo(() => {
+    if (radioListTab === "favorites") return tabFiltered;
     const q = query.trim().toLowerCase();
     if (!q) return tabFiltered;
     return tabFiltered.filter((s) => {
@@ -138,7 +140,7 @@ export function RadioPanel({
       const tags = (s.tags || "").toLowerCase();
       return name.includes(q) || tags.includes(q);
     });
-  }, [tabFiltered, query]);
+  }, [tabFiltered, query, radioListTab]);
 
   const totalH = filtered.length * ROW_H;
 
@@ -153,8 +155,19 @@ export function RadioPanel({
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
-    if (el) setScrollTop(el.scrollTop);
+    if (!el || scrollRafRef.current != null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      if (scrollRef.current) setScrollTop(scrollRef.current.scrollTop);
+    });
   }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollRafRef.current != null) window.cancelAnimationFrame(scrollRafRef.current);
+    },
+    []
+  );
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -220,18 +233,19 @@ export function RadioPanel({
       <header className="radio-header">
         <h2 className="radio-title">Online radio</h2>
         <p className="radio-sub">
-          Station list from the{" "}
+          Live stations via{" "}
           <a href="https://www.radio-browser.info/" target="_blank" rel="noreferrer">
             Radio Browser
-          </a>{" "}
-          directory (third-party, not affiliated). Pick a country, then a station to play.
+          </a>
+          .
         </p>
       </header>
 
+      {radioListTab !== "favorites" ? (
       <div className="radio-controls">
-        <div className="radio-country-row">
-          <div className="radio-country-head">
-            <label className="radio-country-label" htmlFor="radio-country-select">
+        <div className="radio-filter-row">
+          <div className="radio-filter-head">
+            <label className="radio-filter-label" htmlFor="radio-country-select">
               Country
             </label>
             <button
@@ -246,7 +260,7 @@ export function RadioPanel({
           </div>
           <select
             id="radio-country-select"
-            className="radio-country-select"
+            className="radio-filter-select"
             value={countries.some((c) => c.name === radioCountry) ? radioCountry : ""}
             disabled={loadingCountries || !countries.length}
             onChange={(e) => onRadioCountryChange(e.target.value)}
@@ -289,6 +303,13 @@ export function RadioPanel({
                   : `${filtered.length.toLocaleString()} station${filtered.length === 1 ? "" : "s"}${query.trim() ? " (filtered)" : ""}`}
         </div>
       </div>
+      ) : (
+        <div className="radio-controls radio-controls--favorites-only">
+          <div className="radio-status">
+            {`${filtered.length.toLocaleString()} favorite station${filtered.length === 1 ? "" : "s"} in ${radioCountry}`}
+          </div>
+        </div>
+      )}
 
       <div className="radio-list-tabs" role="tablist" aria-label="Station list">
         <button
@@ -305,7 +326,10 @@ export function RadioPanel({
           role="tab"
           aria-selected={radioListTab === "favorites"}
           className={`radio-list-tab${radioListTab === "favorites" ? " radio-list-tab--active" : ""}`}
-          onClick={() => setRadioListTab("favorites")}
+          onClick={() => {
+            setQuery("");
+            setRadioListTab("favorites");
+          }}
         >
           Favorites{favoritesInCountry > 0 ? ` (${favoritesInCountry})` : ""}
         </button>
@@ -362,7 +386,7 @@ export function RadioPanel({
                   ? `radio-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
                   : "radio-row";
               return (
-                <div key={s.stationuuid} className={rowClass} style={{ top }}>
+                <div key={s.stationuuid} className={rowClass} style={{ transform: `translateY(${top}px)` }}>
                   <button type="button" className="radio-row-hit" onClick={() => onSelectStation(ch)}>
                     <RadioStationLogo station={s} />
                     <span className="radio-meta">
@@ -382,15 +406,17 @@ export function RadioPanel({
                     >
                       {isPlaying ? "Ⅱ" : "▶"}
                     </button>
-                    <button
-                      type="button"
-                      className="radio-remove-btn"
-                      title="Remove from list"
-                      aria-label={`Remove ${ch.name}`}
-                      onClick={(e) => removeStation(s.stationuuid, e)}
-                    >
-                      ×
-                    </button>
+                    {radioListTab !== "favorites" ? (
+                      <button
+                        type="button"
+                        className="radio-remove-btn"
+                        title="Remove from list"
+                        aria-label={`Remove ${ch.name}`}
+                        onClick={(e) => removeStation(s.stationuuid, e)}
+                      >
+                        ×
+                      </button>
+                    ) : null}
                   </div>
                   <button
                     type="button"
