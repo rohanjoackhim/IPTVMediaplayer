@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
 import { LyricsTranslateMenu } from "./LyricsTranslateMenu";
+import {
+  LIVE_CAPTIONS_STT_MODELS,
+  type LiveCaptionsSttModelId,
+} from "../utils/liveCaptionsSttModels";
 import type { RadioCaptionSegment } from "../utils/radioLiveCaptions";
 import "./RadioLiveCaptionsPanel.css";
 
@@ -14,6 +18,9 @@ export interface RadioLiveCaptionsPanelProps {
   translateTarget?: string | null;
   translateHint?: string | null;
   translateErr?: string | null;
+  sttModel: LiveCaptionsSttModelId;
+  sttModelDisabled?: boolean;
+  onSttModelChange: (model: LiveCaptionsSttModelId) => void;
   onToggle: () => void;
   onClear: () => void;
   onSelectTranslateLanguage: (code: string) => void;
@@ -29,6 +36,9 @@ export function RadioLiveCaptionsPanel({
   translateTarget,
   translateHint,
   translateErr,
+  sttModel,
+  sttModelDisabled,
+  onSttModelChange,
   onToggle,
   onClear,
   onSelectTranslateLanguage,
@@ -39,8 +49,13 @@ export function RadioLiveCaptionsPanel({
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+    if (nearBottom) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }
   }, [segments]);
+
+  const liveSegmentId = segments.length > 0 ? segments[segments.length - 1]!.id : null;
 
   const isSplit = layout === "split";
   const showCaptionBody = enabled || hasText;
@@ -53,7 +68,25 @@ export function RadioLiveCaptionsPanel({
       aria-label="Live radio captions"
     >
       <div className="radio-live-captions-head">
-        <span className="radio-live-captions-title">Live captions</span>
+        <div className="radio-live-captions-head-left">
+          <span className="radio-live-captions-title">Live captions</span>
+          <label className="radio-live-captions-stt">
+            <span className="radio-live-captions-stt-label">STT</span>
+            <select
+              className="radio-live-captions-stt-select"
+              value={sttModel}
+              disabled={sttModelDisabled}
+              aria-label="Speech-to-text model"
+              onChange={(e) => onSttModelChange(e.target.value as LiveCaptionsSttModelId)}
+            >
+              {LIVE_CAPTIONS_STT_MODELS.map((m) => (
+                <option key={m.id} value={m.id} title={m.hint}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div className="radio-live-captions-actions">
           {hasText ? (
             <LyricsTranslateMenu
@@ -100,22 +133,28 @@ export function RadioLiveCaptionsPanel({
             {!hasText && enabled && !error ? (
               <p className="radio-live-captions-empty">No captions yet.</p>
             ) : (
-              segments.map((seg) => (
-                <div key={seg.id} className="radio-live-captions-line">
-                  <p className="radio-live-captions-text">{seg.text}</p>
-                  {seg.translated && seg.translated !== seg.text ? (
-                    <p className="radio-live-captions-translated">{seg.translated}</p>
-                  ) : null}
-                </div>
-              ))
+              segments.map((seg) => {
+                const isLive = enabled && seg.id === liveSegmentId;
+                return (
+                  <div
+                    key={seg.id}
+                    className={`radio-live-captions-line${isLive ? " radio-live-captions-line--live" : ""}`}
+                  >
+                    <p className="radio-live-captions-text">{seg.text}</p>
+                    {seg.translated && seg.translated !== seg.text ? (
+                      <p className="radio-live-captions-translated">{seg.translated}</p>
+                    ) : null}
+                  </div>
+                );
+              })
             )}
           </div>
           </>
         ) : (
           <div className="radio-live-captions-body radio-live-captions-body--idle">
             <p className="radio-live-captions-hint radio-live-captions-hint--idle">
-              Local Whisper — near real-time (~2–4 s behind speech). Best for talk and news. First run may download the
-              model once.
+              Local Whisper (Tiny / Base / Small) — near real-time (~2–4 s behind speech; larger models are slower).
+              Works for radio and podcasts. First run downloads the selected model once.
             </p>
           </div>
         )}

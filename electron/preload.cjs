@@ -8,6 +8,18 @@ contextBridge.exposeInMainWorld("iptv", {
 
   fetchPlaylistText: (url) => ipcRenderer.invoke("iptv-fetch-playlist-text", url),
 
+  /** Desktop: native open dialog + read M3U/M3U8 playlist text in main process. */
+  pickM3uPlaylistFile: () => ipcRenderer.invoke("iptv-pick-m3u-playlist-file"),
+
+  /** Desktop: stream-scan large XMLTV for one channel’s programmes in a time window. */
+  extractEpgProgrammes: (payload) => ipcRenderer.invoke("iptv-extract-epg-programmes", payload),
+
+  /** Desktop: read XMLTV `<channel>` index only (stops before programmes; for global guides). */
+  fetchEpgChannelIndex: (url) => ipcRenderer.invoke("iptv-fetch-epg-channel-index", url),
+
+  /** Desktop: LLM-estimated TV schedule for one channel (JSON). */
+  channelEpgLlm: (payload) => ipcRenderer.invoke("iptv-channel-epg-llm", payload),
+
   /** Desktop: YouTube web search in main; returns first video id and its listing title (for lyrics + open in browser). */
   youtubeFirstVideoIdFromSearch: (query) => ipcRenderer.invoke("iptv-youtube-first-video-id", query),
 
@@ -81,6 +93,8 @@ contextBridge.exposeInMainWorld("iptv", {
 
   /** Desktop: local Whisper STT for live radio captions. */
   whisperStatus: () => ipcRenderer.invoke("iptv-whisper-status"),
+
+  whisperSetModel: (modelKey) => ipcRenderer.invoke("iptv-whisper-set-model", modelKey),
 
   whisperWarmup: () => ipcRenderer.invoke("iptv-whisper-warmup"),
 

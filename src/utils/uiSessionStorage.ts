@@ -1,4 +1,9 @@
 import { parseEqCustomGains, parseEqPresetId, type EqPresetId } from "./eqPresets";
+import {
+  DEFAULT_LIVE_CAPTIONS_STT_MODEL,
+  parseLiveCaptionsSttModel,
+  type LiveCaptionsSttModelId,
+} from "./liveCaptionsSttModels";
 
 const KEY = "iptv-ui-session";
 
@@ -11,7 +16,7 @@ export type AssignPanePersisted = "L" | "R";
 export type SidebarModePersisted = "tv" | "radio" | "audio";
 
 export interface UiSession {
-  v: 10;
+  v: 12;
   listTab: ListTabPersisted;
   /** Radio sidebar: all stations in country vs favorites only (same URLs as Television favorites). */
   radioListTab: RadioListTabPersisted;
@@ -50,10 +55,14 @@ export interface UiSession {
   audioLibraryContinuous: boolean;
   /** Hide the library sidebar and maximize the player / reader area. */
   compactView: boolean;
+  /** Local Xenova Whisper size for live radio/podcast captions. */
+  liveCaptionsSttModel: LiveCaptionsSttModelId;
+  /** User dismissed the first-run LLM API key setup prompt. */
+  llmSetupPromptDismissed: boolean;
 }
 
 const defaultSession: UiSession = {
-  v: 10,
+  v: 12,
   listTab: "all",
   radioListTab: "all",
   podcastListTab: "all",
@@ -78,7 +87,24 @@ const defaultSession: UiSession = {
   audioLibraryShuffle: false,
   audioLibraryContinuous: false,
   compactView: false,
+  liveCaptionsSttModel: DEFAULT_LIVE_CAPTIONS_STT_MODEL,
+  llmSetupPromptDismissed: false,
 };
+
+function migrateFromV11(o: Record<string, unknown>): UiSession {
+  return {
+    ...migrateFromV10(o),
+    llmSetupPromptDismissed: !!o.llmSetupPromptDismissed,
+  };
+}
+
+function migrateFromV10(o: Record<string, unknown>): UiSession {
+  return {
+    ...migrateFromV9(o),
+    liveCaptionsSttModel: parseLiveCaptionsSttModel(o.liveCaptionsSttModel),
+    llmSetupPromptDismissed: false,
+  };
+}
 
 function vol(x: unknown, d: number) {
   return typeof x === "number" && Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : d;
@@ -119,7 +145,7 @@ function migrateFromV9(o: Record<string, unknown>): UiSession {
   const radioPreset = parseEqPresetId(o.radioEqPreset);
   const radioCustom = parseEqCustomGains(o.radioEqCustomGains);
   return {
-    v: 10,
+    v: 12,
     listTab: parseListTab(o.listTab),
     radioListTab: parseRadioListTab(o.radioListTab),
     podcastListTab: parsePodcastListTab(o.podcastListTab),
@@ -150,6 +176,8 @@ function migrateFromV9(o: Record<string, unknown>): UiSession {
     audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
     audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
     compactView: typeof o.compactView === "boolean" ? o.compactView : false,
+    liveCaptionsSttModel: DEFAULT_LIVE_CAPTIONS_STT_MODEL,
+    llmSetupPromptDismissed: false,
   };
 }
 
@@ -272,9 +300,11 @@ export function loadUiSession(): UiSession {
     if (o.v === 6) return migrateFromV6(o);
     if (o.v === 7 || o.v === 8) return migrateFromV8(o);
     if (o.v === 9) return migrateFromV9(o);
-    if (o.v !== 10) return { ...defaultSession };
+    if (o.v === 10) return migrateFromV10(o);
+    if (o.v === 11) return migrateFromV11(o);
+    if (o.v !== 12) return { ...defaultSession };
     return {
-      v: 10,
+      v: 12,
       listTab: parseListTab(o.listTab),
       radioListTab: parseRadioListTab(o.radioListTab),
       podcastListTab: parsePodcastListTab(o.podcastListTab),
@@ -301,6 +331,8 @@ export function loadUiSession(): UiSession {
       audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
       audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
       compactView: typeof o.compactView === "boolean" ? o.compactView : false,
+      liveCaptionsSttModel: parseLiveCaptionsSttModel(o.liveCaptionsSttModel),
+      llmSetupPromptDismissed: !!o.llmSetupPromptDismissed,
     };
   } catch {
     return { ...defaultSession };
@@ -311,7 +343,7 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
   try {
     const cur = loadUiSession();
     const next: UiSession = {
-      v: 10,
+      v: 12,
       listTab: partial.listTab ?? cur.listTab,
       radioListTab: partial.radioListTab ?? cur.radioListTab,
       podcastListTab: partial.podcastListTab ?? cur.podcastListTab,
@@ -350,6 +382,14 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
       audioLibraryContinuous:
         partial.audioLibraryContinuous !== undefined ? partial.audioLibraryContinuous : cur.audioLibraryContinuous,
       compactView: partial.compactView !== undefined ? partial.compactView : cur.compactView,
+      liveCaptionsSttModel:
+        partial.liveCaptionsSttModel !== undefined
+          ? parseLiveCaptionsSttModel(partial.liveCaptionsSttModel)
+          : cur.liveCaptionsSttModel,
+      llmSetupPromptDismissed:
+        partial.llmSetupPromptDismissed !== undefined
+          ? partial.llmSetupPromptDismissed
+          : cur.llmSetupPromptDismissed,
     };
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {

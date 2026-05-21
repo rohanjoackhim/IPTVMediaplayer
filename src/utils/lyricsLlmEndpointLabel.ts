@@ -19,10 +19,18 @@ export async function fetchLyricsLlmEndpointInfo(): Promise<LyricsLlmEndpointInf
   const fn = typeof window !== "undefined" ? window.iptv?.getLyricsChatTranslateKeyStatus : undefined;
   if (typeof fn !== "function") return { ...DEFAULT };
   try {
-    const r = (await fn()) as { apiBasePreview?: string; modelPreview?: string };
+    const r = (await fn()) as {
+      apiBasePreview?: string;
+      modelPreview?: string;
+      primaryLlmProvider?: string;
+    };
     const host = stripDefaultSuffix(String(r.apiBasePreview ?? "").trim()) || DEFAULT.host;
     const model = stripDefaultSuffix(String(r.modelPreview ?? "").trim()) || DEFAULT.model;
-    return { model, host, label: `${model} @ ${host}` };
+    const provider = String(r.primaryLlmProvider ?? "").trim();
+    const label = provider
+      ? `${model} @ ${host} (${provider})`
+      : `${model} @ ${host}`;
+    return { model, host, label };
   } catch {
     return { ...DEFAULT };
   }
@@ -30,6 +38,18 @@ export async function fetchLyricsLlmEndpointInfo(): Promise<LyricsLlmEndpointInf
 
 export function formatLlmUsageLine(purpose: string, model: string, host: string): string {
   return `${purpose}: ${model} @ ${host}`;
+}
+
+/** Desktop: Gemini and/or OpenAI-compatible key configured (Settings or `.env`). */
+export async function hasAnyLlmApiKey(): Promise<boolean> {
+  const fn = typeof window !== "undefined" ? window.iptv?.getLyricsChatTranslateKeyStatus : undefined;
+  if (typeof fn !== "function") return false;
+  try {
+    const r = (await fn()) as { hasKey?: boolean; hasGeminiKey?: boolean; hasSongMeaningKey?: boolean };
+    return !!(r.hasKey || r.hasGeminiKey || r.hasSongMeaningKey);
+  } catch {
+    return false;
+  }
 }
 
 /** Desktop: whether `.env` / Settings provides an LLM key (lyrics + meaning). */
@@ -49,9 +69,15 @@ export async function hasSongMeaningKey(): Promise<boolean> {
   const fn = typeof window !== "undefined" ? window.iptv?.getLyricsChatTranslateKeyStatus : undefined;
   if (typeof fn !== "function") return false;
   try {
-    const r = (await fn()) as { hasSongMeaningKey?: boolean; hasKey?: boolean };
+    const r = (await fn()) as {
+      hasSongMeaningKey?: boolean;
+      hasKey?: boolean;
+      hasDeepSeekKey?: boolean;
+      hasGeminiKey?: boolean;
+      hasOpenAiKey?: boolean;
+    };
     if (typeof r.hasSongMeaningKey === "boolean") return r.hasSongMeaningKey;
-    return !!r.hasKey;
+    return !!(r.hasDeepSeekKey || r.hasGeminiKey || r.hasOpenAiKey || r.hasKey);
   } catch {
     return false;
   }

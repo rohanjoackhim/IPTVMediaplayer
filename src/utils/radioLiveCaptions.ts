@@ -1,3 +1,10 @@
+import {
+  attachLiveCaptionAudioTap,
+  detachLiveCaptionAudioTap,
+  resumeEqContextForPlayback,
+  type LiveCaptionAudioTap,
+} from "./eqAudioGraph";
+
 /** Live radio caption segment from local Whisper STT. */
 export interface RadioCaptionSegment {
   id: number;
@@ -9,10 +16,11 @@ export interface RadioCaptionSegment {
 }
 
 const WHISPER_SAMPLE_RATE = 16000;
-/** Audio window sent to Whisper (~3 s) — longer phrases per caption update. */
-const WINDOW_SEC = 3;
-/** Advance capture hop (~1.5 s) — overlap for continuity without 8 s batching. */
-const HOP_SEC = 1.5;
+/** Audio window sent to Whisper — shorter window + hop for smoother in-place growth. */
+const WINDOW_SEC = 2.5;
+const HOP_SEC = 1;
+/** UI refine updates batched to reduce flicker while staying responsive. */
+const REFINE_EMIT_MS = 180;
 const MIN_WINDOW_SAMPLES = Math.floor(WHISPER_SAMPLE_RATE * 0.45);
 
 export function canUseRadioLiveCaptions(): boolean {
@@ -23,10 +31,8 @@ export interface RadioLiveCaptionsController {
   stop: () => void;
 }
 
-function captureMediaAudioStream(media: HTMLMediaElement): MediaStream {
-  const withCapture = media as HTMLMediaElement & { captureStream?: () => MediaStream };
-  if (typeof withCapture.captureStream === "function") return withCapture.captureStream();
-  throw new Error("captureStream is not supported for this media element.");
+function playbackLevel(media: HTMLMediaElement): number {
+  return Math.min(1, Math.max(0, media.volume));
 }
 
 function downsampleTo16k(input: Float32Array, inputRate: number): Float32Array {
@@ -44,13 +50,167 @@ function normalizeCaptionText(t: string): string {
   return t.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function mergeCaptionText(prev: string, next: string): { text: string; replaceLast: boolean } {
+/** Collapse Whisper/translation spam: "word word word" → "word", repeated phrases → once. */
+export function collapseRepeatedCaptionWords(text: string): string {
+  let t = text.trim().replace(/\s+/g, " ");
+  if (!t) return t;
+
+  t = t.replace(/\b([\p{L}\p{N}'’-]+)\b(?:\s+\1\b){2,}/giu, "$1");
+
+  const words = t.split(/\s+/);
+  if (words.length >= 6) {
+    const counts = new Map<string, number>();
+    for (const w of words) {
+      const k = w.toLowerCase();
+      counts.set(k, (counts.get(k) ?? 0) + 1);
+    }
+    let dominant: string | null = null;
+    let dominantCount = 0;
+    for (const [k, c] of counts) {
+      if (c > dominantCount) {
+        dominantCount = c;
+        dominant = k;
+      }
+    }
+    if (dominant && dominantCount >= 5 && dominantCount / words.length >= 0.4) {
+      let kept = 0;
+      const filtered: string[] = [];
+      for (const w of words) {
+        if (w.toLowerCase() === dominant) {
+          kept++;
+          if (kept > 2) continue;
+        }
+        filtered.push(w);
+      }
+      t = filtered.join(" ");
+    }
+  }
+
+  return collapseConsecutivePhraseRepeats(t);
+}
+
+function collapseConsecutivePhraseRepeats(text: string): string {
+  const words = text.split(/\s+/);
+  if (words.length < 4) return text;
+
+  for (let phraseLen = Math.min(4, Math.floor(words.length / 3)); phraseLen >= 1; phraseLen--) {
+    let i = 0;
+    const out: string[] = [];
+    let changed = false;
+    while (i < words.length) {
+      const phrase = words
+        .slice(i, i + phraseLen)
+        .map((w) => w.toLowerCase())
+        .join(" ");
+      if (!phrase) {
+        i++;
+        continue;
+      }
+      let reps = 1;
+      let j = i + phraseLen;
+      while (j + phraseLen <= words.length) {
+        const next = words
+          .slice(j, j + phraseLen)
+          .map((w) => w.toLowerCase())
+          .join(" ");
+        if (next !== phrase) break;
+        reps++;
+        j += phraseLen;
+      }
+      if (reps >= 3) {
+        out.push(...words.slice(i, i + phraseLen));
+        i = j;
+        changed = true;
+      } else {
+        out.push(words[i]!);
+        i++;
+      }
+    }
+    if (changed) return collapseConsecutivePhraseRepeats(out.join(" "));
+  }
+  return text;
+}
+
+/** Deduplicate consecutive identical lines before calling translate APIs. */
+export function prepareRadioCaptionLinesForTranslation(lines: string[]): {
+  texts: string[];
+  lineToSegmentIndex: number[];
+} {
+  const texts: string[] = [];
+  const lineToSegmentIndex: number[] = [];
+  let lastNorm = "";
+  for (let i = 0; i < lines.length; i++) {
+    const t = collapseRepeatedCaptionWords(lines[i] ?? "");
+    if (!t) continue;
+    const norm = t.toLowerCase();
+    if (norm === lastNorm) continue;
+    lastNorm = norm;
+    texts.push(t);
+    lineToSegmentIndex.push(i);
+  }
+  return { texts, lineToSegmentIndex };
+}
+
+export function mapRadioTranslationsToSegments(
+  segmentCount: number,
+  lineToSegmentIndex: number[],
+  translatedLines: string[],
+  originalLines: string[]
+): string[] {
+  const byIndex: (string | undefined)[] = new Array(segmentCount);
+  for (let j = 0; j < lineToSegmentIndex.length; j++) {
+    const idx = lineToSegmentIndex[j]!;
+    byIndex[idx] = translatedLines[j]?.trim();
+  }
+  for (let i = 0; i < segmentCount; i++) {
+    if (byIndex[i] != null) continue;
+    const norm = collapseRepeatedCaptionWords(originalLines[i] ?? "").toLowerCase();
+    if (!norm) continue;
+    for (let k = i - 1; k >= 0; k--) {
+      if (collapseRepeatedCaptionWords(originalLines[k] ?? "").toLowerCase() === norm) {
+        byIndex[i] = byIndex[k];
+        break;
+      }
+    }
+  }
+  return Array.from({ length: segmentCount }, (_, i) => byIndex[i]?.trim() || originalLines[i] || "");
+}
+
+function wordSuffixPrefixOverlap(prevWords: string[], nextWords: string[]): number {
+  const maxK = Math.min(prevWords.length, nextWords.length);
+  for (let k = maxK; k >= 1; k--) {
+    const suffix = prevWords
+      .slice(-k)
+      .map((w) => w.toLowerCase())
+      .join(" ");
+    const prefix = nextWords
+      .slice(0, k)
+      .map((w) => w.toLowerCase())
+      .join(" ");
+    if (suffix === prefix) return k;
+  }
+  return 0;
+}
+
+/** Merge overlapping utterances so captions grow in place instead of jumping to new lines. */
+export function mergeRadioCaptionUtterance(
+  prev: string,
+  next: string
+): { text: string; replaceLast: boolean } {
   const p = normalizeCaptionText(prev);
   const n = normalizeCaptionText(next);
   if (!n) return { text: prev, replaceLast: true };
   if (!p) return { text: next.trim(), replaceLast: false };
   if (n === p) return { text: prev, replaceLast: true };
-  if (n.startsWith(p) || p.startsWith(n)) return { text: next.trim(), replaceLast: true };
+  if (n.startsWith(p)) return { text: next.trim(), replaceLast: true };
+  if (p.startsWith(n)) return { text: prev, replaceLast: true };
+
+  const pw = prev.trim().split(/\s+/).filter(Boolean);
+  const nw = next.trim().split(/\s+/).filter(Boolean);
+  const overlap = wordSuffixPrefixOverlap(pw, nw);
+  if (overlap > 0) {
+    return { text: [...pw, ...nw.slice(overlap)].join(" "), replaceLast: true };
+  }
   return { text: next.trim(), replaceLast: false };
 }
 
@@ -66,51 +226,73 @@ export function startRadioLiveCaptions(
   }
 ): RadioLiveCaptionsController {
   let stopped = false;
+  let sessionGen = 0;
   let segmentId = 0;
   let lastCaptionText = "";
   const audioCapture = {
     ctx: null as AudioContext | null,
-    source: null as MediaStreamAudioSourceNode | null,
     processor: null as ScriptProcessorNode | null,
+    tap: null as LiveCaptionAudioTap | null,
   };
   let pcmQueue: number[] = [];
   let pendingPcm: Float32Array | null = null;
   let inFlight = false;
+  let emitTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingEmit: RadioCaptionSegment | null = null;
 
   const windowSamples = Math.floor(WHISPER_SAMPLE_RATE * WINDOW_SEC);
   const hopSamples = Math.floor(WHISPER_SAMPLE_RATE * HOP_SEC);
 
   const stop = () => {
+    sessionGen++;
     stopped = true;
     pendingPcm = null;
     pcmQueue = [];
     lastCaptionText = "";
-    try {
-      audioCapture.processor?.disconnect();
-      audioCapture.source?.disconnect();
-    } catch {
-      /* noop */
+    if (emitTimer) clearTimeout(emitTimer);
+    emitTimer = null;
+    pendingEmit = null;
+    if (audioCapture.tap) {
+      detachLiveCaptionAudioTap(audioCapture.tap, media, playbackLevel(media));
+      audioCapture.tap = null;
     }
     audioCapture.processor = null;
-    audioCapture.source = null;
-    try {
-      audioCapture.ctx?.close();
-    } catch {
-      /* noop */
-    }
     audioCapture.ctx = null;
   };
 
+  const flushPendingEmit = () => {
+    if (!pendingEmit) return;
+    const seg = pendingEmit;
+    pendingEmit = null;
+    handlers.onSegment(seg);
+  };
+
   const emitCaption = (raw: string) => {
-    const trimmed = raw.trim();
+    const trimmed = collapseRepeatedCaptionWords(raw);
     if (!trimmed) return;
-    const { text, replaceLast } = mergeCaptionText(lastCaptionText, trimmed);
+    const { text, replaceLast } = mergeRadioCaptionUtterance(lastCaptionText, trimmed);
     lastCaptionText = text;
+    const seg: RadioCaptionSegment = replaceLast
+      ? { id: segmentId, text, at: Date.now(), replaceLast: true }
+      : { id: ++segmentId, text, at: Date.now(), replaceLast: false };
+
     if (replaceLast) {
-      handlers.onSegment({ id: segmentId, text, at: Date.now(), replaceLast: true });
-    } else {
-      handlers.onSegment({ id: ++segmentId, text, at: Date.now(), replaceLast: false });
+      pendingEmit = seg;
+      if (emitTimer) clearTimeout(emitTimer);
+      emitTimer = setTimeout(() => {
+        emitTimer = null;
+        flushPendingEmit();
+      }, REFINE_EMIT_MS);
+      return;
     }
+
+    if (emitTimer) {
+      clearTimeout(emitTimer);
+      emitTimer = null;
+      flushPendingEmit();
+    }
+    pendingEmit = null;
+    handlers.onSegment(seg);
   };
 
   const pumpTranscribe = () => {
@@ -155,63 +337,69 @@ export function startRadioLiveCaptions(
   };
 
   void (async () => {
+    const gen = sessionGen;
+    const alive = () => !stopped && gen === sessionGen;
+
     if (!canUseRadioLiveCaptions()) {
       handlers.onError("Live captions need the desktop app with local Whisper.");
       return;
     }
-    handlers.onStatus("Loading local Whisper model (first run may download ~75 MB)…");
+    let loadMsg = "Loading local Whisper model (first run may download ~75 MB)…";
+    try {
+      const st = await window.iptv!.whisperStatus?.();
+      if (st?.modelLabel || st?.modelKey) {
+        const label = st.modelLabel ?? st.modelKey ?? "tiny";
+        const hint = st.downloadHint ?? "~75 MB";
+        loadMsg = `Loading Whisper ${label} (first run may download ${hint})…`;
+      }
+    } catch {
+      /* use default */
+    }
+    handlers.onStatus(loadMsg);
     const warm = await window.iptv!.whisperWarmup!();
-    if (stopped) return;
+    if (!alive()) return;
     if (!warm.ok) {
       handlers.onError(warm.error || "Could not load Whisper model.");
       return;
     }
 
-    let stream: MediaStream;
     try {
-      stream = captureMediaAudioStream(media);
-    } catch {
-      handlers.onError("Could not capture audio from this stream.");
-      return;
-    }
-    if (!stream.getAudioTracks().length) {
-      handlers.onError("No audio track available to caption.");
-      return;
-    }
-
-    try {
-      audioCapture.ctx = new AudioContext({ sampleRate: WHISPER_SAMPLE_RATE });
-      await audioCapture.ctx.resume();
-    } catch {
-      try {
-        audioCapture.ctx = new AudioContext();
-        await audioCapture.ctx.resume();
-      } catch (e) {
-        handlers.onError(e instanceof Error ? e.message : "Web Audio is not available.");
+      const ctx = await resumeEqContextForPlayback();
+      if (!alive()) return;
+      if (!ctx) {
+        handlers.onError("Web Audio is not available.");
         return;
       }
+      audioCapture.ctx = ctx;
+      audioCapture.processor = ctx.createScriptProcessor(4096, 1, 1);
+      const inputRate = ctx.sampleRate;
+      audioCapture.processor.onaudioprocess = (ev) => {
+        if (!alive()) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        pushSamples(downsampleTo16k(input, inputRate));
+      };
+
+      audioCapture.tap = await attachLiveCaptionAudioTap(
+        media,
+        audioCapture.processor,
+        playbackLevel(media)
+      );
+      if (!alive()) {
+        if (audioCapture.tap) {
+          detachLiveCaptionAudioTap(audioCapture.tap, media, playbackLevel(media));
+          audioCapture.tap = null;
+        }
+        return;
+      }
+
+      handlers.onStatus(
+        media.paused
+          ? "Live captions ready — press play to transcribe."
+          : "Live captions — smooth updates about every second (local Whisper; radio and podcasts)."
+      );
+    } catch (e) {
+      if (alive()) handlers.onError(e instanceof Error ? e.message : String(e));
     }
-
-    const ctx = audioCapture.ctx;
-    audioCapture.source = ctx.createMediaStreamSource(stream);
-    const mute = ctx.createGain();
-    mute.gain.value = 0;
-    audioCapture.processor = ctx.createScriptProcessor(4096, 1, 1);
-    const inputRate = ctx.sampleRate;
-
-    audioCapture.processor.onaudioprocess = (ev) => {
-      if (stopped) return;
-      const input = ev.inputBuffer.getChannelData(0);
-      pushSamples(downsampleTo16k(input, inputRate));
-    };
-
-    audioCapture.source.connect(audioCapture.processor);
-    audioCapture.processor.connect(mute);
-    mute.connect(ctx.destination);
-
-    handlers.onStatus(
-      "Live captions — longer phrases, updating every ~1–2 s (local Whisper; talk radio works best)."
-    );
   })();
 
   return { stop };

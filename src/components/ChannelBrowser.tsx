@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type { Channel } from "../types";
 import { fetchM3uPlaylist } from "../utils/fetchM3uPlaylist";
+import { parseM3U } from "../utils/m3uParser";
 import { favoriteKeyForChannel } from "../utils/favoritesStorage";
 import { loadLastPlaylistUrl, saveLastPlaylistUrl } from "../utils/playlistSettingsStorage";
 import { loadUiSession, saveUiSession, type AssignPanePersisted, type ListTabPersisted, type SidebarModePersisted } from "../utils/uiSessionStorage";
@@ -175,7 +176,7 @@ export interface ChannelBrowserProps {
   onSelectChannel: (c: Channel) => void;
   onResetTelevisionStream: () => void;
   resetTelevisionStreamDisabled: boolean;
-  onLoadM3U: (text: string, replace: boolean) => void;
+  onLoadM3U: (text: string, replace: boolean) => boolean;
   onClearList: () => void;
   /** Television: append channels for disk / browser-picked video files (split view with IPTV). */
   onAddLocalVideoChannels: (channels: Channel[]) => void;
@@ -189,6 +190,10 @@ export interface ChannelBrowserProps {
   onAudioLibraryShuffleChange: (v: boolean) => void;
   onAudioLibraryContinuousChange: (v: boolean) => void;
   recordingActive: boolean;
+  /** Channel ids with an active background recording (may differ from the channel currently playing). */
+  recordingChannelIds?: string[];
+  /** Human-readable label for the Television tab recording indicator tooltip. */
+  recordingStatusLabel?: string | null;
   sidebarMode: SidebarModePersisted;
   onSidebarModeChange: (mode: SidebarModePersisted) => void;
   /** Sidebar IndexedDB library tracks in list order (blob URLs) for auto-advance / shuffle. */
@@ -199,6 +204,8 @@ export interface ChannelBrowserProps {
   onLibraryTrackRemoved?: (trackId: string) => void;
   compactView: boolean;
   onCompactViewChange: (enabled: boolean) => void;
+  /** Open app Settings (LLM API keys). Desktop only. */
+  onOpenSettings?: () => void;
 }
 
 type ListTab = ListTabPersisted;
@@ -225,6 +232,8 @@ function ChannelBrowserInner({
   onAudioLibraryShuffleChange,
   onAudioLibraryContinuousChange,
   recordingActive,
+  recordingChannelIds = [],
+  recordingStatusLabel,
   sidebarMode,
   onSidebarModeChange,
   onIndexedLibraryChannelsChange,
@@ -232,6 +241,7 @@ function ChannelBrowserInner({
   onLibraryTrackRemoved,
   compactView,
   onCompactViewChange,
+  onOpenSettings,
 }: ChannelBrowserProps) {
   const [playlistUrl, setPlaylistUrl] = useState(() => loadLastPlaylistUrl());
   const [webVideoUrl, setWebVideoUrl] = useState("");
@@ -244,6 +254,7 @@ function ChannelBrowserInner({
   const [podcastGenreId, setPodcastGenreId] = useState(() => loadUiSession().podcastGenreId);
   const [radioSectionTab, setRadioSectionTab] = useState<RadioSectionTab>("stations");
   const [tvToolsOpen, setTvToolsOpen] = useState(false);
+  const [m3uLoadMessage, setM3uLoadMessage] = useState<string | null>(null);
   const [mediaPlaybackState, setMediaPlaybackState] = useState<{ channelId: string; paused: boolean } | null>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -396,25 +407,82 @@ function ChannelBrowserInner({
     setScrollTop(0);
   }, [query, group, channels.length, listTab]);
 
+  const isPlaylistFileName = (name: string) => /\.(m3u8?|txt|ts)$/i.test(name.trim());
+
+  const isBlockedMediaFileName = (name: string) => {
+    const lower = name.toLowerCase();
+    if (isPlaylistFileName(lower)) return false;
+    if (/\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac)$/i.test(lower)) return true;
+    return /\.(mp4|webm|mkv|mov|m4v|ogv|avi|wmv|mpeg|mpg|mpe|mpv|m1v|m2v|divx|asf|wm)(\?|#|$)/i.test(
+      lower
+    );
+  };
+
+  const applyM3uText = useCallback(
+    (text: string, replace: boolean, sourceLabel?: string) => {
+      const preview = parseM3U(text);
+      const ok = onLoadM3U(text, replace);
+      if (!ok) {
+        const hint = preview.errors[0] ?? "No channels found in that playlist.";
+        setM3uLoadMessage(
+          sourceLabel ? `${sourceLabel}: ${hint}` : hint
+        );
+        return;
+      }
+      setM3uLoadMessage(
+        `Loaded ${preview.channels.length} channel${preview.channels.length === 1 ? "" : "s"}${
+          sourceLabel ? ` from ${sourceLabel}` : ""
+        }.`
+      );
+      setListTab("all");
+      setQuery("");
+      setGroup("All groups");
+      setTvToolsOpen(false);
+    },
+    [onLoadM3U]
+  );
+
   const readFile = (file: File) => {
-    const lower = file.name.toLowerCase();
-    if (
-      /\.(mp4|webm|mkv|mov|m4v|ogv|avi|wmv|mpeg|mpg|mpe|mpv|m1v|m2v|m2ts|mts|ts|divx|asf|wm)(\?|$)/i.test(
-        lower
-      )
-    ) {
-      return;
-    }
-    if (/\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac|webm)$/.test(lower)) {
+    if (isBlockedMediaFileName(file.name)) {
+      setM3uLoadMessage(
+        `"${file.name}" looks like a media file, not an M3U playlist. Choose a .m3u / .m3u8 file (some providers use .ts for MPEG-TS playlists).`
+      );
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
-      onLoadM3U(text, false);
+      if (!text.trim()) {
+        setM3uLoadMessage("Playlist file is empty or could not be read.");
+        return;
+      }
+      applyM3uText(text, false, file.name);
+    };
+    reader.onerror = () => {
+      setM3uLoadMessage("Could not read that file.");
     };
     reader.readAsText(file, "UTF-8");
   };
+
+  const pickM3uFromDisk = useCallback(() => {
+    void (async () => {
+      if (typeof window.iptv?.pickM3uPlaylistFile === "function") {
+        try {
+          const res = await window.iptv.pickM3uPlaylistFile();
+          if (res.cancelled) return;
+          if (!res.ok || !res.text?.trim()) {
+            setM3uLoadMessage(res.error ?? "Could not read playlist file.");
+            return;
+          }
+          applyM3uText(res.text, false, res.fileName ?? "playlist");
+        } catch (e) {
+          setM3uLoadMessage(e instanceof Error ? e.message : "Could not read playlist file.");
+        }
+        return;
+      }
+      fileRef.current?.click();
+    })();
+  }, [applyM3uText]);
 
   const loadPlaylistFromUrl = async (replace: boolean) => {
     const trimmed = playlistUrl.trim();
@@ -423,9 +491,9 @@ function ChannelBrowserInner({
     try {
       const text = await fetchM3uPlaylist(trimmed);
       saveLastPlaylistUrl(trimmed);
-      onLoadM3U(text, replace);
-    } catch {
-      /* playlist load failed */
+      applyM3uText(text, replace, "URL");
+    } catch (e) {
+      setM3uLoadMessage(e instanceof Error ? e.message : "Could not load playlist from URL.");
     } finally {
       setUrlBusy(false);
     }
@@ -451,6 +519,17 @@ function ChannelBrowserInner({
       <header className="browser-header">
         <div className="browser-header-row">
           <h1 className="browser-title">Player</h1>
+          {onOpenSettings && window.iptv?.getLyricsChatTranslateKeyStatus ? (
+            <button
+              type="button"
+              className="browser-settings-btn"
+              onClick={onOpenSettings}
+              title="Settings — LLM API keys (Gemini, DeepSeek, OpenAI)"
+              aria-label="Settings"
+            >
+              Settings
+            </button>
+          ) : null}
           <button
             type="button"
             className={`compact-view-btn${compactView ? " compact-view-btn--active" : ""}`}
@@ -478,7 +557,20 @@ function ChannelBrowserInner({
             </span>
             Television
             {recordingActive ? (
-              <span className="source-tab-recording-dot" role="status" aria-label="Recording is active" />
+              <span
+                className="source-tab-recording-dot"
+                role="status"
+                aria-label={
+                  recordingStatusLabel
+                    ? `Recording ${recordingStatusLabel} — switch channels freely while it saves`
+                    : "Recording is active — switch channels freely while it saves"
+                }
+                title={
+                  recordingStatusLabel
+                    ? `Recording ${recordingStatusLabel}. Pick another channel to watch while recording continues.`
+                    : "Recording in progress. Pick another channel to watch while recording continues."
+                }
+              />
             ) : null}
           </button>
           <button
@@ -531,7 +623,7 @@ function ChannelBrowserInner({
                   e.target.value = "";
                 }}
               />
-              <button type="button" className="file-btn" onClick={() => fileRef.current?.click()}>
+              <button type="button" className="file-btn" onClick={() => pickM3uFromDisk()}>
                 + Add M3U
               </button>
               <button type="button" className="btn-ghost" onClick={onClearList}>
@@ -547,6 +639,11 @@ function ChannelBrowserInner({
                 Reset stream
               </button>
                 </div>
+                {m3uLoadMessage ? (
+                  <p className="m3u-load-message" role="status">
+                    {m3uLoadMessage}
+                  </p>
+                ) : null}
                 <div className="url-row">
               <input
                 className="playlist-url-input"
@@ -797,6 +894,7 @@ function ChannelBrowserInner({
                   const index = start + i;
                   const top = index * ROW_H;
                   const fav = isFavorite(c);
+                  const isRecordingChannel = recordingChannelIds.includes(c.id);
                   const leftOn = c.id === activeLeftId;
                   const rightOn = splitView && c.id === activeRightId;
                   const active = leftOn || rightOn;
@@ -806,8 +904,12 @@ function ChannelBrowserInner({
                   const embeddedPlayback = !!(c.youtubeVideoId || c.webVideoPageUrl);
                   const rowClass =
                     active
-                      ? `channel-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}`
-                      : "channel-row";
+                      ? `channel-row active${leftOn ? " active--left" : ""}${rightOn ? " active--right" : ""}${
+                          isRecordingChannel ? " channel-row--recording" : ""
+                        }`
+                      : isRecordingChannel
+                        ? "channel-row channel-row--recording"
+                        : "channel-row";
                   return (
                     <div key={c.id} className={rowClass} style={{ transform: `translateY(${top}px)` }}>
                       <button type="button" className="channel-row-hit" onClick={() => onSelectChannel(c)}>
@@ -831,7 +933,14 @@ function ChannelBrowserInner({
                           <span className="channel-logo placeholder">TV</span>
                         )}
                         <span className="channel-meta">
-                          <span className="channel-name">{c.name}</span>
+                          <span className="channel-name">
+                            {c.name}
+                            {isRecordingChannel ? (
+                              <span className="channel-rec-badge" title="Recording this channel in the background">
+                                REC
+                              </span>
+                            ) : null}
+                          </span>
                           {c.youtubeVideoId || c.webVideoPageUrl ? (
                             <span className="channel-group">
                               <span>{c.youtubeVideoId ? "YouTube" : "Web video"}</span>
@@ -964,6 +1073,7 @@ function ChannelBrowserInner({
           onAudioLibraryContinuousChange={onAudioLibraryContinuousChange}
           onLibraryCleared={onLibraryCleared}
           onLibraryTrackRemoved={onLibraryTrackRemoved}
+          onOpenSettings={onOpenSettings}
         />
       </div>
     </div>

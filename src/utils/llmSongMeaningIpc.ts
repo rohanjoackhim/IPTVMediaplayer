@@ -32,7 +32,7 @@ export async function fetchSongMeaningFromLlm(
 ): Promise<SongMeaningResult> {
   const ipc = typeof window !== "undefined" ? window.iptv?.lyricsSongMeaningFetch : undefined;
   if (typeof ipc !== "function") {
-    return { ok: false, meaning: "", error: "Song meaning needs the desktop app and an LLM API key in Settings." };
+    return { ok: false, meaning: "", error: "Song meaning needs the desktop app. Add an LLM API key in Settings." };
   }
   if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
@@ -51,7 +51,7 @@ export async function fetchSongMeaningFromLlm(
       return {
         ok: false,
         meaning: "",
-        error: "Add an LLM API key under Audio → Lyrics translation (LLM).",
+        error: "Add an LLM API key in Settings (DeepSeek, Gemini, or OpenAI).",
       };
     }
     return { ok: false, meaning: "", error: msg || "LLM request failed." };

@@ -9,10 +9,17 @@ function nextId(): string {
 /**
  * Parses extended M3U (IPTV) playlists: #EXTINF + URL lines.
  */
+/** Strip UTF-8/UTF-16 BOM and leading whitespace before parsing. */
+export function normalizeM3uText(text: string): string {
+  let t = text;
+  if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
+  return t.trim();
+}
+
 export function parseM3U(text: string): ParseResult {
   const errors: string[] = [];
   const channels: Channel[] = [];
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const lines = normalizeM3uText(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 
   let pending: Partial<Channel> | null = null;
 
@@ -36,6 +43,7 @@ export function parseM3U(text: string): ParseResult {
         logo: pending.logo,
         group: pending.group,
         country: pending.country,
+        tvgId: pending.tvgId,
       });
       pending = null;
     } else if (/^https?:\/\//i.test(url) || url.startsWith("rtmp://") || url.startsWith("rtsp://")) {
@@ -83,10 +91,13 @@ function parseExtInf(line: string): Partial<Channel> {
 
   const group = attrs["group-title"] || attrs["group"];
 
+  const tvgId = attrs["tvg-id"] || attrs["tvg_id"] || attrs["tvgid"];
+
   return {
     name: name || undefined,
     logo: attrs["tvg-logo"] || attrs["logo"],
     group,
     country: countryFromAttrs(attrs),
+    tvgId: tvgId?.trim() || undefined,
   };
 }

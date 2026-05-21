@@ -4,6 +4,8 @@ export interface Channel {
   url: string;
   logo?: string;
   group?: string;
+  /** XMLTV channel id from M3U `tvg-id` (links to EPG). */
+  tvgId?: string;
   /** From tvg-country / group-title heuristics (IPTV lists vary). */
   country?: string;
   /** Online radio metadata from Radio Browser. */

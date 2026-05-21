@@ -42,8 +42,20 @@ import {
 import { createLyricsJsonFetcher } from "../utils/lyricsJsonFetch";
 import { sanitizeEpubMediaHtml } from "../utils/sanitizeEpubMediaHtml";
 import { formatLlmUsageLine } from "../utils/lyricsLlmEndpointLabel";
+import { guardLlmApiKey, isMissingLlmKeyMessage, promptLlmApiKeySetup } from "../utils/llmApiKeyGuide";
+import { LlmKeyGuideInline } from "./LlmKeyGuideInline";
 import { labelForLyricsTargetCode } from "../utils/lyricsTargetLanguages";
-import { translateLineBatchesToLanguage } from "../utils/translateLyricsLines";
+import {
+  translateLineBatchesToLanguage,
+  translateLineBatchesToLanguageFast,
+} from "../utils/translateLyricsLines";
+import { applyLiveCaptionsSttModel } from "../utils/applyLiveCaptionsSttModel";
+import { createRadioCaptionTranslateQueue } from "../utils/radioCaptionTranslateQueue";
+import {
+  parseLiveCaptionsSttModel,
+  type LiveCaptionsSttModelId,
+} from "../utils/liveCaptionsSttModels";
+import { loadUiSession, saveUiSession } from "../utils/uiSessionStorage";
 import {
   resolveTrackMetadataFromLibrary,
   type TrackFileMetadata,
@@ -61,11 +73,15 @@ import {
 import { eqPageScopeForChannel } from "../utils/eqScopeSettings";
 import {
   canUseRadioLiveCaptions,
+  collapseRepeatedCaptionWords,
+  mapRadioTranslationsToSegments,
+  prepareRadioCaptionLinesForTranslation,
   startRadioLiveCaptions,
   type RadioCaptionSegment,
   type RadioLiveCaptionsController,
 } from "../utils/radioLiveCaptions";
 import { RadioLiveCaptionsPanel } from "./RadioLiveCaptionsPanel";
+import { ChannelEpgGuide } from "./ChannelEpgGuide";
 import "./VideoPlayer.css";
 import "./LyricsTranslateMenu.css";
 import "./RadioLiveCaptionsPanel.css";
@@ -95,7 +111,13 @@ export interface VideoPlayerProps {
   /** Fires when a local IndexedDB library track (`blob:` + `libraryTrackId`) finishes naturally. */
   onLocalLibraryAudioEnded?: (info: { pane: "L" | "R"; channelId: string }) => void;
   /** Notifies the app shell so it can show a global recording indicator while browsing elsewhere. */
-  onRecordingStatusChange?: (recording: boolean) => void;
+  onRecordingStatusChange?: (status: {
+    pane: "L" | "R";
+    recording: boolean;
+    channelId?: string | null;
+    channelName?: string | null;
+    sourceUrl?: string | null;
+  }) => void;
   /** Compact layout: TV strip dock or reader-focused chrome. */
   layoutMode?: "default" | "compactTvDock" | "compactReader";
 }
@@ -503,8 +525,10 @@ export type PlaybackModeLabel =
   | "Native · record tap"
   | "Radio · native"
   | "Radio · record tap"
+  | "Radio · local proxy"
   | "Podcast · native"
   | "Podcast · record tap"
+  | "Podcast · local proxy"
   | "Library · native"
   | "Local video · native"
   | "Local video · preparing MKV…"
@@ -1480,6 +1504,8 @@ export function VideoPlayer({
   const [recordErr, setRecordErr] = useState<string | null>(null);
   const [recordSavedPath, setRecordSavedPath] = useState<string | null>(null);
   const [recordingSourceUrl, setRecordingSourceUrl] = useState<string | null>(null);
+  const [recordingChannelId, setRecordingChannelId] = useState<string | null>(null);
+  const [recordingChannelName, setRecordingChannelName] = useState<string | null>(null);
   const [screenPlaybackOff, setScreenPlaybackOff] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackModeLabel | null>(null);
   const [trackOptions, setTrackOptions] = useState<TrackOption[]>([]);
@@ -1508,6 +1534,7 @@ export function VideoPlayer({
   const [songMeaningLoading, setSongMeaningLoading] = useState(false);
   const mp3LyricsPanelRef = useRef<HTMLDivElement | null>(null);
   const playerRootRef = useRef<HTMLDivElement | null>(null);
+  const videoWrapRef = useRef<HTMLDivElement | null>(null);
   /** Expanded lyrics fill this player column only (split view: Player L / R), not the whole monitor. */
   const [lyricsSpatialBox, setLyricsSpatialBox] = useState<{
     top: number;
@@ -1538,9 +1565,21 @@ export function VideoPlayer({
   const [ebookTtsActive, setEbookTtsActive] = useState(false);
   const ebookPlayerRef = useRef<HTMLElement | null>(null);
   const [ebookFullscreen, setEbookFullscreen] = useState(false);
+  const [playerVideoFullscreen, setPlayerVideoFullscreen] = useState(false);
   const radioCaptionsCtrlRef = useRef<RadioLiveCaptionsController | null>(null);
   const radioCaptionTranslateAbortRef = useRef<AbortController | null>(null);
   const radioCaptionTranslateTargetRef = useRef<string | null>(null);
+  const radioCaptionTranslateDebounceRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+  const radioCaptionTranslateLastTextRef = useRef(new Map<number, string>());
+  const radioCaptionDetectedLangRef = useRef("eng");
+  const applyRadioCaptionTranslationRef = useRef<
+    (segmentId: number, text: string, targetCode: string, signal: AbortSignal) => Promise<void>
+  >(async () => {});
+  const radioCaptionTranslateQueueRef = useRef(
+    createRadioCaptionTranslateQueue((job, signal) =>
+      applyRadioCaptionTranslationRef.current(job.segmentId, job.text, job.targetCode, signal)
+    )
+  );
   const [radioCaptionsEnabled, setRadioCaptionsEnabled] = useState(false);
   const [radioCaptionSegments, setRadioCaptionSegments] = useState<RadioCaptionSegment[]>([]);
   const [radioCaptionsStatus, setRadioCaptionsStatus] = useState("");
@@ -1549,6 +1588,9 @@ export function VideoPlayer({
   const [radioCaptionTranslateBusy, setRadioCaptionTranslateBusy] = useState(false);
   const [radioCaptionTranslateErr, setRadioCaptionTranslateErr] = useState<string | null>(null);
   const [radioCaptionTranslateHint, setRadioCaptionTranslateHint] = useState<string | null>(null);
+  const [liveCaptionsSttModel, setLiveCaptionsSttModel] = useState<LiveCaptionsSttModelId>(
+    () => loadUiSession().liveCaptionsSttModel
+  );
 
   const hasDesktopRecordApi =
     typeof window !== "undefined" &&
@@ -1559,6 +1601,7 @@ export function VideoPlayer({
   const isRadioChannel = !!channel?.id && isRadioStationChannelId(channel.id);
   const isPodcastChannel = !!channel?.id && isPodcastChannelId(channel.id);
   const isInternetAudioStream = isRadioChannel || isPodcastChannel;
+  const isLiveCaptionsChannel = isInternetAudioStream;
   const isYoutubeChannel = !!channel?.youtubeVideoId?.trim();
   const isWebVideoPageChannel = !!channel?.webVideoPageUrl?.trim();
   const isEmbeddedWebChannel = isYoutubeChannel || isWebVideoPageChannel;
@@ -1643,6 +1686,7 @@ export function VideoPlayer({
   useEffect(() => {
     const onFullscreenChange = () => {
       setEbookFullscreen(document.fullscreenElement === ebookPlayerRef.current);
+      setPlayerVideoFullscreen(document.fullscreenElement === videoWrapRef.current);
     };
     document.addEventListener("fullscreenchange", onFullscreenChange);
     return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
@@ -1650,6 +1694,16 @@ export function VideoPlayer({
 
   const toggleEbookFullscreen = useCallback(() => {
     const node = ebookPlayerRef.current;
+    if (!node) return;
+    if (document.fullscreenElement === node) {
+      void document.exitFullscreen?.();
+      return;
+    }
+    void node.requestFullscreen?.();
+  }, []);
+
+  const togglePlayerVideoFullscreen = useCallback(() => {
+    const node = videoWrapRef.current;
     if (!node) return;
     if (document.fullscreenElement === node) {
       void document.exitFullscreen?.();
@@ -1671,6 +1725,15 @@ export function VideoPlayer({
     isPodcastChannel ||
     isLocalVideoChannel ||
     (!!channel && !isEbookChannel && !isEmbeddedWebChannel && !isRadioChannel);
+  /** Live IPTV / HLS television (not radio, podcast, library, or embedded web). */
+  const isIptvLiveChannel =
+    !!channel &&
+    !isEbookChannel &&
+    !isEmbeddedWebChannel &&
+    !isRadioChannel &&
+    !isPodcastChannel &&
+    !isLibraryChannel &&
+    !isLocalVideoChannel;
   const webVideoEmbedSrc =
     isYoutubeChannel && channel?.youtubeVideoId
       ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(channel.youtubeVideoId)}?autoplay=1&rel=0`
@@ -1728,7 +1791,7 @@ export function VideoPlayer({
     setUnderLogoFailed(false);
   }, [channel?.id, channel?.logo]);
 
-  const mediaEqEnabled = (isInternetAudioStream && !isPodcastChannel) || isLibraryChannel;
+  const mediaEqEnabled = isInternetAudioStream || isLibraryChannel;
   const eqPageScope = eqPageScopeForChannel(channel) ?? "radio";
 
   useEffect(() => {
@@ -1757,6 +1820,10 @@ export function VideoPlayer({
     radioCaptionsCtrlRef.current = null;
     radioCaptionTranslateAbortRef.current?.abort();
     radioCaptionTranslateAbortRef.current = null;
+    for (const timer of radioCaptionTranslateDebounceRef.current.values()) clearTimeout(timer);
+    radioCaptionTranslateDebounceRef.current.clear();
+    radioCaptionTranslateLastTextRef.current.clear();
+    radioCaptionTranslateQueueRef.current.cancel();
     setRadioCaptionsEnabled(false);
     setRadioCaptionSegments([]);
     setRadioCaptionsStatus("");
@@ -1771,6 +1838,45 @@ export function VideoPlayer({
   useEffect(() => {
     radioCaptionTranslateTargetRef.current = radioCaptionTranslateTarget;
   }, [radioCaptionTranslateTarget]);
+
+  useEffect(() => {
+    if (!radioCaptionTranslateTarget) return;
+    void import("franc-min");
+  }, [radioCaptionTranslateTarget]);
+
+  applyRadioCaptionTranslationRef.current = async (
+    segmentId: number,
+    text: string,
+    targetCode: string,
+    signal: AbortSignal
+  ) => {
+    const trimmed = collapseRepeatedCaptionWords(text);
+    if (trimmed.length < 2) return;
+    try {
+      const tr = await translateLineBatchesToLanguageFast(
+        [trimmed],
+        targetCode,
+        radioCaptionDetectedLangRef.current,
+        signal
+      );
+      if (signal.aborted) return;
+      let translated = collapseRepeatedCaptionWords(tr.lines[0]?.trim() || trimmed);
+      if (!translated || translated.toLowerCase() === trimmed.toLowerCase()) translated = trimmed;
+      radioCaptionTranslateLastTextRef.current.set(segmentId, trimmed);
+      startTransition(() => {
+        setRadioCaptionSegments((prev) =>
+          prev.map((s) => {
+            if (s.id !== segmentId) return s;
+            const current = collapseRepeatedCaptionWords(s.text);
+            if (current !== trimmed) return s;
+            return { ...s, translated };
+          })
+        );
+      });
+    } catch {
+      /* per-line translation failures are non-fatal */
+    }
+  };
 
   useEffect(() => {
     if (!isEbookChannel) return;
@@ -1939,45 +2045,63 @@ export function VideoPlayer({
     };
   }, [isInternetAudioStream, channel?.id]);
 
-  const translateRadioCaptionLine = useCallback(async (segmentId: number, text: string, targetCode: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    try {
-      const { franc } = await import("franc-min");
-      const detected = franc(trimmed, { minLength: 3 }) || "eng";
-      const fetchJson = createLyricsJsonFetcher();
-      const tr = await translateLineBatchesToLanguage([trimmed], targetCode, detected, fetchJson);
-      const translated = tr.lines[0]?.trim() || trimmed;
-      setRadioCaptionSegments((prev) =>
-        prev.map((s) => (s.id === segmentId ? { ...s, translated } : s))
-      );
-    } catch {
-      /* per-line translation failures are non-fatal */
-    }
+  const scheduleRadioCaptionTranslate = useCallback((segmentId: number, text: string, targetCode: string) => {
+    const cleaned = collapseRepeatedCaptionWords(text);
+    if (cleaned.length < 2) return;
+    if (radioCaptionTranslateLastTextRef.current.get(segmentId) === cleaned) return;
+
+    const pending = radioCaptionTranslateDebounceRef.current.get(segmentId);
+    if (pending) clearTimeout(pending);
+
+    const timer = setTimeout(() => {
+      radioCaptionTranslateDebounceRef.current.delete(segmentId);
+      radioCaptionTranslateQueueRef.current.enqueue({ segmentId, text: cleaned, targetCode });
+    }, 280);
+    radioCaptionTranslateDebounceRef.current.set(segmentId, timer);
   }, []);
 
   const onRadioCaptionTranslateLanguage = useCallback(
     async (targetCode: string) => {
       if (!radioCaptionSegments.length) return;
       radioCaptionTranslateAbortRef.current?.abort();
+      for (const timer of radioCaptionTranslateDebounceRef.current.values()) clearTimeout(timer);
+      radioCaptionTranslateDebounceRef.current.clear();
+      radioCaptionTranslateLastTextRef.current.clear();
+      radioCaptionTranslateQueueRef.current.cancel();
       const ac = new AbortController();
       radioCaptionTranslateAbortRef.current = ac;
       setRadioCaptionTranslateBusy(true);
       setRadioCaptionTranslateErr(null);
       setRadioCaptionTranslateHint(null);
       const langLabel = labelForLyricsTargetCode(targetCode);
-      const lines = radioCaptionSegments.map((s) => s.text);
+      const rawLines = radioCaptionSegments.map((s) => s.text);
+      const { texts, lineToSegmentIndex } = prepareRadioCaptionLinesForTranslation(rawLines);
+      if (!texts.length) {
+        setRadioCaptionTranslateBusy(false);
+        return;
+      }
       try {
-        const sample = lines.join("\n").slice(0, 3500);
+        const sample = texts.join("\n").slice(0, 3500);
         const { franc } = await import("franc-min");
         const detected = franc(sample, { minLength: 10 }) || "eng";
-        const fetchJson = createLyricsJsonFetcher();
-        const tr = await translateLineBatchesToLanguage(lines, targetCode, detected, fetchJson, ac.signal);
+        radioCaptionDetectedLangRef.current = detected;
+        const tr = await translateLineBatchesToLanguageFast(texts, targetCode, detected, ac.signal);
         if (ac.signal.aborted) return;
-        setRadioCaptionSegments((prev) =>
-          prev.map((s, i) => ({ ...s, translated: tr.lines[i]?.trim() || s.text }))
+        const mapped = mapRadioTranslationsToSegments(
+          radioCaptionSegments.length,
+          lineToSegmentIndex,
+          tr.lines,
+          rawLines
         );
+        setRadioCaptionSegments((prev) =>
+          prev.map((s, i) => ({ ...s, translated: mapped[i] || s.text }))
+        );
+        for (let i = 0; i < radioCaptionSegments.length; i++) {
+          const cleaned = collapseRepeatedCaptionWords(rawLines[i] ?? "");
+          if (mapped[i]) radioCaptionTranslateLastTextRef.current.set(radioCaptionSegments[i]!.id, cleaned);
+        }
         setRadioCaptionTranslateTarget(targetCode);
+        radioCaptionTranslateTargetRef.current = targetCode;
         setRadioCaptionTranslateHint(
           tr.providerHint ? `Translated to ${langLabel} · ${tr.providerHint}` : `Translated to ${langLabel}`
         );
@@ -1991,8 +2115,64 @@ export function VideoPlayer({
     [radioCaptionSegments]
   );
 
+  const radioCaptionsHandlersRef = useRef({
+    onStatus: setRadioCaptionsStatus,
+    onError: setRadioCaptionsErr,
+    onSegment: (_seg: RadioCaptionSegment) => {},
+  });
+  radioCaptionsHandlersRef.current.onStatus = setRadioCaptionsStatus;
+  radioCaptionsHandlersRef.current.onError = setRadioCaptionsErr;
+  radioCaptionsHandlersRef.current.onSegment = (seg: RadioCaptionSegment) => {
+    const collapsed = collapseRepeatedCaptionWords(seg.text);
+    if (!collapsed) return;
+    let segmentIdForTranslate = seg.id;
+    startTransition(() => {
+      setRadioCaptionSegments((prev) => {
+        const norm = collapsed.toLowerCase();
+        const last = prev[prev.length - 1];
+        const lastNorm = last ? collapseRepeatedCaptionWords(last.text).toLowerCase() : "";
+        if (seg.replaceLast && prev.length > 0) {
+          const next = [...prev];
+          const lastSeg = next[next.length - 1]!;
+          segmentIdForTranslate = lastSeg.id;
+          const textChanged = lastNorm !== norm;
+          next[next.length - 1] = {
+            ...lastSeg,
+            text: collapsed,
+            at: seg.at,
+            ...(textChanged ? { translated: undefined } : null),
+          };
+          return next;
+        }
+        if (last && lastNorm === norm) {
+          segmentIdForTranslate = last.id;
+          const next = [...prev];
+          next[next.length - 1] = { ...last, text: collapsed, at: seg.at };
+          return next;
+        }
+        return [...prev.slice(-40), { ...seg, text: collapsed }];
+      });
+    });
+    const target = radioCaptionTranslateTargetRef.current;
+    if (target) scheduleRadioCaptionTranslate(segmentIdForTranslate, collapsed, target);
+  };
+
   useEffect(() => {
-    if (!isRadioChannel || !radioCaptionsEnabled || !radioPlaying || !canUseRadioLiveCaptions()) {
+    if (!isLiveCaptionsChannel || !canUseRadioLiveCaptions()) return;
+    void applyLiveCaptionsSttModel(liveCaptionsSttModel);
+  }, [isLiveCaptionsChannel, liveCaptionsSttModel]);
+
+  const onLiveCaptionsSttModelChange = useCallback((model: LiveCaptionsSttModelId) => {
+    const next = parseLiveCaptionsSttModel(model);
+    saveUiSession({ liveCaptionsSttModel: next });
+    setLiveCaptionsSttModel(next);
+    void applyLiveCaptionsSttModel(next).then((res) => {
+      if (!res.ok) setRadioCaptionsErr(res.error ?? "Could not switch speech-to-text model.");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isLiveCaptionsChannel || !radioCaptionsEnabled || !canUseRadioLiveCaptions()) {
       radioCaptionsCtrlRef.current?.stop();
       radioCaptionsCtrlRef.current = null;
       return;
@@ -2000,34 +2180,18 @@ export function VideoPlayer({
     const el = mediaRef.current;
     if (!el) return;
     setRadioCaptionsErr(null);
+    const h = radioCaptionsHandlersRef.current;
     const ctrl = startRadioLiveCaptions(el, {
-      onStatus: setRadioCaptionsStatus,
-      onSegment: (seg) => {
-        setRadioCaptionSegments((prev) => {
-          if (seg.replaceLast && prev.length > 0) {
-            const next = [...prev];
-            const last = next[next.length - 1]!;
-            next[next.length - 1] = {
-              ...last,
-              text: seg.text,
-              at: seg.at,
-              id: seg.id,
-            };
-            return next;
-          }
-          return [...prev.slice(-40), seg];
-        });
-        const target = radioCaptionTranslateTargetRef.current;
-        if (target) void translateRadioCaptionLine(seg.id, seg.text, target);
-      },
-      onError: (msg) => setRadioCaptionsErr(msg),
+      onStatus: h.onStatus,
+      onSegment: h.onSegment,
+      onError: h.onError,
     });
     radioCaptionsCtrlRef.current = ctrl;
     return () => {
       ctrl.stop();
       radioCaptionsCtrlRef.current = null;
     };
-  }, [isRadioChannel, radioCaptionsEnabled, radioPlaying, channel?.id, translateRadioCaptionLine]);
+  }, [isLiveCaptionsChannel, radioCaptionsEnabled, channel?.id, liveCaptionsSttModel]);
 
   useEffect(() => {
     if (!channel?.id || isEbookChannel || isEmbeddedWebChannel) return;
@@ -2386,6 +2550,7 @@ export function VideoPlayer({
   const fetchLyricsFromDeepSeekOnly = useCallback(async () => {
     const ch = channel;
     if (!ch || !isLikelyLocalMp3Channel(ch)) return;
+    if (!(await guardLlmApiKey("compatible", "Lyrics from DeepSeek / OpenAI"))) return;
     const el = mediaRef.current;
     const inline = el?.duration;
     const inlineOk = typeof inline === "number" && Number.isFinite(inline) && inline > 2 ? inline : null;
@@ -2404,16 +2569,16 @@ export function VideoPlayer({
       setMp3Lyrics({ kind: "ready", data });
       setPlayerChromeNotice("Fetched from DeepSeek only. Use Save lyrics if this version is better.");
     } catch (e) {
-      setMp3Lyrics({
-        kind: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
+      const message = e instanceof Error ? e.message : String(e);
+      if (isMissingLlmKeyMessage(message)) promptLlmApiKeySetup("Lyrics from DeepSeek / OpenAI");
+      setMp3Lyrics({ kind: "error", message });
     }
   }, [channel, lyricsDurationKey]);
 
   const fetchLyricsFromGeminiOnly = useCallback(async () => {
     const ch = channel;
     if (!ch || !isLikelyLocalMp3Channel(ch)) return;
+    if (!(await guardLlmApiKey("gemini", "Lyrics from Gemini"))) return;
     const el = mediaRef.current;
     const inline = el?.duration;
     const inlineOk = typeof inline === "number" && Number.isFinite(inline) && inline > 2 ? inline : null;
@@ -2432,10 +2597,9 @@ export function VideoPlayer({
       setMp3Lyrics({ kind: "ready", data });
       setPlayerChromeNotice("Fetched from Gemini only. Use Save lyrics if this version is better.");
     } catch (e) {
-      setMp3Lyrics({
-        kind: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
+      const message = e instanceof Error ? e.message : String(e);
+      if (isMissingLlmKeyMessage(message)) promptLlmApiKeySetup("Lyrics from Gemini");
+      setMp3Lyrics({ kind: "error", message });
     }
   }, [channel, lyricsDurationKey]);
 
@@ -2532,6 +2696,11 @@ export function VideoPlayer({
   const showScreenOffChrome = !!channel && !isLibraryChannel && !isInternetAudioStream && !isEbookChannel && !isEmbeddedWebChannel;
   const effectiveRecordTapPlayUrl =
     recordingSourceUrl && channel?.url?.trim() === recordingSourceUrl ? recordTapPlayUrl : null;
+  const watchingOtherChannelWhileRecording =
+    recording &&
+    !!recordingSourceUrl &&
+    !!channel?.url?.trim() &&
+    channel.url.trim() !== recordingSourceUrl;
 
   const recordButtonTitle = !recordable
     ? ""
@@ -2544,12 +2713,25 @@ export function VideoPlayer({
             ? "This stream URL cannot be recorded from the app unless it is a direct http(s) media stream."
             : "REC needs a direct http(s) media stream URL, not an embedded website page."
         : isInternetAudioStream
-          ? "Save the live audio stream to disk (same bytes as playback via one upstream on desktop)."
-          : "Save the live IPTV stream, then finalize it as a quality-preserving .mp4 after Stop. Playback stays on the live stream while recording.";
+          ? "Save the live audio stream to disk. You can switch to another station while recording continues in the background."
+          : "Save the live IPTV stream, then finalize it as .mp4 after Stop. Switch channels anytime — recording keeps the original stream.";
+
+  const notifyRecordingStatus = useCallback(
+    (active: boolean) => {
+      onRecordingStatusChangeRef.current?.({
+        pane: playbackPaneRef.current ?? "L",
+        recording: active,
+        channelId: active ? recordingChannelId : null,
+        channelName: active ? recordingChannelName : null,
+        sourceUrl: active ? recordingSourceUrl : null,
+      });
+    },
+    [recordingChannelId, recordingChannelName, recordingSourceUrl]
+  );
 
   useEffect(() => {
-    onRecordingStatusChangeRef.current?.(recording);
-  }, [recording]);
+    notifyRecordingStatus(recording);
+  }, [recording, notifyRecordingStatus]);
 
   useEffect(() => {
     return () => {
@@ -2558,17 +2740,35 @@ export function VideoPlayer({
         void window.iptv.stopStreamRecord(id);
       }
       recordIdRef.current = null;
-      onRecordingStatusChangeRef.current?.(false);
       setRecording(false);
       setRecordTapPlayUrl(null);
       setRecordingSourceUrl(null);
+      setRecordingChannelId(null);
+      setRecordingChannelName(null);
       setRecordSavedPath(null);
+      onRecordingStatusChangeRef.current?.({
+        pane: playbackPaneRef.current ?? "L",
+        recording: false,
+        channelId: null,
+        channelName: null,
+        sourceUrl: null,
+      });
     };
   }, []);
 
   useEffect(() => {
     if (screenPlaybackOff) {
-      setBufferLine(recording ? "Screen off · recording continues" : "Screen off");
+      setBufferLine(
+        recording
+          ? watchingOtherChannelWhileRecording
+            ? `Screen off · recording ${recordingChannelName ?? "channel"} in background`
+            : "Screen off · recording continues"
+          : "Screen off"
+      );
+      return;
+    }
+    if (watchingOtherChannelWhileRecording) {
+      setBufferLine(`Recording ${recordingChannelName ?? "channel"} · watching another channel`);
       return;
     }
     if (!channel?.url?.trim() || isLibraryChannel || isEbookChannel) {
@@ -2596,7 +2796,7 @@ export function VideoPlayer({
     tick();
     const id = window.setInterval(tick, 450);
     return () => clearInterval(id);
-  }, [channel?.url, recording, screenPlaybackOff, isLibraryChannel, isEbookChannel]);
+  }, [channel?.url, recording, watchingOtherChannelWhileRecording, screenPlaybackOff, isLibraryChannel, isEbookChannel]);
 
   const refreshTextTracks = useCallback(() => {
     const video = mediaRef.current;
@@ -2625,6 +2825,8 @@ export function VideoPlayer({
         setRecording(false);
         setRecordSavedPath(null);
         setRecordingSourceUrl(null);
+        setRecordingChannelId(null);
+        setRecordingChannelName(null);
       }
     }
 
@@ -3471,8 +3673,25 @@ export function VideoPlayer({
         el.removeEventListener("error", onRadioError);
         el.removeEventListener("loadedmetadata", onRadioLoadedMeta);
       };
-      const radioPlay = effectiveRecordTapPlayUrl?.trim() || url;
-      setPlaybackMode(effectiveRecordTapPlayUrl ? (isPodcastChannel ? "Podcast · record tap" : "Radio · record tap") : isPodcastChannel ? "Podcast · native" : "Radio · native");
+      const radioPlay =
+        effectiveRecordTapPlayUrl?.trim() ||
+        (shouldUseStreamProxy() ? proxiedStreamUrl(url, proxyBase) : url);
+      setPlaybackMode(
+        effectiveRecordTapPlayUrl
+          ? isPodcastChannel
+            ? "Podcast · record tap"
+            : "Radio · record tap"
+          : shouldUseStreamProxy()
+            ? isPodcastChannel
+              ? "Podcast · local proxy"
+              : "Radio · local proxy"
+            : isPodcastChannel
+              ? "Podcast · native"
+              : "Radio · native"
+      );
+      if (isInternetAudioStream) {
+        el.crossOrigin = "anonymous";
+      }
       el.src = radioPlay;
       const primeInternetAudio = () => {
         void ensureElementPlaybackAudible(el, volumeRef.current);
@@ -3653,15 +3872,22 @@ export function VideoPlayer({
   const startRecording = useCallback(async () => {
     if (isLibraryChannel) return;
     if (!channel?.url?.trim() || !canStartRecording) return;
+    if (recordIdRef.current) {
+      setRecordErr("A recording is already in progress. Stop it first, or switch channels to watch something else while it saves.");
+      return;
+    }
     setRecordErr(null);
     setRecordSavedPath(null);
     setRecordBusy(true);
+    const recordUrl = channel.url.trim();
+    const recordName = channel.name?.trim() || "Channel";
+    const recordChannelId = channel.id;
     try {
       const dir = await window.iptv!.pickRecordDir();
       if (!dir) return;
-      const hint = recordFileSuffixAndTapType(channel.url.trim(), channel.id);
+      const hint = recordFileSuffixAndTapType(recordUrl, recordChannelId);
       const recordPayload = {
-        url: channel.url.trim(),
+        url: recordUrl,
         outDir: dir,
         filenameExt: hint.filenameExt,
         tapContentType: hint.tapContentType,
@@ -3673,14 +3899,17 @@ export function VideoPlayer({
         setRecording(true);
         setRecordSavedPath(out.filePath);
         setRecordTapPlayUrl(out.playbackUrl ?? null);
-        setRecordingSourceUrl(channel.url.trim());
+        setRecordingSourceUrl(recordUrl);
+        setRecordingChannelId(recordChannelId);
+        setRecordingChannelName(recordName);
       });
+      notifyRecordingStatus(true);
     } catch (e) {
       setRecordErr(e instanceof Error ? e.message : String(e));
     } finally {
       setRecordBusy(false);
     }
-  }, [channel, canStartRecording, isLibraryChannel]);
+  }, [channel, canStartRecording, isLibraryChannel, notifyRecordingStatus]);
 
   const stopRecording = useCallback(async () => {
     const id = recordIdRef.current;
@@ -3695,10 +3924,13 @@ export function VideoPlayer({
       setRecording(false);
       setRecordTapPlayUrl(null);
       setRecordingSourceUrl(null);
+      setRecordingChannelId(null);
+      setRecordingChannelName(null);
       setScreenPlaybackOff(false);
       setRecordBusy(false);
+      notifyRecordingStatus(false);
     }
-  }, []);
+  }, [notifyRecordingStatus]);
 
   const canRevealRecordingInExplorer =
     typeof window !== "undefined" && typeof window.iptv?.showRecordInFolder === "function";
@@ -3934,11 +4166,52 @@ export function VideoPlayer({
     </div>
   );
 
+  const chromePlayPaused = isRadioChannel ? !radioPlaying : libTransportPaused;
+
+  const renderChromePlayPauseIcon = (paused: boolean) =>
+    paused ? (
+      <svg className="chrome-play-pause-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+        <path d="M4 2 L16 9 L4 16 Z" fill="currentColor" />
+      </svg>
+    ) : (
+      <svg className="chrome-play-pause-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+        <rect x="3" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
+        <rect x="11" y="3" width="4" height="12" rx="0.5" fill="currentColor" />
+      </svg>
+    );
+
+  const renderChromeFullscreenIcon = (active: boolean) =>
+    active ? (
+      <svg className="chrome-fullscreen-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+        <path
+          d="M6.5 11.5 L2 16 M2 11.5 L6.5 7 M11.5 6.5 L16 2 M11.5 2 L16 6.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+        />
+        <rect x="5" y="5" width="8" height="8" rx="0.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ) : (
+      <svg className="chrome-fullscreen-icon" viewBox="0 0 18 18" width="14" height="14" aria-hidden>
+        <path
+          d="M2 7 V2 H7 M11 2 H16 V7 M16 11 V16 H11 M7 16 H2 V11"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+
   const renderVolumeEq = (extraWrapClass?: string, opts?: { showVolume?: boolean }) => {
     const showVolume = opts?.showVolume !== false;
     if (!showVolume && !mediaEqEnabled) return null;
     if (showVolume && !onVolumeChange) return null;
     const libraryAnchored = extraWrapClass?.includes("volume-eq-wrap--library-inline") ?? false;
+    const chromeInline = extraWrapClass?.includes("volume-eq-wrap--chrome-inline") ?? false;
+    const showChromeTransport = chromeInline && !!channel && !isEbookChannel;
     const volumePanelInner = (
       <div className="volume-popover-panel-inner">
         <span className="volume-popover-title">Volume</span>
@@ -3961,6 +4234,29 @@ export function VideoPlayer({
           !showVolume ? " volume-eq-wrap--eq-only" : ""
         }`}
       >
+        {showChromeTransport ? (
+          <button
+            type="button"
+            className="chrome-play-pause-btn"
+            title={chromePlayPaused ? "Play" : "Pause"}
+            aria-label={chromePlayPaused ? "Play" : "Pause"}
+            onClick={() => void toggleChromePlayPause()}
+          >
+            {renderChromePlayPauseIcon(chromePlayPaused)}
+          </button>
+        ) : null}
+        {showChromeTransport ? (
+          <button
+            type="button"
+            className="chrome-fullscreen-btn"
+            title={playerVideoFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-label={playerVideoFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-pressed={playerVideoFullscreen}
+            onClick={() => void togglePlayerVideoFullscreen()}
+          >
+            {renderChromeFullscreenIcon(playerVideoFullscreen)}
+          </button>
+        ) : null}
         {showVolume && onVolumeChange ? (
         <div className="volume-popover-host" ref={volumePopoverRef}>
           <button
@@ -4037,10 +4333,18 @@ export function VideoPlayer({
           </div>
         ) : (
           <div
+            ref={videoWrapRef}
             className={`video-wrap${layoutMode === "compactTvDock" ? " video-wrap--compact-tv-dock" : ""}${
               isEbookChannel ? " video-wrap--ebook" : ""
             }${isInternetAudioStream ? " video-wrap--internet-audio" : ""}`}
           >
+            {watchingOtherChannelWhileRecording ? (
+              <div className="recording-background-banner" role="status">
+                <span className="recording-background-banner-dot" aria-hidden />
+                Recording <strong>{recordingChannelName ?? "channel"}</strong> in the background — you can watch other
+                channels. Press ■ to stop.
+              </div>
+            ) : null}
             {layoutMode === "compactTvDock" && channel ? (
               <div className="compact-tv-dock-bar">
                 <span className="compact-tv-dock-label">{channel.name}</span>
@@ -4135,7 +4439,7 @@ export function VideoPlayer({
             {channel && isInternetAudioStream ? (
               <div
                 className={`internet-audio-layout${
-                  isRadioChannel ? " internet-audio-layout--radio-split" : ""
+                  isLiveCaptionsChannel ? " internet-audio-layout--radio-split" : ""
                 }`}
               >
                 <div className="internet-audio-layout-station">
@@ -4148,11 +4452,14 @@ export function VideoPlayer({
                     onTogglePlay={toggleInternetAudioPlayback}
                   />
                 </div>
-                {isRadioChannel ? (
+                {isLiveCaptionsChannel ? (
                   <div className="internet-audio-layout-captions">
                     <RadioLiveCaptionsPanel
                       layout="split"
                       enabled={radioCaptionsEnabled}
+                      sttModel={liveCaptionsSttModel}
+                      sttModelDisabled={!canUseRadioLiveCaptions()}
+                      onSttModelChange={onLiveCaptionsSttModelChange}
                 status={radioCaptionsStatus}
                 error={radioCaptionsErr}
                 segments={radioCaptionSegments}
@@ -4178,6 +4485,10 @@ export function VideoPlayer({
                 }}
                       onClear={() => {
                         radioCaptionTranslateAbortRef.current?.abort();
+                        for (const timer of radioCaptionTranslateDebounceRef.current.values()) clearTimeout(timer);
+                        radioCaptionTranslateDebounceRef.current.clear();
+                        radioCaptionTranslateLastTextRef.current.clear();
+                        radioCaptionTranslateQueueRef.current.cancel();
                         setRadioCaptionSegments([]);
                         setRadioCaptionsStatus("");
                         setRadioCaptionsErr(null);
@@ -4197,6 +4508,7 @@ export function VideoPlayer({
               ref={mediaRef}
               className={`video-el${isEmbeddedWebChannel || isEbookChannel || screenPlaybackOff || isInternetAudioStream ? " video-el--hidden" : ""}`}
               controls={!useChromeSeek && !isEmbeddedWebChannel && !isEbookChannel}
+              crossOrigin={isInternetAudioStream ? "anonymous" : undefined}
               playsInline
               preload="auto"
             />
@@ -4297,7 +4609,12 @@ export function VideoPlayer({
                       <p className="mp3-lyrics-loading">Fetching lyrics…</p>
                     ) : null}
                     {mp3Lyrics.kind === "error" ? (
-                      <div className="mp3-lyrics-err-body">{mp3Lyrics.message}</div>
+                      <div className="mp3-lyrics-err-body">
+                        {mp3Lyrics.message}
+                        {isMissingLlmKeyMessage(mp3Lyrics.message) ? (
+                          <LlmKeyGuideInline className="mp3-lyrics-err-guide" />
+                        ) : null}
+                      </div>
                     ) : null}
                     {mp3Lyrics.kind === "ready" ? (
                   <div className="mp3-lyrics-body">
@@ -4504,7 +4821,11 @@ export function VideoPlayer({
                       type="button"
                       className="rec-btn rec-btn--stop"
                       disabled={recordBusy}
-                      title="Stop recording"
+                      title={
+                        watchingOtherChannelWhileRecording
+                          ? `Stop recording ${recordingChannelName ?? "channel"}`
+                          : "Stop recording"
+                      }
                       onClick={() => void stopRecording()}
                     >
                       ■
@@ -4546,6 +4867,7 @@ export function VideoPlayer({
             {useChromeSeek ? (
               <>
                 {renderChromeSeekRow()}
+                {isIptvLiveChannel && channel ? <ChannelEpgGuide channel={channel} /> : null}
                 {isLibraryChannel ? (
                 <div className="library-controls-bar">
                   <div className="library-transport-row library-transport-row--compact" aria-label="Playback controls">

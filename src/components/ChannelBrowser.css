@@ -41,6 +41,25 @@
   min-width: 0;
 }
 
+.browser-settings-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.browser-settings-btn:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
 .compact-view-btn {
   flex-shrink: 0;
   border: 1px solid rgba(0, 0, 0, 0.18);
@@ -167,6 +186,17 @@
   min-height: 30px;
   padding: 5px 8px;
   font-size: 0.68rem;
+}
+
+.tv-tools-popover .m3u-load-message {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
 }
 
 .tv-tools-popover .message-bar {
@@ -534,6 +564,27 @@
 
 .channel-row.active--left.active--right {
   box-shadow: inset 3px 0 0 var(--accent), inset -3px 0 0 var(--success);
+}
+
+.channel-row--recording {
+  background: rgba(220, 38, 38, 0.06);
+}
+
+.channel-row--recording.active {
+  background: rgba(220, 38, 38, 0.1);
+}
+
+.channel-rec-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.5625rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  vertical-align: middle;
+  color: #fef2f2;
+  background: #b91c1c;
 }
 
 .channel-row:hover {

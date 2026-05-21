@@ -195,6 +195,197 @@ ipcMain.handle("iptv-fetch-playlist-text", async (_evt, rawUrl) => {
   return res.text();
 });
 
+function parseXmltvTimestampMain(raw) {
+  const s = String(raw ?? "").trim();
+  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\s*([+-]\d{4}))?/.exec(s);
+  if (!m) return null;
+  if (!m[7]) {
+    const local = new Date(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+      parseInt(m[4], 10),
+      parseInt(m[5], 10),
+      parseInt(m[6], 10)
+    );
+    const ms = local.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const sign = m[7][0] === "-" ? -1 : 1;
+  const offH = parseInt(m[7].slice(1, 3), 10);
+  const offM = parseInt(m[7].slice(3, 5), 10);
+  const offsetMs = sign * (offH * 3600 + offM * 60) * 1000;
+  const ms = Date.UTC(
+    parseInt(m[1], 10),
+    parseInt(m[2], 10) - 1,
+    parseInt(m[3], 10),
+    parseInt(m[4], 10),
+    parseInt(m[5], 10),
+    parseInt(m[6], 10)
+  );
+  return Number.isFinite(ms) ? ms - offsetMs : null;
+}
+
+function parseProgrammeBlockMain(block, channelId, fromMs, toMs) {
+  if (!block.includes(`channel="${channelId}"`)) return null;
+  const startM = /start="([^"]+)"/.exec(block);
+  const stopM = /stop="([^"]+)"/.exec(block);
+  if (!startM || !stopM) return null;
+  const start = parseXmltvTimestampMain(startM[1]);
+  const stop = parseXmltvTimestampMain(stopM[1]);
+  if (start == null || stop == null || stop <= start) return null;
+  if (stop <= fromMs || start >= toMs) return null;
+  const titleM = /<title[^>]*>([^<]*)<\/title>/i.exec(block);
+  const descM = /<desc[^>]*>([^<]*)<\/desc>/i.exec(block);
+  return {
+    channelId,
+    start,
+    stop,
+    title: (titleM?.[1] ?? "Programme").trim() || "Programme",
+    description: descM?.[1]?.trim() || undefined,
+  };
+}
+
+const epgProgrammeCache = new Map();
+/** Dedupe identical in-flight EPG requests. */
+const epgScanInflight = new Map();
+
+async function streamExtractProgrammes(url, channelId, fromMs, toMs) {
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: { "User-Agent": "IPTV-Player/1.0 (Electron)" },
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) {
+    throw new Error(`EPG HTTP ${res.status}`);
+  }
+  if (!res.body) {
+    throw new Error("EPG response has no body.");
+  }
+
+  const programmes = [];
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let idx = buf.indexOf("<programme");
+    while (idx !== -1) {
+      const end = buf.indexOf("</programme>", idx);
+      if (end === -1) break;
+      const block = buf.slice(idx, end + 12);
+      buf = buf.slice(end + 12);
+      const row = parseProgrammeBlockMain(block, channelId, fromMs, toMs);
+      if (row) programmes.push(row);
+      idx = buf.indexOf("<programme");
+    }
+    if (buf.length > 1_500_000) buf = buf.slice(-300_000);
+  }
+
+  programmes.sort((a, b) => a.start - b.start);
+  return programmes;
+}
+
+/** Stream-scan large XMLTV and return programmes for one channel id in a time window. */
+ipcMain.handle("iptv-extract-epg-programmes", async (_evt, payload) => {
+  const url = assertPlaylistUrlForMain(payload?.url);
+  const channelId = String(payload?.channelId ?? "").trim();
+  if (!channelId) throw new Error("Missing EPG channel id.");
+  const fromMs = Number(payload?.fromMs);
+  const toMs = Number(payload?.toMs);
+  if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) throw new Error("Invalid EPG time window.");
+
+  const cacheKey = `${url}\0${channelId}\0${Math.floor(fromMs / 3_600_000)}`;
+  const hit = epgProgrammeCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < 25 * 60 * 1000) {
+    return { ok: true, programmes: hit.programmes };
+  }
+
+  let scan = epgScanInflight.get(cacheKey);
+  if (!scan) {
+    scan = streamExtractProgrammes(url, channelId, fromMs, toMs).finally(() => {
+      epgScanInflight.delete(cacheKey);
+    });
+    epgScanInflight.set(cacheKey, scan);
+  }
+  const programmes = await scan;
+  epgProgrammeCache.set(cacheKey, { at: Date.now(), programmes });
+  if (epgProgrammeCache.size > 80) {
+    const oldest = epgProgrammeCache.keys().next().value;
+    if (oldest) epgProgrammeCache.delete(oldest);
+  }
+  return { ok: true, programmes };
+});
+
+const epgChannelIndexCache = new Map();
+
+/** Read only the `<channel>` section of a large XMLTV file (stops at first `<programme`). */
+async function streamBuildEpgChannelIndex(url) {
+  const hit = epgChannelIndexCache.get(url);
+  if (hit && Date.now() - hit.at < 45 * 60 * 1000) {
+    return hit.channelNames;
+  }
+
+  const res = await fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: { "User-Agent": "IPTV-Player/1.0 (Electron)" },
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!res.ok) {
+    throw new Error(`EPG HTTP ${res.status}`);
+  }
+  if (!res.body) {
+    throw new Error("EPG response has no body.");
+  }
+
+  const decoder = new TextDecoder();
+  let buf = "";
+  const MAX_INDEX_BYTES = 12_000_000;
+  try {
+    for await (const chunk of res.body) {
+      buf += decoder.decode(chunk, { stream: true });
+      if (buf.includes("<programme") || buf.length >= MAX_INDEX_BYTES) break;
+    }
+  } finally {
+    try {
+      await res.body.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const channelNames = {};
+  const chRe = /<channel\s+id="([^"]+)"[^>]*>([\s\S]*?)<\/channel>/gi;
+  let m;
+  while ((m = chRe.exec(buf)) !== null) {
+    const id = m[1]?.trim();
+    if (!id) continue;
+    const block = m[2] ?? "";
+    const names = [];
+    const dnRe = /<display-name[^>]*>([^<]*)<\/display-name>/gi;
+    let dn;
+    while ((dn = dnRe.exec(block)) !== null) {
+      const t = dn[1]?.trim();
+      if (t) names.push(t);
+    }
+    channelNames[id] = names.length ? names : [id];
+  }
+
+  epgChannelIndexCache.set(url, { at: Date.now(), channelNames });
+  if (epgChannelIndexCache.size > 12) {
+    const oldest = epgChannelIndexCache.keys().next().value;
+    if (oldest) epgChannelIndexCache.delete(oldest);
+  }
+  return channelNames;
+}
+
+ipcMain.handle("iptv-fetch-epg-channel-index", async (_evt, rawUrl) => {
+  const url = assertPlaylistUrlForMain(rawUrl);
+  const channelNames = await streamBuildEpgChannelIndex(url);
+  return { ok: true, channelNames };
+});
+
 function assertYoutubeSearchQuery(raw) {
   const s = String(raw ?? "")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, " ")
@@ -677,6 +868,130 @@ function assertLyricsChatModelInput(raw) {
   return t;
 }
 
+const DEEPSEEK_LLM_BASE = "https://api.deepseek.com";
+const OPENAI_LLM_BASE = "https://api.openai.com/v1";
+
+function savedCompatibleBaseLower() {
+  return String(getLyricsChatTranslateBaseUrlRaw() || "").trim().toLowerCase();
+}
+
+function isOpenAiCompatibleBase(baseLower) {
+  return baseLower.includes("openai.com");
+}
+
+/** DeepSeek slot: saved key with non-OpenAI base, or `DEEPSEEK_API_KEY` in env. */
+function resolveDeepSeekLlmSlot() {
+  const saved = getSavedLyricsChatTranslateApiKey();
+  const baseLower = savedCompatibleBaseLower();
+  const model = getLyricsChatTranslateModelRaw() || "deepseek-chat";
+  if (saved && !isOpenAiCompatibleBase(baseLower)) {
+    const baseUrl = getLyricsChatTranslateBaseUrlRaw() || DEEPSEEK_LLM_BASE;
+    let host = "api.deepseek.com";
+    try {
+      host = new URL(baseUrl).hostname;
+    } catch {
+      /* keep default */
+    }
+    return { id: "deepseek", label: "DeepSeek", apiKey: saved, baseUrl, model, host };
+  }
+  const envKey = String(process.env.DEEPSEEK_API_KEY ?? "").trim();
+  if (envKey) {
+    return {
+      id: "deepseek",
+      label: "DeepSeek",
+      apiKey: envKey,
+      baseUrl: DEEPSEEK_LLM_BASE,
+      model: "deepseek-chat",
+      host: "api.deepseek.com",
+    };
+  }
+  return null;
+}
+
+/** OpenAI slot: saved key with OpenAI base, or `OPENAI_*` env when DeepSeek env is unset. */
+function resolveOpenAiLlmSlot() {
+  const saved = getSavedLyricsChatTranslateApiKey();
+  const baseLower = savedCompatibleBaseLower();
+  const model = getLyricsChatTranslateModelRaw() || "gpt-4o-mini";
+  if (saved && isOpenAiCompatibleBase(baseLower)) {
+    const baseUrl = getLyricsChatTranslateBaseUrlRaw() || OPENAI_LLM_BASE;
+    let host = "api.openai.com";
+    try {
+      host = new URL(baseUrl).hostname;
+    } catch {
+      /* keep default */
+    }
+    return { id: "openai", label: "OpenAI", apiKey: saved, baseUrl, model, host };
+  }
+  const envKey = String(
+    process.env.OPENAI_API_KEY ?? process.env.OPENAI_COMPATIBLE_LYRICS_API_KEY ?? ""
+  ).trim();
+  if (envKey && !String(process.env.DEEPSEEK_API_KEY ?? "").trim()) {
+    return {
+      id: "openai",
+      label: "OpenAI",
+      apiKey: envKey,
+      baseUrl: OPENAI_LLM_BASE,
+      model: "gpt-4o-mini",
+      host: "api.openai.com",
+    };
+  }
+  return null;
+}
+
+function resolveGeminiLlmSlot() {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) return null;
+  let model = "gemini-2.5-flash";
+  try {
+    model = getGeminiModelRaw();
+  } catch {
+    /* keep default */
+  }
+  return {
+    id: "gemini",
+    label: "Google Gemini",
+    apiKey,
+    host: "generativelanguage.googleapis.com",
+    model,
+  };
+}
+
+/** App-wide order: DeepSeek → Gemini → OpenAI. */
+function listLlmProvidersInOrder(opts = {}) {
+  const skipGemini = opts.skipGemini === true;
+  const out = [];
+  const deepseek = resolveDeepSeekLlmSlot();
+  if (deepseek) out.push(deepseek);
+  if (!skipGemini) {
+    const gemini = resolveGeminiLlmSlot();
+    if (gemini) out.push(gemini);
+  }
+  const openai = resolveOpenAiLlmSlot();
+  if (openai) out.push(openai);
+  return out;
+}
+
+function firstLlmProviderInOrder(opts = {}) {
+  return listLlmProvidersInOrder(opts)[0] ?? null;
+}
+
+function llmMetaFromSlot(slot, purpose) {
+  if (!slot) return { llmModel: "", llmHost: "", llmPurpose: purpose };
+  if (slot.id === "gemini") {
+    return {
+      llmModel: slot.model,
+      llmHost: slot.host,
+      llmPurpose: `${purpose} (${slot.label})`,
+    };
+  }
+  return {
+    llmModel: slot.model,
+    llmHost: slot.host,
+    llmPurpose: `${purpose} (${slot.label})`,
+  };
+}
+
 /** Build `…/v1/chat/completions` from API root (DeepSeek, OpenAI, OpenRouter, etc.). */
 function lyricsChatCompletionsEndpoint(baseRaw) {
   const defaultBase = "https://api.deepseek.com";
@@ -720,14 +1035,9 @@ function stripLlmMarkdownFences(text) {
 }
 
 function getLyricsLlmConfig() {
-  const model = getLyricsChatTranslateModelRaw() || "deepseek-chat";
-  let host = "api.deepseek.com";
-  try {
-    host = new URL(getLyricsChatTranslateBaseUrlRaw() || "https://api.deepseek.com").hostname;
-  } catch {
-    /* keep default */
-  }
-  return { model, host };
+  const slot = firstLlmProviderInOrder();
+  if (slot) return { model: slot.model, host: slot.host };
+  return { model: "deepseek-chat", host: "api.deepseek.com" };
 }
 
 /** Human-readable error: which feature failed and which model/host was used. */
@@ -740,29 +1050,25 @@ function formatLyricsLlmError(purpose, message) {
   return `LLM (${purpose}): ${clean || "request failed"} [model: ${model} @ ${host}]`;
 }
 
-function lyricsLlmMetaFields(purpose) {
-  const { model, host } = getLyricsLlmConfig();
-  return { llmModel: model, llmHost: host, llmPurpose: purpose };
+function lyricsLlmMetaFields(purpose, slot) {
+  const s = slot || firstLlmProviderInOrder();
+  return llmMetaFromSlot(s, purpose);
 }
 
-async function postLyricsLlmChatCompletion(bodyObj, purpose = "LLM request") {
-  const apiKey = getLyricsChatTranslateApiKey();
-  if (!apiKey) {
+async function postLyricsLlmChatCompletionForSlot(slot, bodyObj, purpose = "LLM request") {
+  if (!slot?.apiKey) {
     throw new Error("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY");
   }
-  const { model: defaultModel } = getLyricsLlmConfig();
-  const baseRaw = getLyricsChatTranslateBaseUrlRaw();
-  const endpoint = lyricsChatCompletionsEndpoint(baseRaw || "https://api.deepseek.com");
-  const body = JSON.stringify({
-    ...bodyObj,
-    model: typeof bodyObj.model === "string" && bodyObj.model.trim() ? bodyObj.model.trim() : defaultModel,
-  });
+  const endpoint = lyricsChatCompletionsEndpoint(slot.baseUrl || DEEPSEEK_LLM_BASE);
+  const model =
+    typeof bodyObj.model === "string" && bodyObj.model.trim() ? bodyObj.model.trim() : slot.model;
+  const body = JSON.stringify({ ...bodyObj, model });
   const res = await fetch(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${slot.apiKey}`,
       "User-Agent": "RJ-IPTV-and-Online-Radio-Player/1.0",
     },
     body,
@@ -791,6 +1097,68 @@ async function postLyricsLlmChatCompletion(bodyObj, purpose = "LLM request") {
     throw new Error("LLM: empty content.");
   }
   return stripLlmMarkdownFences(content);
+}
+
+/** Try DeepSeek → Gemini → OpenAI chat completions; returns first success. */
+async function tryChatCompletionInProviderOrder(bodyObj, purpose = "LLM request", opts = {}) {
+  const providers = listLlmProvidersInOrder(opts);
+  if (!providers.length) {
+    throw new Error("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY");
+  }
+  let lastErr;
+  for (const slot of providers) {
+    try {
+      const text = await postLyricsLlmChatCompletionForSlot(slot, bodyObj, purpose);
+      return { text, slot, meta: llmMetaFromSlot(slot, purpose) };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+async function postLyricsLlmChatCompletion(bodyObj, purpose = "LLM request") {
+  const { text } = await tryChatCompletionInProviderOrder(bodyObj, purpose);
+  return text;
+}
+
+/** Text generation with provider order (chat slots + Gemini). */
+async function tryLlmTextInProviderOrder({
+  system,
+  user,
+  purpose,
+  chatBody = {},
+  geminiGenerationConfig = {},
+  skipGemini = false,
+}) {
+  const providers = listLlmProvidersInOrder({ skipGemini });
+  if (!providers.length) {
+    throw new Error("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY");
+  }
+  let lastErr;
+  for (const slot of providers) {
+    try {
+      if (slot.id === "gemini") {
+        const text = await postGeminiGenerateContent(system, user, purpose, geminiGenerationConfig);
+        return { text, slot, meta: llmMetaFromSlot(slot, purpose) };
+      }
+      const text = await postLyricsLlmChatCompletionForSlot(
+        slot,
+        {
+          ...chatBody,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+        },
+        purpose
+      );
+      return { text, slot, meta: llmMetaFromSlot(slot, purpose) };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr;
 }
 
 function parseLlmUnifiedLyricsJsonText(text, displayName) {
@@ -933,24 +1301,49 @@ function previewGeminiModel(hasGeminiKey) {
 }
 
 ipcMain.handle("iptv-lyrics-chat-translate-key-status", async () => {
-  const keyStatus = getLyricsChatTranslateKeyStatusDetails();
-  const hasKey = !!keyStatus.key;
+  const deepseek = resolveDeepSeekLlmSlot();
+  const openai = resolveOpenAiLlmSlot();
   const geminiStatus = getGeminiKeyStatusDetails();
   const hasGeminiKey = !!geminiStatus.key;
-  const hasSongMeaningKey = hasKey || hasGeminiKey;
-  const model = getLyricsChatTranslateModelRaw();
+  const hasDeepSeekKey = !!deepseek;
+  const hasOpenAiKey = !!openai;
+  const hasCompatibleKey = hasDeepSeekKey || hasOpenAiKey;
+  const primary = firstLlmProviderInOrder();
+  const primaryPreview =
+    primary?.id === "gemini"
+      ? geminiStatus.keyPreview
+      : primary
+        ? maskApiKeyForPreview(primary.apiKey)
+        : "";
+  const primarySource =
+    primary?.id === "gemini"
+      ? geminiStatus.keySource
+      : primary?.id === "deepseek"
+        ? deepseek && getSavedLyricsChatTranslateApiKey()
+          ? "app"
+          : process.env.DEEPSEEK_API_KEY
+            ? "env"
+            : ""
+        : primary?.id === "openai"
+          ? openai && getSavedLyricsChatTranslateApiKey()
+            ? "app"
+            : "env"
+          : "";
   return {
-    hasKey,
-    hasSongMeaningKey,
+    hasKey: hasCompatibleKey,
+    hasDeepSeekKey,
+    hasOpenAiKey,
+    hasSongMeaningKey: hasCompatibleKey || hasGeminiKey,
+    primaryLlmProvider: primary?.id ?? "",
     hasGeminiFromEnv: geminiStatus.keySource === "env",
     hasGeminiKey,
     geminiKeyPreview: geminiStatus.keyPreview,
     geminiKeySource: geminiStatus.keySource,
     geminiModelPreview: previewGeminiModel(hasGeminiKey),
-    keyPreview: keyStatus.keyPreview,
-    keySource: keyStatus.keySource,
-    apiBasePreview: previewLyricsChatBaseHost(),
-    modelPreview: model || "deepseek-chat (default)",
+    keyPreview: primaryPreview,
+    keySource: primarySource,
+    apiBasePreview: primary ? `${primary.host} (${primary.label})` : previewLyricsChatBaseHost(),
+    modelPreview: primary?.model || "deepseek-chat (default)",
   };
 });
 
@@ -1125,9 +1518,8 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
 
   const llmPurpose = "lyrics find + translate";
   try {
-    const rawText = await postLyricsLlmChatCompletion(
+    const { text: rawText, meta } = await tryChatCompletionInProviderOrder(
       {
-        model: undefined,
         temperature: 0.2,
         max_tokens: 8192,
         messages: [
@@ -1139,12 +1531,13 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
     );
     const parsed = parseLlmUnifiedLyricsJsonText(rawText, displayName);
     if (!parsed || parsed.ok !== true || !Array.isArray(parsed.pairs) || !parsed.pairs.length) {
-      return { ...parsed, ...lyricsLlmMetaFields(llmPurpose) };
+      return { ...parsed, ...meta };
     }
-    return { ...parsed, ...lyricsLlmMetaFields(llmPurpose) };
+    return { ...parsed, ...meta };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY")) throw e;
+    const fallbackMeta = lyricsLlmMetaFields(llmPurpose);
     return {
       ok: false,
       error: msg.includes("[model:") ? msg : formatLyricsLlmError(llmPurpose, msg),
@@ -1152,7 +1545,7 @@ ipcMain.handle("iptv-lyrics-llm-unified-fetch", async (_evt, rawPayload) => {
       detectedFranc3: "und",
       headline: "",
       lrclibTrack: "",
-      ...lyricsLlmMetaFields(llmPurpose),
+      ...fallbackMeta,
     };
   }
 });
@@ -1233,6 +1626,13 @@ async function postGeminiGenerateSongMeaning(systemPrompt, userPrompt) {
   return postGeminiGenerateContent(systemPrompt, userPrompt, "song meaning", {
     temperature: 0.35,
     maxOutputTokens: 1024,
+  });
+}
+
+async function postGeminiChannelEpg(systemPrompt, userPrompt) {
+  return postGeminiGenerateContent(systemPrompt, userPrompt, "TV EPG", {
+    temperature: 0.25,
+    maxOutputTokens: 2048,
   });
 }
 
@@ -1351,98 +1751,32 @@ ipcMain.handle("iptv-lyrics-song-meaning-fetch", async (_evt, rawPayload) => {
     .filter(Boolean)
     .join("\n");
 
-  const geminiPurpose = "song meaning (Google Gemini)";
-  const geminiKey = getGeminiApiKey();
-  if (geminiKey && !forceOpenAiCompatible) {
-    try {
-      let modelHost = "";
-      try {
-        modelHost = getGeminiModelRaw();
-      } catch (eGemModel) {
-        return {
-          ok: false,
-          meaning: "",
-          error: eGemModel instanceof Error ? eGemModel.message.slice(0, 400) : String(eGemModel),
-          llmPurpose: geminiPurpose,
-          llmModel: "(invalid model)",
-          llmHost: "generativelanguage.googleapis.com",
-        };
-      }
-
-      const meaning = await postGeminiGenerateSongMeaning(system, user);
-      const trimmed = String(meaning ?? "").trim();
-      if (!trimmed) {
-        return {
-          ok: false,
-          meaning: "",
-          error: `${geminiPurpose}: empty response [model: ${modelHost} @ generativelanguage.googleapis.com]`,
-          llmPurpose: geminiPurpose,
-          llmModel: modelHost,
-          llmHost: "generativelanguage.googleapis.com",
-        };
-      }
-      return {
-        ok: true,
-        meaning: trimmed.slice(0, 6000),
-        llmPurpose: geminiPurpose,
-        llmModel: modelHost,
-        llmHost: "generativelanguage.googleapis.com",
-      };
-    } catch (eGem) {
-      const msgGem = eGem instanceof Error ? eGem.message : String(eGem);
-      const hasOpenAiCompatible = !!getLyricsChatTranslateApiKey();
-      if (!hasOpenAiCompatible) {
-        return {
-          ok: false,
-          meaning: "",
-          error: msgGem.slice(0, 440),
-          llmPurpose: geminiPurpose,
-          llmModel: (() => {
-            try {
-              return getGeminiModelRaw();
-            } catch {
-              return "?";
-            }
-          })(),
-          llmHost: "generativelanguage.googleapis.com",
-        };
-      }
-      /* Fallback: Gemini failed but OpenAI-compatible key exists */
-    }
-  }
-
   const llmPurpose = "song meaning";
   try {
-    const meaning = await postLyricsLlmChatCompletion(
-      {
-        temperature: 0.35,
-        max_tokens: 900,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      },
-      llmPurpose
-    );
-    const trimmed = String(meaning ?? "").trim();
+    const { text, meta } = await tryLlmTextInProviderOrder({
+      system,
+      user,
+      purpose: llmPurpose,
+      chatBody: { temperature: 0.35, max_tokens: 900 },
+      skipGemini: forceOpenAiCompatible,
+    });
+    const trimmed = String(text ?? "").trim();
     if (!trimmed) {
       return {
         ok: false,
         meaning: "",
         error: formatLyricsLlmError(llmPurpose, "empty response"),
-        ...lyricsLlmMetaFields(llmPurpose),
+        ...meta,
       };
     }
-    return { ok: true, meaning: trimmed.slice(0, 6000), ...lyricsLlmMetaFields(llmPurpose) };
+    return { ok: true, meaning: trimmed.slice(0, 6000), ...meta };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (msg.includes("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY")) {
       return {
         ok: false,
         meaning: "",
-        error: geminiKey
-          ? "Gemini song meaning failed; add DeepSeek/OpenAI-compatible key under Audio → Lyrics translation, or fix Gemini API/key."
-          : "Add GEMINI_API_KEY (Google AI Studio) for song meaning here, or an LLM key under Audio → Lyrics translation.",
+        error: "Add an LLM API key in Settings (DeepSeek, Gemini, or OpenAI).",
         ...lyricsLlmMetaFields(llmPurpose),
       };
     }
@@ -1478,6 +1812,70 @@ const LYRICS_TARGET_LANG_NAMES = {
   th: "Thai",
 };
 
+ipcMain.handle("iptv-channel-epg-llm", async (_evt, rawPayload) => {
+  const p = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
+  const name = typeof p.name === "string" ? p.name.trim().slice(0, 200) : "";
+  const tvgId = typeof p.tvgId === "string" ? p.tvgId.trim().slice(0, 120) : "";
+  const country = typeof p.country === "string" ? p.country.trim().slice(0, 80) : "";
+  const group = typeof p.group === "string" ? p.group.trim().slice(0, 120) : "";
+  if (!name) {
+    return { ok: false, error: "Missing channel name.", programmes: [], rawJson: "" };
+  }
+  const todayLabel = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  const system = [
+    "You are a TV electronic program guide assistant.",
+    "Return ONLY valid JSON (no markdown, no code fences):",
+    '{"programmes":[{"title":"string","start":"HH:MM","stop":"HH:MM","description":"optional"}],"disclaimer":"string"}',
+    `Estimate today's TV schedule (${todayLabel}) for the channel in local time for its region.`,
+    "Include 6–12 entries covering morning through late night if plausible.",
+    'If you cannot estimate, return {"programmes":[],"disclaimer":"brief reason"}.',
+    "Times must be 24-hour HH:MM. Mark approximate data in disclaimer.",
+  ].join(" ");
+  const user = [
+    `Channel name: ${name}`,
+    tvgId ? `M3U tvg-id: ${tvgId}` : "",
+    country ? `Country: ${country}` : "",
+    group ? `Group: ${group}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const { text: rawJson, meta } = await tryLlmTextInProviderOrder({
+      system,
+      user,
+      purpose: "TV EPG lookup",
+      chatBody: { temperature: 0.25, max_tokens: 1800 },
+      geminiGenerationConfig: { temperature: 0.25, maxOutputTokens: 2048 },
+    });
+    const trimmed = String(rawJson ?? "").trim();
+    if (!trimmed) {
+      return { ok: false, error: "LLM returned empty EPG data.", rawJson: "", ...meta };
+    }
+    return {
+      ok: true,
+      rawJson: trimmed.slice(0, 12_000),
+      disclaimer: "",
+      llmPurpose: meta.llmPurpose,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("IPTV_LYRICS_CHAT_TRANSLATE_NO_KEY")) {
+      return {
+        ok: false,
+        error: "Add an LLM API key in Settings (DeepSeek, Gemini, or OpenAI).",
+        rawJson: "",
+      };
+    }
+    return { ok: false, error: msg.slice(0, 440), rawJson: "" };
+  }
+});
+
 ipcMain.handle("iptv-lyrics-chat-translate", async (_evt, rawPayload) => {
   const p = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
   const q = typeof p.q === "string" ? p.q : "";
@@ -1489,8 +1887,6 @@ ipcMain.handle("iptv-lyrics-chat-translate", async (_evt, rawPayload) => {
   if (!/^[a-z]{2}(-[a-z0-9]{1,8})?$/.test(source)) {
     throw new Error("Invalid translation source language.");
   }
-  const modelRaw = getLyricsChatTranslateModelRaw();
-  const model = modelRaw || "deepseek-chat";
   const targetName = LYRICS_TARGET_LANG_NAMES[target] ?? target;
   const system = [
     `You translate song lyrics into ${targetName} (ISO 639-1: ${target}).`,
@@ -1499,9 +1895,8 @@ ipcMain.handle("iptv-lyrics-chat-translate", async (_evt, rawPayload) => {
   ].join(" ");
   const user = `Source language (ISO 639-1): ${source}\nTarget language (ISO 639-1): ${target}\n\nLyrics:\n${q}`;
   const maxTokens = Math.min(8192, Math.max(512, Math.ceil(q.length * 0.45) + 400));
-  const translatedText = await postLyricsLlmChatCompletion(
+  const { text: translatedText, meta } = await tryChatCompletionInProviderOrder(
     {
-      model,
       temperature: 0.15,
       max_tokens: maxTokens,
       messages: [
@@ -1511,7 +1906,6 @@ ipcMain.handle("iptv-lyrics-chat-translate", async (_evt, rawPayload) => {
     },
     "lyrics line translation"
   );
-  const meta = lyricsLlmMetaFields("lyrics line translation");
   return { translatedText, ...meta };
 });
 
@@ -1818,6 +2212,29 @@ function mimeForLocalVideoExt(ext) {
   if (e === ".asf" || e === ".wm") return "video/x-ms-asf";
   return "";
 }
+
+ipcMain.handle("iptv-pick-m3u-playlist-file", async () => {
+  const { dialog } = require("electron");
+  const r = await dialog.showOpenDialog({
+    properties: ["openFile"],
+    filters: [
+      { name: "IPTV playlists", extensions: ["m3u", "m3u8", "txt", "ts"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (r.canceled || !r.filePaths?.length) return { ok: false, cancelled: true };
+  const filePath = r.filePaths[0];
+  try {
+    let text = await fs.promises.readFile(filePath, "utf8");
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    if (!text.trim()) {
+      return { ok: false, error: "Playlist file is empty." };
+    }
+    return { ok: true, text, fileName: path.basename(filePath) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Could not read playlist file." };
+  }
+});
 
 ipcMain.handle("iptv-pick-local-video-files", async () => {
   const { pathToFileURL } = require("url");
@@ -2855,7 +3272,7 @@ ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
   const upstream = Readable.fromWeb(res.body);
   attachRecordingFanout(id, upstream, recordOutput, filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
   const playbackUrl =
-    rendererOrigin != null && recordMode !== "mpegts"
+    rendererOrigin != null
       ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}&token=${encodeURIComponent(streamProxySessionToken ?? "")}`
       : null;
   return { ok: true, id, filePath, playbackUrl };
@@ -3301,6 +3718,14 @@ ipcMain.handle("iptv-neural-tts-synthesize", async (_evt, rawPayload) => {
 
 /** Desktop: local Whisper model status for live radio captions. */
 ipcMain.handle("iptv-whisper-status", async () => whisperStt.getWhisperStatus());
+
+/** Desktop: select Xenova Whisper variant (tiny | base | small). */
+ipcMain.handle("iptv-whisper-set-model", async (_evt, modelKey) => {
+  if (typeof modelKey !== "string" || !modelKey.trim()) {
+    return { ok: false, error: "Invalid model." };
+  }
+  return whisperStt.setWhisperModel(modelKey.trim());
+});
 
 /** Desktop: load Whisper ONNX model (downloads on first run). */
 ipcMain.handle("iptv-whisper-warmup", async () => whisperStt.warmupWhisper());

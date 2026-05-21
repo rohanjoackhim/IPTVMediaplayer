@@ -10,7 +10,10 @@ import {
   type PointerEvent,
 } from "react";
 import "./App.css";
+import { AppSettingsModal } from "./components/AppSettingsModal";
 import { ChannelBrowser } from "./components/ChannelBrowser";
+import { hasAnyLlmApiKey } from "./utils/lyricsLlmEndpointLabel";
+import { OPEN_LLM_SETTINGS_EVENT, type OpenLlmSettingsDetail } from "./utils/llmApiKeyGuide";
 import { favoriteKeyForChannel, loadFavoriteUrls, saveFavoriteUrls } from "./utils/favoritesStorage";
 import { fetchM3uPlaylist } from "./utils/fetchM3uPlaylist";
 import { parseM3U } from "./utils/m3uParser";
@@ -154,13 +157,56 @@ export default function App() {
   );
   const [sidebarMode, setSidebarMode] = useState(() => loadUiSession().sidebarMode);
   const [recordingPanes, setRecordingPanes] = useState<Record<"L" | "R", boolean>>({ L: false, R: false });
+  const [recordingPaneMeta, setRecordingPaneMeta] = useState<
+    Record<"L" | "R", { channelId: string; channelName: string } | null>
+  >({ L: null, R: null });
   /** Electron: two localhost origins (different ports) so left/right streams do not share one connection pool. */
   const [streamProxyOrigins, setStreamProxyOrigins] = useState<[string, string] | null>(null);
   const [compactView, setCompactView] = useState(() => loadUiSession().compactView);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsWelcome, setSettingsWelcome] = useState(false);
+  const [settingsReason, setSettingsReason] = useState<string | null>(null);
+  const [llmSetupPromptDismissed, setLlmSetupPromptDismissed] = useState(
+    () => loadUiSession().llmSetupPromptDismissed
+  );
   const [sidebarWidth, setSidebarWidth] = useState(() => fitSidebarToViewport(loadUiSession().sidebarWidthPx));
   const sidebarDragRef = useRef<{ startX: number; startW: number } | null>(null);
   const sidebarWidthLive = useRef(sidebarWidth);
   sidebarWidthLive.current = sidebarWidth;
+
+  useEffect(() => {
+    const onOpenLlmSettings = (ev: Event) => {
+      const detail = (ev as CustomEvent<OpenLlmSettingsDetail>).detail;
+      setSettingsWelcome(detail?.welcome !== false);
+      setSettingsReason(detail?.reason?.trim() || null);
+      setSettingsOpen(true);
+    };
+    window.addEventListener(OPEN_LLM_SETTINGS_EVENT, onOpenLlmSettings);
+    return () => window.removeEventListener(OPEN_LLM_SETTINGS_EVENT, onOpenLlmSettings);
+  }, []);
+
+  useEffect(() => {
+    if (!window.iptv?.getLyricsChatTranslateKeyStatus || llmSetupPromptDismissed) return;
+    void hasAnyLlmApiKey().then((hasKey) => {
+      if (!hasKey) {
+        setSettingsWelcome(true);
+        setSettingsOpen(true);
+      }
+    });
+  }, [llmSetupPromptDismissed]);
+
+  const dismissLlmSetupPrompt = useCallback(() => {
+    setLlmSetupPromptDismissed(true);
+    setSettingsWelcome(false);
+    saveUiSession({ llmSetupPromptDismissed: true });
+    setSettingsOpen(false);
+  }, []);
+
+  const openSettings = useCallback(() => {
+    setSettingsWelcome(false);
+    setSettingsReason(null);
+    setSettingsOpen(true);
+  }, []);
 
   useEffect(() => {
     const fn = window.iptv?.getStreamProxyOrigins;
@@ -378,9 +424,9 @@ export default function App() {
     }
   }, [assignTarget, rememberLastPlayed, splitView]);
 
-  const onLoadM3U = useCallback((text: string, replace: boolean) => {
+  const onLoadM3U = useCallback((text: string, replace: boolean): boolean => {
     const { channels: next, errors } = parseM3U(text);
-    if (errors.length && next.length === 0) return;
+    if (errors.length && next.length === 0) return false;
     setChannels((prev) => {
       if (replace) {
         revokeLocalVideoBlobUrls(prev);
@@ -409,6 +455,7 @@ export default function App() {
       }
       return cur;
     });
+    return true;
   }, []);
 
   const onClearList = useCallback(() => {
@@ -504,11 +551,52 @@ export default function App() {
     setLastAudioChannel((cur) => (isRemovedTrack(cur) ? null : cur));
   }, []);
 
-  const setPaneRecording = useCallback((pane: "L" | "R", recording: boolean) => {
-    setRecordingPanes((cur) => (cur[pane] === recording ? cur : { ...cur, [pane]: recording }));
-  }, []);
+  const setPaneRecording = useCallback(
+    (status: {
+      pane: "L" | "R";
+      recording: boolean;
+      channelId?: string | null;
+      channelName?: string | null;
+    }) => {
+      const { pane, recording } = status;
+      setRecordingPanes((cur) => (cur[pane] === recording ? cur : { ...cur, [pane]: recording }));
+      setRecordingPaneMeta((cur) => {
+        const nextMeta =
+          recording && status.channelId
+            ? {
+                channelId: status.channelId,
+                channelName: (status.channelName ?? "").trim() || "Channel",
+              }
+            : null;
+        const prev = cur[pane];
+        if (
+          prev?.channelId === nextMeta?.channelId &&
+          prev?.channelName === nextMeta?.channelName &&
+          (prev == null) === (nextMeta == null)
+        ) {
+          return cur;
+        }
+        return { ...cur, [pane]: nextMeta };
+      });
+    },
+    []
+  );
 
   const recordingActive = recordingPanes.L || recordingPanes.R;
+  const recordingChannelIds = useMemo(() => {
+    const ids: string[] = [];
+    if (recordingPaneMeta.L?.channelId) ids.push(recordingPaneMeta.L.channelId);
+    if (recordingPaneMeta.R?.channelId && recordingPaneMeta.R.channelId !== recordingPaneMeta.L?.channelId) {
+      ids.push(recordingPaneMeta.R.channelId);
+    }
+    return ids;
+  }, [recordingPaneMeta]);
+  const recordingStatusLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (recordingPaneMeta.L) parts.push(recordingPaneMeta.L.channelName);
+    if (recordingPaneMeta.R) parts.push(recordingPaneMeta.R.channelName);
+    return parts.length ? parts.join(" · ") : null;
+  }, [recordingPaneMeta]);
 
   const onSidebarResizerPointerDown = useCallback((e: PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -577,6 +665,8 @@ export default function App() {
               onAudioLibraryShuffleChange={setAudioLibraryShuffle}
               onAudioLibraryContinuousChange={setAudioLibraryContinuous}
               recordingActive={recordingActive}
+              recordingChannelIds={recordingChannelIds}
+              recordingStatusLabel={recordingStatusLabel}
               sidebarMode={sidebarMode}
               onSidebarModeChange={handleSidebarModeChange}
               onIndexedLibraryChannelsChange={handleIndexedLibraryChannelsChange}
@@ -584,6 +674,7 @@ export default function App() {
               onLibraryTrackRemoved={handleLibraryTrackRemoved}
               compactView={compactView}
               onCompactViewChange={setCompactView}
+              onOpenSettings={openSettings}
             />
           </aside>
           <div
@@ -628,7 +719,7 @@ export default function App() {
                   layoutMode="compactReader"
                   playbackPane="L"
                   onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
-                  onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
+                  onRecordingStatusChange={setPaneRecording}
                 />
               </section>
             </>
@@ -644,7 +735,7 @@ export default function App() {
                 playbackPane="L"
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
-                onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
+                onRecordingStatusChange={setPaneRecording}
               />
               <VideoPlayer
                 channel={channelRight}
@@ -656,7 +747,7 @@ export default function App() {
                 playbackPane="R"
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
-                onRecordingStatusChange={(recording) => setPaneRecording("R", recording)}
+                onRecordingStatusChange={setPaneRecording}
               />
             </div>
           ) : (
@@ -667,22 +758,46 @@ export default function App() {
               layoutMode={soloLayoutMode}
               playbackPane="L"
               onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
-              onRecordingStatusChange={(recording) => setPaneRecording("L", recording)}
+              onRecordingStatusChange={setPaneRecording}
             />
           )}
         </Suspense>
       </main>
       {compactView ? (
-        <button
-          type="button"
-          className="compact-library-fab"
-          onClick={() => setCompactView(false)}
-          title="Show channel library"
-          aria-label="Show channel library"
-        >
-          Library
-        </button>
+        <div className="compact-fab-row">
+          <button
+            type="button"
+            className="compact-library-fab"
+            onClick={() => setCompactView(false)}
+            title="Show channel library"
+            aria-label="Show channel library"
+          >
+            Library
+          </button>
+          {window.iptv?.getLyricsChatTranslateKeyStatus ? (
+            <button
+              type="button"
+              className="compact-library-fab compact-settings-fab"
+              onClick={openSettings}
+              title="Settings — LLM API keys"
+              aria-label="Settings"
+            >
+              Settings
+            </button>
+          ) : null}
+        </div>
       ) : null}
+      <AppSettingsModal
+        open={settingsOpen}
+        onClose={() => {
+          setSettingsOpen(false);
+          setSettingsWelcome(false);
+          setSettingsReason(null);
+        }}
+        welcome={settingsWelcome}
+        reason={settingsReason}
+        onDismissWelcome={dismissLlmSetupPrompt}
+      />
     </div>
   );
 }

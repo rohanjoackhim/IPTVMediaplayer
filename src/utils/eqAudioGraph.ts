@@ -93,6 +93,12 @@ export function isElementAudioRouted(el: HTMLMediaElement): boolean {
   return isEqEnabled(el) || legacyElementSources.has(el);
 }
 
+/** True when EQ plays audio via captureStream (element is muted). */
+export function eqUsesCaptureStream(el: HTMLMediaElement): boolean {
+  const s = sessions.get(el);
+  return !!s?.usesCapture;
+}
+
 /** Live preset tweak while EQ is already running — no graph rebuild. */
 export function updateElementEqLive(
   el: HTMLMediaElement,
@@ -138,7 +144,7 @@ function clampMasterGain(level: number): number {
 
 /** Routes that should use createMediaElementSource (no mute / captureStream). */
 function prefersMediaElementSource(scope: EqPageScope | null | undefined): boolean {
-  return scope === "library" || scope === "radio";
+  return scope === "library" || scope === "radio" || scope === "podcast";
 }
 
 function waitForMediaReady(el: HTMLMediaElement): Promise<void> {
@@ -155,11 +161,13 @@ function waitForMediaReady(el: HTMLMediaElement): Promise<void> {
 }
 
 function captureStreamFromElement(el: HTMLMediaElement): MediaStream {
-  const cap = (el as HTMLMediaElement & { captureStream?: () => MediaStream }).captureStream;
-  if (typeof cap !== "function") {
-    throw new Error("Equalizer is not supported in this player.");
-  }
-  return cap.call(el);
+  const ext = el as HTMLMediaElement & {
+    captureStream?: () => MediaStream;
+    mozCaptureStream?: () => MediaStream;
+  };
+  if (typeof ext.captureStream === "function") return ext.captureStream.call(el);
+  if (typeof ext.mozCaptureStream === "function") return ext.mozCaptureStream.call(el);
+  throw new Error("captureStream is not supported for this media element.");
 }
 
 function captureStreamIsLive(stream: MediaStream): boolean {
@@ -213,13 +221,36 @@ function getOrCreateCaptureStream(el: HTMLMediaElement): MediaStream {
   return stream;
 }
 
-function tryRegisterLegacyMes(el: HTMLMediaElement, ctx: AudioContext): MediaElementAudioSourceNode | null {
+function webAudioMediaError(e: unknown): Error {
+  const msg = e instanceof Error ? e.message : String(e ?? "");
+  if (/cross-origin|cross origin|captureStream|Cannot capture/i.test(msg)) {
+    return new Error(
+      "Web Audio cannot access this stream (cross-origin). In the desktop app, reload the channel so audio uses the local proxy."
+    );
+  }
+  return e instanceof Error ? e : new Error(msg);
+}
+
+function createSharedMediaElementSource(el: HTMLMediaElement, ctx: AudioContext): MediaElementAudioSourceNode {
   const existing = legacyElementSources.get(el);
-  if (existing) return existing;
+  if (existing) {
+    if (existing.context !== ctx) {
+      throw new Error("This player is already using a different audio graph for this stream.");
+    }
+    return existing;
+  }
   try {
     const mes = ctx.createMediaElementSource(el);
     legacyElementSources.set(el, mes);
     return mes;
+  } catch (e) {
+    throw webAudioMediaError(e);
+  }
+}
+
+function tryRegisterLegacyMes(el: HTMLMediaElement, ctx: AudioContext): MediaElementAudioSourceNode | null {
+  try {
+    return createSharedMediaElementSource(el, ctx);
   } catch {
     return null;
   }
@@ -294,6 +325,32 @@ function wireEqGraph(
   master.gain.value = clampMasterGain(masterGain);
 
   return { filters, master };
+}
+
+async function enableMediaElementEq(
+  el: HTMLMediaElement,
+  ctx: AudioContext,
+  opts: { gainsDb: number[]; masterGain: number }
+): Promise<void> {
+  await waitForMediaReady(el);
+  await waitForPlaying(el);
+  clearLegacyPassthrough(el);
+  const mes = createSharedMediaElementSource(el, ctx);
+  disconnectNode(mes);
+  clearLegacyPassthrough(el);
+  const { filters, master } = wireEqGraph(ctx, mes, opts.gainsDb, opts.masterGain);
+  sessions.set(el, {
+    ctx,
+    source: mes,
+    usesCapture: false,
+    filters,
+    master,
+    element: el,
+    prevMuted: el.muted,
+  });
+  el.muted = false;
+  await resumeEqContextForPlayback();
+  kickEqContext();
 }
 
 /** EQ via captureStream — element is muted; audio comes from the captured MediaStream. */
@@ -395,14 +452,10 @@ export async function applyElementEqPreset(
     }
   }
 
-  /** Library + radio: element source — uninterrupted playback and live preset tweaks. */
+  /** Library + radio + podcast: element source (never captureStream — breaks on cross-origin feeds). */
   if (prefersMediaElementSource(scope)) {
-    const mes = tryRegisterLegacyMes(el, ctx);
-    if (mes) {
-      enableLegacyMesEq(el, ctx, opts);
-      await resumeEqContextForPlayback();
-      return;
-    }
+    await enableMediaElementEq(el, ctx, opts);
+    return;
   }
 
   if (legacyElementSources.has(el)) {
@@ -421,7 +474,7 @@ export async function applyElementEqPreset(
       await resumeEqContextForPlayback();
       return;
     }
-    throw captureErr;
+    throw webAudioMediaError(captureErr);
   }
 }
 
@@ -507,6 +560,127 @@ export function releaseEqForMediaElement(
   if (!el) return;
   handoffEqScope(el, null, volume);
   invalidateCaptureStream(el);
+}
+
+/** Wait until the media element is ready and playing (for live caption capture). */
+export async function waitForCaptureReady(el: HTMLMediaElement): Promise<void> {
+  await waitForMediaReady(el);
+  await waitForPlaying(el);
+}
+
+/** Best-effort captureStream (cached on element when EQ already used it). */
+export function tryAcquireCaptureStream(el: HTMLMediaElement): MediaStream | null {
+  try {
+    return getOrCreateCaptureStream(el);
+  } catch {
+    return null;
+  }
+}
+
+export function isMediaElementSourceConnected(el: HTMLMediaElement): boolean {
+  return legacyElementSources.has(el);
+}
+
+export function invalidateMediaCaptureStream(el: HTMLMediaElement): void {
+  invalidateCaptureStream(el);
+}
+
+/** True when speakers are fed via Web Audio (EQ or caption passthrough), not the element alone. */
+export function elementPlaybackViaWebAudio(el: HTMLMediaElement): boolean {
+  return isEqFilterGraphActive(el) || legacyPassthroughMasters.has(el);
+}
+
+export type LiveCaptionAudioTap = {
+  ctx: AudioContext;
+  mes: MediaElementAudioSourceNode;
+  processor: ScriptProcessorNode;
+  tapEnd: GainNode;
+  playGain: GainNode | null;
+  addedPlayPath: boolean;
+};
+
+const liveCaptionProcessors = new WeakMap<HTMLMediaElement, ScriptProcessorNode>();
+
+function safeConnectMesTap(mes: MediaElementAudioSourceNode, processor: ScriptProcessorNode): void {
+  try {
+    mes.connect(processor);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/already connected|InvalidState/i.test(msg)) throw e;
+  }
+}
+
+/** Tap the shared media element graph for live captions (same AudioContext as EQ). */
+export async function attachLiveCaptionAudioTap(
+  el: HTMLMediaElement,
+  processor: ScriptProcessorNode,
+  volumeLevel: number
+): Promise<LiveCaptionAudioTap> {
+  await waitForCaptureReady(el);
+  const ctx = (await resumeEqContextForPlayback()) ?? getSharedEqContext();
+  if (!ctx) throw new Error("Web Audio is not available.");
+
+  const mes = createSharedMediaElementSource(el, ctx);
+  const tapEnd = ctx.createGain();
+  tapEnd.gain.value = 0;
+  const prevProcessor = liveCaptionProcessors.get(el);
+  if (prevProcessor && prevProcessor !== processor) {
+    try {
+      mes.disconnect(prevProcessor);
+    } catch {
+      /* noop */
+    }
+  }
+  safeConnectMesTap(mes, processor);
+  processor.connect(tapEnd);
+  tapEnd.connect(ctx.destination);
+  liveCaptionProcessors.set(el, processor);
+
+  let playGain: GainNode | null = null;
+  let addedPlayPath = false;
+  if (!elementPlaybackViaWebAudio(el)) {
+    playGain = ctx.createGain();
+    playGain.gain.value = clampMasterGain(volumeLevel);
+    mes.connect(playGain);
+    playGain.connect(ctx.destination);
+    addedPlayPath = true;
+    el.muted = false;
+  }
+
+  await resumeEqContextForPlayback();
+  kickEqContext();
+  return { ctx, mes, processor, tapEnd, playGain, addedPlayPath };
+}
+
+export function detachLiveCaptionAudioTap(tap: LiveCaptionAudioTap, el: HTMLMediaElement, volume: number): void {
+  try {
+    tap.playGain?.disconnect();
+    try {
+      tap.mes.disconnect(tap.processor);
+    } catch {
+      /* noop */
+    }
+    tap.processor.disconnect();
+    tap.tapEnd.disconnect();
+    if (liveCaptionProcessors.get(el) === tap.processor) {
+      liveCaptionProcessors.delete(el);
+    }
+    if (tap.addedPlayPath) {
+      try {
+        tap.mes.disconnect(tap.playGain!);
+      } catch {
+        /* noop */
+      }
+      if (!isEqFilterGraphActive(el) && legacyElementSources.has(el)) {
+        routeLegacyPassthrough(el, tap.ctx, clampMasterGain(volume));
+      } else if (!isEqFilterGraphActive(el)) {
+        el.muted = false;
+        el.volume = clampMasterGain(volume);
+      }
+    }
+  } catch {
+    /* noop */
+  }
 }
 
 /** @deprecated No new MES instances are created; kept so old sessions can still call this. */

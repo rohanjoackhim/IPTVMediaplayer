@@ -1,8 +1,8 @@
 .lyrics-chat-translate-settings {
   flex-shrink: 0;
-  border-top: 1px solid var(--border);
-  padding: 10px 18px 14px;
-  background: rgba(246, 246, 244, 0.72);
+  border-top: none;
+  padding: 4px 4px 8px;
+  background: transparent;
 }
 
 .lyrics-chat-translate-settings--keys-saved {
@@ -38,11 +38,41 @@
   box-shadow: 0 0 12px rgba(34, 197, 94, 0.28);
 }
 
+.lyrics-chat-translate-lead {
+  margin: 0 0 10px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 .lyrics-chat-translate-hint {
   margin: 0 0 10px;
   font-size: 0.6875rem;
   line-height: 1.5;
   color: var(--text-muted);
+}
+
+.lyrics-chat-translate-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lyrics-chat-translate-preset {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  font-size: 0.6875rem;
+  font-weight: 800;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.lyrics-chat-translate-preset--active {
+  border-color: #111;
+  background: #eee;
 }
 
 .lyrics-chat-translate-code {
@@ -96,9 +126,9 @@
 }
 
 /* AD editorial theme overrides */
-.lyrics-chat-translate-settings {
+.app-settings-body .lyrics-chat-translate-settings {
   background: #fff;
-  border-top: 1px solid #111;
+  border-top: none;
 }
 
 .lyrics-chat-translate-provider,

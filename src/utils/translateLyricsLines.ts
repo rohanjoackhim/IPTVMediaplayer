@@ -578,3 +578,66 @@ export async function translateLineBatchesToLanguage(
   const memTarget = myMemoryCodeForIso639_1(tl);
   return translateLineBatchesCore(lines, tl, libreSrc, memSrc, memTarget, fetchJson, signal);
 }
+
+/**
+ * Live radio captions: Google GTX only (skips LLM / Libre / MyMemory) for low latency.
+ */
+export async function translateLineBatchesToLanguageFast(
+  lines: string[],
+  targetLang: string,
+  detectedFranc3: string,
+  signal?: AbortSignal
+): Promise<TranslateLyricsLinesResult> {
+  const tl = targetLang.trim().toLowerCase();
+  if (!/^[a-z]{2}$/.test(tl)) {
+    throw new Error("Invalid target language.");
+  }
+  const { libreSrc } = resolveLyricsTranslateSources(detectedFranc3);
+  const out: string[] = [];
+  let batch: string[] = [];
+  let batchLen = 0;
+
+  const flushBatch = async () => {
+    if (!batch.length) return;
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const q = batch.join("\n");
+    let translated: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await sleep(90);
+      try {
+        translated = await translateGoogleGtxFull(q, libreSrc, tl);
+        if (translated != null) break;
+      } catch {
+        /* retry GTX */
+      }
+    }
+    const aligned =
+      translated != null ? alignTranslatedLines(batch, translated) : batch.map((l) => l.trim());
+    for (let k = 0; k < batch.length; k++) out.push(aligned[k] ?? batch[k] ?? "");
+    batch = [];
+    batchLen = 0;
+    await sleep(35);
+  };
+
+  for (const line of lines) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const raw = line ?? "";
+    if (!raw.trim()) {
+      await flushBatch();
+      out.push("");
+      continue;
+    }
+    const add = raw.length + (batch.length ? 1 : 0);
+    if (batch.length && batchLen + add > GOOGLE_GTX_MAX_CHARS) await flushBatch();
+    batch.push(raw);
+    batchLen += add;
+    if (batch.length >= 6) await flushBatch();
+  }
+  await flushBatch();
+
+  return {
+    lines: out,
+    providerHint: "Live captions · Google (fast)",
+    usedLlm: false,
+  };
+}

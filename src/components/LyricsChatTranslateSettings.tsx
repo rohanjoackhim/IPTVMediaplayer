@@ -1,14 +1,37 @@
 import { useCallback, useEffect, useState } from "react";
 import "./LyricsChatTranslateSettings.css";
 
-export function LyricsChatTranslateSettings() {
+const PRESETS = {
+  deepseek: {
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    model: "deepseek-chat",
+  },
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+  },
+} as const;
+
+type ProviderPreset = keyof typeof PRESETS;
+
+/** LLM API keys for lyrics, translation, song meaning, and TV EPG (desktop). */
+export function LlmApiSettings() {
   const statusFn = window.iptv?.getLyricsChatTranslateKeyStatus;
   const saveFn = window.iptv?.setLyricsChatTranslateCredentials;
   if (typeof statusFn !== "function" || typeof saveFn !== "function") {
-    return null;
+    return (
+      <p className="lyrics-chat-translate-hint">
+        LLM API keys are available in the <strong>desktop app</strong> (Electron). In the browser build, lyrics and EPG
+        use free fallbacks only.
+      </p>
+    );
   }
 
   const [hasKey, setHasKey] = useState(false);
+  const [hasDeepSeekKey, setHasDeepSeekKey] = useState(false);
+  const [hasOpenAiKey, setHasOpenAiKey] = useState(false);
   const [keyPreview, setKeyPreview] = useState("");
   const [keySource, setKeySource] = useState("");
   const [hasGeminiKey, setHasGeminiKey] = useState(false);
@@ -22,6 +45,7 @@ export function LyricsChatTranslateSettings() {
   const [modelInput, setModelInput] = useState("");
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
   const [geminiModelInput, setGeminiModelInput] = useState("");
+  const [activePreset, setActivePreset] = useState<ProviderPreset>("deepseek");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
@@ -30,6 +54,9 @@ export function LyricsChatTranslateSettings() {
       if (r && typeof r === "object") {
         const status = r as {
           hasKey: boolean;
+          hasDeepSeekKey?: boolean;
+          hasOpenAiKey?: boolean;
+          primaryLlmProvider?: string;
           keyPreview?: string;
           keySource?: string;
           hasGeminiKey?: boolean;
@@ -40,6 +67,8 @@ export function LyricsChatTranslateSettings() {
           modelPreview?: string;
         };
         setHasKey(!!status.hasKey);
+        setHasDeepSeekKey(!!status.hasDeepSeekKey);
+        setHasOpenAiKey(!!status.hasOpenAiKey);
         setKeyPreview(String(status.keyPreview ?? ""));
         setKeySource(String(status.keySource ?? ""));
         setHasGeminiKey(!!status.hasGeminiKey);
@@ -48,6 +77,14 @@ export function LyricsChatTranslateSettings() {
         setGeminiModelPreview(String(status.geminiModelPreview ?? ""));
         setApiBasePreview(String(status.apiBasePreview ?? ""));
         setModelPreview(String(status.modelPreview ?? ""));
+        const primary = String(status.primaryLlmProvider ?? "").toLowerCase();
+        if (primary === "openai") setActivePreset("openai");
+        else if (primary === "deepseek") setActivePreset("deepseek");
+        else {
+          const host = String(status.apiBasePreview ?? "").toLowerCase();
+          if (host.includes("openai.com")) setActivePreset("openai");
+          else if (host.includes("deepseek")) setActivePreset("deepseek");
+        }
       }
     });
   }, [statusFn]);
@@ -55,40 +92,6 @@ export function LyricsChatTranslateSettings() {
   useEffect(() => {
     refresh();
   }, [refresh]);
-
-  const onSave = async () => {
-    const key = keyInput.trim();
-    if (!key) return;
-    setBusy(true);
-    setMsg(null);
-    try {
-      const r = (await saveFn({
-        key,
-        baseUrl: baseUrlInput.trim(),
-        model: modelInput.trim(),
-      })) as {
-        ok?: boolean;
-        hasKey?: boolean;
-        keyPreview?: string;
-        keySource?: string;
-        hasGeminiKey?: boolean;
-        geminiKeyPreview?: string;
-        geminiKeySource?: string;
-        geminiModelPreview?: string;
-        apiBasePreview?: string;
-        modelPreview?: string;
-      };
-      applyStatus(r);
-      setKeyInput("");
-      setMsg(
-        "Saved. Lyrics try this chat API first when a key is present, then public fallbacks (Google GTX, LibreTranslate, MyMemory). Defaults: https://api.deepseek.com and model deepseek-chat."
-      );
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const applyStatus = (r: {
     hasKey?: boolean;
@@ -112,6 +115,48 @@ export function LyricsChatTranslateSettings() {
     setModelPreview(String(r?.modelPreview ?? ""));
   };
 
+  const applyPreset = (preset: ProviderPreset) => {
+    setActivePreset(preset);
+    const p = PRESETS[preset];
+    setBaseUrlInput(p.baseUrl);
+    setModelInput(p.model);
+  };
+
+  const onSaveCompatible = async () => {
+    const key = keyInput.trim();
+    if (!key) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = (await saveFn({
+        key,
+        baseUrl: baseUrlInput.trim() || PRESETS[activePreset].baseUrl,
+        model: modelInput.trim() || PRESETS[activePreset].model,
+      })) as {
+        ok?: boolean;
+        hasKey?: boolean;
+        keyPreview?: string;
+        keySource?: string;
+        hasGeminiKey?: boolean;
+        geminiKeyPreview?: string;
+        geminiKeySource?: string;
+        geminiModelPreview?: string;
+        apiBasePreview?: string;
+        modelPreview?: string;
+      };
+      applyStatus(r);
+      setKeyInput("");
+      setMsg(
+        `Saved ${PRESETS[activePreset].label} key. Used for lyrics, translations, song meaning, and TV EPG (LLM).`
+      );
+      refresh();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onSaveGemini = async () => {
     const geminiKey = geminiKeyInput.trim();
     if (!geminiKey) return;
@@ -124,7 +169,8 @@ export function LyricsChatTranslateSettings() {
       });
       applyStatus(r);
       setGeminiKeyInput("");
-      setMsg("Saved Gemini API key. Use Gemini lyrics to preview lyrics and meaning from Gemini.");
+      setMsg("Saved Gemini key. Used for lyrics, song meaning, and TV EPG when Gemini is selected.");
+      refresh();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -141,6 +187,7 @@ export function LyricsChatTranslateSettings() {
       setGeminiKeyInput("");
       setGeminiModelInput("");
       setMsg("Cleared saved Gemini credentials.");
+      refresh();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -148,7 +195,7 @@ export function LyricsChatTranslateSettings() {
     }
   };
 
-  const onClear = async () => {
+  const onClearCompatible = async () => {
     setBusy(true);
     setMsg(null);
     try {
@@ -167,9 +214,8 @@ export function LyricsChatTranslateSettings() {
       setKeyInput("");
       setBaseUrlInput("");
       setModelInput("");
-      setMsg(
-        "Cleared saved LLM credentials. You can still set DEEPSEEK_API_KEY, OPENAI_API_KEY, OPENAI_COMPATIBLE_LYRICS_API_KEY, OPENAI_COMPATIBLE_LYRICS_BASE_URL, or OPENAI_COMPATIBLE_LYRICS_MODEL for the desktop process."
-      );
+      setMsg("Cleared saved DeepSeek/OpenAI-compatible credentials.");
+      refresh();
     } catch (e) {
       setMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -186,55 +232,63 @@ export function LyricsChatTranslateSettings() {
       className={`lyrics-chat-translate-settings${hasAnyAppSavedKey ? " lyrics-chat-translate-settings--keys-saved" : ""}`}
     >
       <div className="lyrics-chat-translate-body">
+        <p className="lyrics-chat-translate-lead">
+          One place for all <strong>LLM API keys</strong> in this app: bilingual lyrics, line translation, song meaning,
+          live radio caption translation, and <strong>TV program guide (EPG)</strong> via LLM.
+        </p>
         <div className="lyrics-chat-translate-provider-row" aria-label="Configured API providers">
           <button
             type="button"
-            className={`lyrics-chat-translate-provider${hasKey ? " lyrics-chat-translate-provider--active" : ""}`}
-            aria-pressed={hasKey}
-            title={
-              hasKey
-                ? `DeepSeek/OpenAI-compatible key active${keyPreview ? `: ${keyPreview}` : ""}${
-                    keySource ? ` (${keySource === "app" ? "saved in app" : ".env"})` : ""
-                  }${apiBasePreview ? ` · ${apiBasePreview}` : ""}${modelPreview ? ` · ${modelPreview}` : ""}`
-                : "No DeepSeek/OpenAI-compatible API key configured"
-            }
+            className={`lyrics-chat-translate-provider${hasDeepSeekKey ? " lyrics-chat-translate-provider--active" : ""}`}
+            title="DeepSeek — used first for automatic LLM"
           >
-            DeepSeek
+            DeepSeek{hasDeepSeekKey ? " ✓" : ""}
           </button>
           <button
             type="button"
             className={`lyrics-chat-translate-provider${hasGeminiKey ? " lyrics-chat-translate-provider--active" : ""}`}
-            aria-pressed={hasGeminiKey}
             title={
               hasGeminiKey
-                ? `Gemini key active${geminiKeyPreview ? `: ${geminiKeyPreview}` : ""}${
-                    geminiKeySource ? ` (${geminiKeySource === "app" ? "saved in app" : ".env"})` : ""
-                  }${geminiModelPreview ? ` · ${geminiModelPreview}` : ""}`
-                : "No Gemini API key configured"
+                ? `Gemini${geminiKeyPreview ? `: ${geminiKeyPreview}` : ""}${
+                    geminiModelPreview ? ` · ${geminiModelPreview}` : ""}`
+                : "No Gemini key"
             }
           >
-            Gemini
+            Gemini{hasGeminiKey ? " ✓" : ""}
+          </button>
+          <button
+            type="button"
+            className={`lyrics-chat-translate-provider${hasOpenAiKey ? " lyrics-chat-translate-provider--active" : ""}`}
+            title="OpenAI — used after DeepSeek and Gemini"
+          >
+            OpenAI{hasOpenAiKey ? " ✓" : ""}
           </button>
         </div>
+
+        <div className="lyrics-chat-translate-section-title">DeepSeek or OpenAI (chat API key)</div>
         <p className="lyrics-chat-translate-hint">
-          Optional <strong>OpenAI-compatible</strong> API (<code className="lyrics-chat-translate-code">POST /v1/chat/completions</code>).
-          On desktop, a <strong>project <code className="lyrics-chat-translate-code">.env</code></strong> file (see <code className="lyrics-chat-translate-code">.env.example</code>) can set <code className="lyrics-chat-translate-code">DEEPSEEK_API_KEY</code> (or similar). For <strong>song meaning only</strong>, you can alternatively set{" "}
-          <code className="lyrics-chat-translate-code">GEMINI_API_KEY</code> from{" "}
-          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer noopener">
-            Google AI Studio
-          </a>{" "}
-          (Gemini) — lyrics features still use the OpenAI-compatible key below when provided. With a lyric key available, the app first tries one LLM request to find bilingual lyrics together; otherwise LRCLIB plus LLM line translation (then free translators). Defaults:{" "}
-          <strong>DeepSeek</strong> (<code className="lyrics-chat-translate-code">https://api.deepseek.com</code>,{" "}
-          <code className="lyrics-chat-translate-code">deepseek-chat</code>). OpenAI, OpenRouter, etc. work with the
-          right base URL and model. LLM lyrics can be wrong — verify against official sources.
+          Automatic LLM tries <strong>DeepSeek</strong>, then <strong>Gemini</strong>, then <strong>OpenAI</strong>.
+          Uses <code className="lyrics-chat-translate-code">POST /v1/chat/completions</code>.
         </p>
+        <div className="lyrics-chat-translate-preset-row" role="group" aria-label="API provider preset">
+          {(Object.keys(PRESETS) as ProviderPreset[]).map((id) => (
+            <button
+              key={id}
+              type="button"
+              className={`lyrics-chat-translate-preset${activePreset === id ? " lyrics-chat-translate-preset--active" : ""}`}
+              onClick={() => applyPreset(id)}
+            >
+              {PRESETS[id].label}
+            </button>
+          ))}
+        </div>
         <div className="lyrics-chat-translate-row" style={{ marginBottom: 8 }}>
           <input
             type="url"
             autoComplete="off"
             spellCheck={false}
             className="lyrics-chat-translate-input"
-            placeholder="API base URL (optional, default https://api.deepseek.com)"
+            placeholder={`API base URL (${PRESETS[activePreset].baseUrl})`}
             value={baseUrlInput}
             onChange={(e) => setBaseUrlInput(e.target.value)}
           />
@@ -245,7 +299,7 @@ export function LyricsChatTranslateSettings() {
             autoComplete="off"
             spellCheck={false}
             className="lyrics-chat-translate-input"
-            placeholder="Model id (optional, default deepseek-chat)"
+            placeholder={`Model (${PRESETS[activePreset].model})`}
             value={modelInput}
             onChange={(e) => setModelInput(e.target.value)}
           />
@@ -256,24 +310,39 @@ export function LyricsChatTranslateSettings() {
             autoComplete="off"
             spellCheck={false}
             className="lyrics-chat-translate-input"
-            placeholder="API key (Bearer)"
+            placeholder={`${PRESETS[activePreset].label} API key`}
             value={keyInput}
             onChange={(e) => setKeyInput(e.target.value)}
           />
-          <button type="button" className="url-btn" disabled={busy || !keyInput.trim()} onClick={() => void onSave()}>
+          <button
+            type="button"
+            className="url-btn"
+            disabled={busy || !keyInput.trim()}
+            onClick={() => void onSaveCompatible()}
+          >
             Save
           </button>
-          <button type="button" className="btn-ghost" disabled={busy || !hasAppSavedKey} onClick={() => void onClear()}>
-            Clear saved
+          <button type="button" className="btn-ghost" disabled={busy || !hasAppSavedKey} onClick={() => void onClearCompatible()}>
+            Clear
           </button>
         </div>
         {hasKey && keyPreview ? (
           <p className="lyrics-chat-translate-msg">
-            Active API key: <code className="lyrics-chat-translate-code">{keyPreview}</code>
-            {keySource ? ` (${keySource === "app" ? "saved in app" : ".env"})` : ""}
+            Active key: <code className="lyrics-chat-translate-code">{keyPreview}</code>
+            {keySource ? ` (${keySource === "app" ? "saved in Settings" : ".env"})` : ""}
+            {apiBasePreview ? ` · ${apiBasePreview}` : ""}
+            {modelPreview ? ` · ${modelPreview}` : ""}
           </p>
         ) : null}
-        <div className="lyrics-chat-translate-section-title">Google Gemini / AI Studio</div>
+
+        <div className="lyrics-chat-translate-section-title">Gemini (Google AI Studio)</div>
+        <p className="lyrics-chat-translate-hint">
+          Get a key from{" "}
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer noopener">
+            Google AI Studio
+          </a>
+          . Optional if you already use DeepSeek/OpenAI above.
+        </p>
         <div className="lyrics-chat-translate-row" style={{ marginBottom: 8 }}>
           <input
             type="text"
@@ -296,16 +365,16 @@ export function LyricsChatTranslateSettings() {
             onChange={(e) => setGeminiKeyInput(e.target.value)}
           />
           <button type="button" className="url-btn" disabled={busy || !geminiKeyInput.trim()} onClick={() => void onSaveGemini()}>
-            Save Gemini
+            Save
           </button>
           <button type="button" className="btn-ghost" disabled={busy || !hasAppSavedGeminiKey} onClick={() => void onClearGemini()}>
-            Clear Gemini
+            Clear
           </button>
         </div>
         {hasGeminiKey && geminiKeyPreview ? (
           <p className="lyrics-chat-translate-msg">
             Active Gemini key: <code className="lyrics-chat-translate-code">{geminiKeyPreview}</code>
-            {geminiKeySource ? ` (${geminiKeySource === "app" ? "saved in app" : ".env"})` : ""}
+            {geminiKeySource ? ` (${geminiKeySource === "app" ? "saved in Settings" : ".env"})` : ""}
             {geminiModelPreview ? ` · ${geminiModelPreview}` : ""}
           </p>
         ) : null}
@@ -314,3 +383,6 @@ export function LyricsChatTranslateSettings() {
     </div>
   );
 }
+
+/** @deprecated Use `LlmApiSettings` — kept for existing imports. */
+export const LyricsChatTranslateSettings = LlmApiSettings;

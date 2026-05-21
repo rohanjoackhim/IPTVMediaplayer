@@ -21,7 +21,6 @@ import {
 import { extractAudioTagsDetailed } from "../utils/extractAudioMetadata";
 import { extractEbookText } from "../utils/ebookText";
 import { stableLocalAudioIdFromMeta } from "../utils/stableLocalAudioId";
-import { LyricsChatTranslateSettings } from "./LyricsChatTranslateSettings";
 import { AudioLibraryPlaybackControls } from "./AudioLibraryPlaybackControls";
 import "./LocalAudioPanel.css";
 
@@ -893,6 +892,7 @@ export interface LocalAudioPanelProps {
   onLibraryCleared?: () => void;
   /** Stop the main player if this specific IndexedDB audio track is currently active. */
   onLibraryTrackRemoved?: (trackId: string) => void;
+  onOpenSettings?: () => void;
 }
 
 export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanelProps>(
@@ -910,6 +910,7 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
       onAudioLibraryContinuousChange,
       onLibraryCleared,
       onLibraryTrackRemoved,
+      onOpenSettings,
     },
     ref
   ) {
@@ -2384,14 +2385,14 @@ export const LocalAudioPanel = forwardRef<LocalAudioPanelHandle, LocalAudioPanel
         )}
       </div>
 
-      <details className="local-audio-translate-details">
-        <summary className="local-audio-translate-summary">
-          Lyrics translation — LLM API (optional)
-        </summary>
-        <div className="local-audio-translate-details-body">
-          <LyricsChatTranslateSettings />
-        </div>
-      </details>
+      {onOpenSettings && window.iptv?.getLyricsChatTranslateKeyStatus ? (
+        <p className="local-audio-llm-settings-link">
+          <button type="button" className="btn-ghost" onClick={onOpenSettings}>
+            Settings → LLM API keys
+          </button>
+          <span className="local-audio-llm-settings-hint"> (Gemini, DeepSeek, OpenAI — lyrics, EPG)</span>
+        </p>
+      ) : null}
     </div>
   );
 });

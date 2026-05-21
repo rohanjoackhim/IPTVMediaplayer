@@ -5,6 +5,50 @@ declare global {
     /** Exposed by Electron `preload.cjs`. */
     iptv?: {
       fetchPlaylistText: (url: string) => Promise<string>;
+      pickM3uPlaylistFile?: () => Promise<{
+        ok: boolean;
+        cancelled?: boolean;
+        text?: string;
+        fileName?: string;
+        error?: string;
+      }>;
+      /** Desktop: extract one channel’s programmes from a large XMLTV URL (stream scan). */
+      extractEpgProgrammes?: (payload: {
+        url: string;
+        channelId: string;
+        fromMs: number;
+        toMs: number;
+      }) => Promise<{
+        ok: boolean;
+        programmes?: Array<{
+          channelId: string;
+          start: number;
+          stop: number;
+          title: string;
+          description?: string;
+        }>;
+        error?: string;
+      }>;
+      /** Desktop: XMLTV channel id → display names (channel section only). */
+      fetchEpgChannelIndex?: (url: string) => Promise<{
+        ok: boolean;
+        channelNames?: Record<string, string[]>;
+        error?: string;
+      }>;
+      channelEpgLlm?: (payload: {
+        name: string;
+        tvgId?: string;
+        country?: string;
+        group?: string;
+      }) => Promise<{
+        ok: boolean;
+        rawJson?: string;
+        disclaimer?: string;
+        error?: string;
+        llmPurpose?: string;
+        llmModel?: string;
+        llmHost?: string;
+      }>;
       /** Desktop: first YouTube search hit — `videoId` plus listing `title` (main process; title used for LRCLIB lyrics). */
       youtubeFirstVideoIdFromSearch: (query: string) => Promise<{ videoId: string; title?: string | null }>;
       /** Desktop: GET JSON from allow-listed https URLs (LRCLIB, MyMemory). */
@@ -21,7 +65,11 @@ declare global {
       googleTranslateGtx: (payload: { q: string; source: string; target?: string }) => Promise<unknown>;
       getLyricsChatTranslateKeyStatus: () => Promise<{
         hasKey: boolean;
-        /** True if OpenAI-compatible env/settings key OR `GEMINI_*` in main `.env` (song meaning). */
+        hasDeepSeekKey?: boolean;
+        hasOpenAiKey?: boolean;
+        /** First provider used for automatic LLM calls: `deepseek` | `gemini` | `openai`. */
+        primaryLlmProvider?: string;
+        /** True if any LLM key is configured (DeepSeek, Gemini, or OpenAI). */
         hasSongMeaningKey?: boolean;
         hasGeminiFromEnv?: boolean;
         hasGeminiKey?: boolean;
@@ -192,13 +240,26 @@ declare global {
       cancelNeuralTts: () => Promise<{ ok: boolean }>;
       /** Desktop: local Whisper STT status for live radio captions. */
       whisperStatus: () => Promise<{
+        modelKey: string;
         modelId: string;
+        modelLabel?: string;
+        downloadHint?: string;
+        models?: Array<{ key: string; id: string; label: string; downloadHint: string }>;
         ready: boolean;
         loading: boolean;
         error: string | null;
       }>;
+      /** Desktop: select Whisper variant (tiny | base | small). */
+      whisperSetModel: (
+        modelKey: string
+      ) => Promise<{ ok: boolean; modelKey?: string; modelId?: string; error?: string }>;
       /** Desktop: load Whisper model (downloads on first use). */
-      whisperWarmup: () => Promise<{ ok: boolean; modelId?: string; error?: string }>;
+      whisperWarmup: () => Promise<{
+        ok: boolean;
+        modelKey?: string;
+        modelId?: string;
+        error?: string;
+      }>;
       /** Desktop: transcribe Float32 PCM @ 16 kHz (ArrayBuffer of float32 samples). */
       whisperTranscribePcm: (
         pcmArrayBuffer: ArrayBuffer

@@ -8,13 +8,23 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 
-const WHISPER_MODEL_ID = "Xenova/whisper-tiny";
+/** @type {Record<string, { id: string, label: string, downloadHint: string }>} */
+const WHISPER_MODELS = {
+  tiny: { id: "Xenova/whisper-tiny", label: "Tiny", downloadHint: "~75 MB" },
+  base: { id: "Xenova/whisper-base", label: "Base", downloadHint: "~150 MB" },
+  small: { id: "Xenova/whisper-small", label: "Small", downloadHint: "~460 MB" },
+};
+
+const DEFAULT_MODEL_KEY = "tiny";
+const WHISPER_MODEL_ID = WHISPER_MODELS[DEFAULT_MODEL_KEY].id;
+
 const MAX_CHUNK_BYTES = 6 * 1024 * 1024;
 const MIN_PCM_SAMPLES = Math.floor(16000 * 0.45);
 
 /** @type {{ app: import('electron').App, getFfmpegPath: () => string | null, runFfmpeg: (ffmpegPath: string, args: string[]) => Promise<void> } | null} */
 let deps = null;
 
+let currentModelKey = DEFAULT_MODEL_KEY;
 let pipelinePromise = null;
 let loadError = null;
 let isLoading = false;
@@ -22,6 +32,30 @@ let transcribeQueue = Promise.resolve();
 
 function initWhisperStt(depsIn) {
   deps = depsIn;
+}
+
+function resolveModelKey(key) {
+  if (typeof key === "string" && WHISPER_MODELS[key]) return key;
+  return DEFAULT_MODEL_KEY;
+}
+
+function getCurrentModelId() {
+  return WHISPER_MODELS[currentModelKey].id;
+}
+
+function resetPipeline() {
+  pipelinePromise = null;
+  loadError = null;
+  isLoading = false;
+}
+
+function listWhisperModels() {
+  return Object.entries(WHISPER_MODELS).map(([key, m]) => ({
+    key,
+    id: m.id,
+    label: m.label,
+    downloadHint: m.downloadHint,
+  }));
 }
 
 function whisperCacheDir() {
@@ -37,11 +71,34 @@ function whisperTempDir() {
 }
 
 function getWhisperStatus() {
+  const meta = WHISPER_MODELS[currentModelKey];
   return {
-    modelId: WHISPER_MODEL_ID,
+    modelKey: currentModelKey,
+    modelId: getCurrentModelId(),
+    modelLabel: meta?.label ?? "Tiny",
+    downloadHint: meta?.downloadHint ?? "~75 MB",
+    models: listWhisperModels(),
     ready: !!pipelinePromise && !loadError && !isLoading,
     loading: isLoading,
     error: loadError ? String(loadError.message || loadError) : null,
+  };
+}
+
+/**
+ * Select which Xenova Whisper weights to load. Unloads the previous pipeline.
+ * @param {string} modelKey tiny | base | small
+ */
+async function setWhisperModel(modelKey) {
+  const key = resolveModelKey(modelKey);
+  const changed = key !== currentModelKey;
+  currentModelKey = key;
+  if (changed || loadError || !pipelinePromise) {
+    resetPipeline();
+  }
+  return {
+    ok: true,
+    modelKey: key,
+    modelId: getCurrentModelId(),
   };
 }
 
@@ -53,6 +110,7 @@ function enqueueTranscribe(fn) {
 
 async function getPipeline() {
   if (loadError) throw loadError;
+  const modelId = getCurrentModelId();
   if (!pipelinePromise) {
     isLoading = true;
     pipelinePromise = (async () => {
@@ -60,7 +118,7 @@ async function getPipeline() {
       env.cacheDir = whisperCacheDir();
       env.allowLocalModels = true;
       env.allowRemoteModels = true;
-      return pipeline("automatic-speech-recognition", WHISPER_MODEL_ID);
+      return pipeline("automatic-speech-recognition", modelId);
     })()
       .catch((e) => {
         loadError = e;
@@ -77,7 +135,7 @@ async function getPipeline() {
 async function warmupWhisper() {
   try {
     await getPipeline();
-    return { ok: true, modelId: WHISPER_MODEL_ID };
+    return { ok: true, modelKey: currentModelKey, modelId: getCurrentModelId() };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -90,6 +148,8 @@ async function runWhisperOnFloat32(audioData) {
   const output = await transcriber(audioData, {
     sampling_rate: 16000,
     task: "transcribe",
+    return_timestamps: false,
+    max_new_tokens: 96,
   });
   return typeof output === "string"
     ? output
@@ -224,6 +284,8 @@ async function transcribeWebmChunk(mediaBuf) {
 module.exports = {
   initWhisperStt,
   getWhisperStatus,
+  setWhisperModel,
+  listWhisperModels,
   warmupWhisper,
   transcribeWebmChunk,
   transcribePcmFloat32,
