@@ -73,6 +73,7 @@
       "piper/**/*"
     ],
     "asar": true,
+    "afterPack": "./electron/afterPack.cjs",
     "asarUnpack": [
       "node_modules/ffmpeg-static/**",
       "node_modules/onnxruntime-node/**",

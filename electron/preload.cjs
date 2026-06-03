@@ -78,6 +78,12 @@ contextBridge.exposeInMainWorld("iptv", {
   /** Desktop: remux or transcode Matroska to H.264/AAC MP4 for Chromium playback; returns `playUrl` (often `file://` temp). */
   prepareMkvPlayback: (fileUrl) => ipcRenderer.invoke("iptv-prepare-mkv-playback", fileUrl),
 
+  /** Desktop: test if direct URL works (bypass proxy for debugging VPN/proxy issues). */
+  testDirectUrl: (url) => ipcRenderer.invoke("iptv-test-direct-url", url),
+
+  /** Desktop: fetch episode list for an Xtream series on demand. */
+  fetchSeriesEpisodes: (payload) => ipcRenderer.invoke("iptv-fetch-series-episodes", payload),
+
   startStreamRecord: (payload) => ipcRenderer.invoke("iptv-start-stream-record", payload),
 
   stopStreamRecord: (id) => ipcRenderer.invoke("iptv-stop-stream-record", id),

@@ -1,0 +1,135 @@
+.player-pvr-pending {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--accent-border);
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.14) 0%, rgba(245, 158, 11, 0.05) 100%);
+  box-sizing: border-box;
+}
+
+.player-pvr-pending-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.625rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-hover);
+}
+
+.player-pvr-pending-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.player-pvr-pending-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.player-pvr-pending-item--here {
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+}
+
+.player-pvr-pending-item--scheduled {
+  border-style: dashed;
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.player-pvr-pending-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+
+.player-pvr-pending-pane {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.player-pvr-pending-name {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.player-pvr-pending-meta {
+  width: 100%;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.player-pvr-pending-progress {
+  width: 100%;
+  height: 4px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  overflow: hidden;
+}
+
+.player-pvr-pending-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 1s linear;
+}
+
+.player-pvr-pending-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.player-pvr-pending-go,
+.player-pvr-pending-stop {
+  min-height: 26px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.625rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.player-pvr-pending-go {
+  border: 1px solid var(--accent-border);
+  background: var(--bg-input);
+  color: var(--accent-hover);
+}
+
+.player-pvr-pending-go:hover {
+  background: var(--accent-muted);
+}
+
+.player-pvr-pending-stop {
+  border: 1px solid rgba(220, 38, 38, 0.5);
+  background: rgba(127, 29, 29, 0.1);
+  color: #b91c1c;
+}
+
+.player-pvr-pending-stop:hover {
+  background: rgba(185, 28, 28, 0.14);
+}

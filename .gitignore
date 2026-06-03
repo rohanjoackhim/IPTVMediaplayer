@@ -7,3 +7,5 @@ release
 .env.local
 .env.*.local
 *.tsbuildinfo
+backend/data/*.db
+backend/data/*.db-*

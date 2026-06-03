@@ -7,7 +7,7 @@ import {
 
 const KEY = "iptv-ui-session";
 
-export type ListTabPersisted = "all" | "favorites" | "localVideos";
+export type ListTabPersisted = "all" | "favorites" | "localVideos" | "movies" | "series" | "apiChannels";
 /** Radio sidebar: only all vs favorites (no local-files tab). */
 export type RadioListTabPersisted = "all" | "favorites";
 /** Podcast sidebar: all shows/episodes vs favorites only. */
@@ -16,7 +16,7 @@ export type AssignPanePersisted = "L" | "R";
 export type SidebarModePersisted = "tv" | "radio" | "audio";
 
 export interface UiSession {
-  v: 12;
+  v: 13;
   listTab: ListTabPersisted;
   /** Radio sidebar: all stations in country vs favorites only (same URLs as Television favorites). */
   radioListTab: RadioListTabPersisted;
@@ -59,10 +59,12 @@ export interface UiSession {
   liveCaptionsSttModel: LiveCaptionsSttModelId;
   /** User dismissed the first-run LLM API key setup prompt. */
   llmSetupPromptDismissed: boolean;
+  /** Re-encode IPTV recordings to smaller MP4 (~720p cap, lower bitrates). */
+  recordingCompact: boolean;
 }
 
 const defaultSession: UiSession = {
-  v: 12,
+  v: 13,
   listTab: "all",
   radioListTab: "all",
   podcastListTab: "all",
@@ -89,12 +91,49 @@ const defaultSession: UiSession = {
   compactView: false,
   liveCaptionsSttModel: DEFAULT_LIVE_CAPTIONS_STT_MODEL,
   llmSetupPromptDismissed: false,
+  recordingCompact: false,
 };
+
+function migrateFromV12(o: Record<string, unknown>): UiSession {
+  return {
+    v: 13,
+    listTab: parseListTab(o.listTab),
+    radioListTab: parseRadioListTab(o.radioListTab),
+    podcastListTab: parsePodcastListTab(o.podcastListTab),
+    sidebarMode: parseSidebarMode(o.sidebarMode),
+    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
+    podcastCountry: typeof o.podcastCountry === "string" && o.podcastCountry.trim() ? o.podcastCountry : "us",
+    podcastGenreId: parsePodcastGenreId(o.podcastGenreId),
+    query: typeof o.query === "string" ? o.query : "",
+    group: typeof o.group === "string" ? o.group : "All groups",
+    country: typeof o.country === "string" ? o.country : "All countries",
+    splitView: !!o.splitView,
+    assignTarget: o.assignTarget === "R" ? "R" : "L",
+    volumeLeft: vol(o.volumeLeft, 1),
+    volumeRight: vol(o.volumeRight, 1),
+    sidebarWidthPx: clampSidebarWidthPx(
+      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
+    ),
+    radioEqPreset: parseEqPresetId(o.radioEqPreset),
+    radioEqCustomGains: parseEqCustomGains(o.radioEqCustomGains),
+    libraryEqPreset: parseEqPresetId(o.libraryEqPreset),
+    libraryEqCustomGains: parseEqCustomGains(o.libraryEqCustomGains),
+    podcastEqPreset: parseEqPresetId(o.podcastEqPreset),
+    podcastEqCustomGains: parseEqCustomGains(o.podcastEqCustomGains),
+    audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
+    audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
+    compactView: typeof o.compactView === "boolean" ? o.compactView : false,
+    liveCaptionsSttModel: parseLiveCaptionsSttModel(o.liveCaptionsSttModel),
+    llmSetupPromptDismissed: !!o.llmSetupPromptDismissed,
+    recordingCompact: typeof o.recordingCompact === "boolean" ? o.recordingCompact : false,
+  };
+}
 
 function migrateFromV11(o: Record<string, unknown>): UiSession {
   return {
     ...migrateFromV10(o),
     llmSetupPromptDismissed: !!o.llmSetupPromptDismissed,
+    recordingCompact: false,
   };
 }
 
@@ -107,7 +146,7 @@ function migrateFromV10(o: Record<string, unknown>): UiSession {
 }
 
 function vol(x: unknown, d: number) {
-  return typeof x === "number" && Number.isFinite(x) ? Math.min(1, Math.max(0, x)) : d;
+  return typeof x === "number" && Number.isFinite(x) ? Math.min(1.5, Math.max(0, x)) : d;
 }
 
 export function clampSidebarWidthPx(n: number): number {
@@ -138,46 +177,19 @@ function parseRadioListTab(raw: unknown): RadioListTabPersisted {
 function parseListTab(raw: unknown): ListTabPersisted {
   if (raw === "favorites") return "favorites";
   if (raw === "localVideos") return "localVideos";
+  if (raw === "movies") return "movies";
+  if (raw === "series") return "series";
+  if (raw === "apiChannels") return "apiChannels";
   return "all";
 }
 
 function migrateFromV9(o: Record<string, unknown>): UiSession {
-  const radioPreset = parseEqPresetId(o.radioEqPreset);
-  const radioCustom = parseEqCustomGains(o.radioEqCustomGains);
   return {
-    v: 12,
-    listTab: parseListTab(o.listTab),
-    radioListTab: parseRadioListTab(o.radioListTab),
-    podcastListTab: parsePodcastListTab(o.podcastListTab),
-    sidebarMode: parseSidebarMode(o.sidebarMode),
-    radioCountry: typeof o.radioCountry === "string" ? o.radioCountry : "",
-    podcastCountry: typeof o.podcastCountry === "string" && o.podcastCountry.trim() ? o.podcastCountry : "us",
-    podcastGenreId: parsePodcastGenreId(o.podcastGenreId),
-    query: typeof o.query === "string" ? o.query : "",
-    group: typeof o.group === "string" ? o.group : "All groups",
-    country: typeof o.country === "string" ? o.country : "All countries",
-    splitView: !!o.splitView,
-    assignTarget: o.assignTarget === "R" ? "R" : "L",
-    volumeLeft: vol(o.volumeLeft, 1),
-    volumeRight: vol(o.volumeRight, 1),
-    sidebarWidthPx: clampSidebarWidthPx(
-      typeof o.sidebarWidthPx === "number" ? o.sidebarWidthPx : defaultSession.sidebarWidthPx
-    ),
-    radioEqPreset: radioPreset,
-    radioEqCustomGains: radioCustom,
-    libraryEqPreset: parseEqPresetId(o.libraryEqPreset) || radioPreset,
-    libraryEqCustomGains: parseEqCustomGains(o.libraryEqCustomGains).length
-      ? parseEqCustomGains(o.libraryEqCustomGains)
-      : [...radioCustom],
-    podcastEqPreset: parseEqPresetId(o.podcastEqPreset) || radioPreset,
-    podcastEqCustomGains: parseEqCustomGains(o.podcastEqCustomGains).length
-      ? parseEqCustomGains(o.podcastEqCustomGains)
-      : [...radioCustom],
-    audioLibraryShuffle: typeof o.audioLibraryShuffle === "boolean" ? o.audioLibraryShuffle : false,
-    audioLibraryContinuous: typeof o.audioLibraryContinuous === "boolean" ? o.audioLibraryContinuous : false,
-    compactView: typeof o.compactView === "boolean" ? o.compactView : false,
-    liveCaptionsSttModel: DEFAULT_LIVE_CAPTIONS_STT_MODEL,
+    ...migrateFromV12(o),
+    v: 13,
+    liveCaptionsSttModel: parseLiveCaptionsSttModel(o.liveCaptionsSttModel),
     llmSetupPromptDismissed: false,
+    recordingCompact: false,
   };
 }
 
@@ -302,9 +314,10 @@ export function loadUiSession(): UiSession {
     if (o.v === 9) return migrateFromV9(o);
     if (o.v === 10) return migrateFromV10(o);
     if (o.v === 11) return migrateFromV11(o);
-    if (o.v !== 12) return { ...defaultSession };
+    if (o.v === 12) return migrateFromV12(o);
+    if (o.v !== 13) return { ...defaultSession };
     return {
-      v: 12,
+      v: 13,
       listTab: parseListTab(o.listTab),
       radioListTab: parseRadioListTab(o.radioListTab),
       podcastListTab: parsePodcastListTab(o.podcastListTab),
@@ -333,6 +346,7 @@ export function loadUiSession(): UiSession {
       compactView: typeof o.compactView === "boolean" ? o.compactView : false,
       liveCaptionsSttModel: parseLiveCaptionsSttModel(o.liveCaptionsSttModel),
       llmSetupPromptDismissed: !!o.llmSetupPromptDismissed,
+      recordingCompact: typeof o.recordingCompact === "boolean" ? o.recordingCompact : false,
     };
   } catch {
     return { ...defaultSession };
@@ -343,7 +357,7 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
   try {
     const cur = loadUiSession();
     const next: UiSession = {
-      v: 12,
+      v: 13,
       listTab: partial.listTab ?? cur.listTab,
       radioListTab: partial.radioListTab ?? cur.radioListTab,
       podcastListTab: partial.podcastListTab ?? cur.podcastListTab,
@@ -390,6 +404,8 @@ export function saveUiSession(partial: Partial<Omit<UiSession, "v">>): void {
         partial.llmSetupPromptDismissed !== undefined
           ? partial.llmSetupPromptDismissed
           : cur.llmSetupPromptDismissed,
+      recordingCompact:
+        partial.recordingCompact !== undefined ? partial.recordingCompact : cur.recordingCompact,
     };
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {

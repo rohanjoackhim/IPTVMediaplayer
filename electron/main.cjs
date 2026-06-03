@@ -45,7 +45,7 @@ const http = require("http");
 const nodeNet = require("net");
 const crypto = require("crypto");
 const { spawn, execSync } = require("child_process");
-const { Readable } = require("stream");
+const { Readable, PassThrough } = require("stream");
 const { fileURLToPath, pathToFileURL } = require("url");
 
 const MIME = {
@@ -180,19 +180,330 @@ function assertAllowedRecordRevealPath(rawPath) {
 const APP_CSP =
   "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* https:; media-src 'self' blob: file: http: https:; connect-src 'self' http://127.0.0.1:* https: blob:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-src https:; form-action 'none';";
 
+/**
+ * Fetch playlist text using a hidden BrowserWindow to solve Cloudflare JS challenges.
+ * Strategy: load the URL in a real Chromium context, wait for CF to clear, then
+ * re-fetch using net.fetch (which now has the cf_clearance cookie in the session).
+ * If that still fails, extract the page source directly.
+ */
+function fetchPlaylistViaHiddenWindow(url) {
+  return new Promise((resolve, reject) => {
+    const timeout = 45_000;
+    const win = new BrowserWindow({
+      show: false,
+      width: 800,
+      height: 600,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+      },
+    });
+    let settled = false;
+    let loadCount = 0;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      win.destroy();
+      reject(new Error("Timed out waiting for playlist (Cloudflare challenge may have failed)."));
+    }, timeout);
+
+    const finish = (text) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      win.destroy();
+      if (!text || !text.trim()) {
+        reject(new Error("Empty response from server."));
+        return;
+      }
+      resolve(text);
+    };
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      win.destroy();
+      reject(err);
+    };
+
+    win.webContents.on("did-finish-load", async () => {
+      loadCount++;
+      try {
+        // Wait a moment for any final JS redirect
+        await new Promise((r) => setTimeout(r, 2000));
+        if (settled) return;
+
+        // Try net.fetch again now that cf_clearance cookie should be set in the session
+        try {
+          const res2 = await net.fetch(url, { method: "GET", redirect: "follow", bypassCustomProtocolHandlers: true });
+          if (res2.ok) {
+            const t = await res2.text();
+            if (t.includes("#EXTINF") || t.includes("#EXTM3U") || /^https?:\/\//m.test(t)) {
+              finish(t);
+              return;
+            }
+          }
+        } catch { /* fall through to page extraction */ }
+
+        if (settled) return;
+
+        // Fallback: extract raw page source (preserves #EXTINF lines unlike innerText)
+        const src = await win.webContents.executeJavaScript(
+          `(function(){
+            var pre = document.querySelector("pre");
+            if (pre) return pre.textContent;
+            return document.body.textContent || document.body.innerText || "";
+          })()`
+        );
+        if (settled) return;
+
+        if (src && (src.includes("#EXTINF") || src.includes("#EXTM3U") || /^https?:\/\//m.test(src))) {
+          finish(src);
+          return;
+        }
+
+        // If first load was likely the CF challenge page, wait for redirect
+        if (loadCount <= 1) return; // will fire did-finish-load again after redirect
+
+        finish(src);
+      } catch (e) {
+        fail(e);
+      }
+    });
+
+    win.webContents.on("did-fail-load", (_event, code, desc) => {
+      // -3 = aborted (redirect), ignore
+      if (code === -3) return;
+      fail(new Error(`Failed to load playlist: ${desc} (code ${code})`));
+    });
+
+    win.loadURL(url).catch(fail);
+  });
+}
+
+/** Detect Xtream get.php URL and extract server/username/password for API fallback. */
+function parseXtreamGetPhpUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!u.pathname.endsWith("/get.php")) return null;
+    const username = u.searchParams.get("username");
+    const password = u.searchParams.get("password");
+    if (!username || !password) return null;
+    return { base: `${u.protocol}//${u.host}`, username, password };
+  } catch { return null; }
+}
+
+const FETCH_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "*/*",
+};
+
+/** Safely fetch JSON from Xtream API, returning [] on failure. */
+async function xtreamJsonFetch(url) {
+  try {
+    const res = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch { return []; }
+}
+
+/** Escape value for M3U attribute (strip quotes). */
+function m3uAttr(val) { return String(val ?? "").replace(/"/g, ""); }
+
+/** Build M3U text from Xtream player_api.php JSON endpoints (live + VOD + series). */
+async function buildM3uFromXtreamApi(base, username, password) {
+  const apiBase = `${base}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+
+  /* ---------- Live channels ---------- */
+  console.log("[IPTV] Xtream API: fetching categories…");
+  const catRes = await fetch(`${apiBase}&action=get_live_categories`, {
+    headers: FETCH_HEADERS, signal: AbortSignal.timeout(30_000),
+  });
+  const categories = catRes.ok ? await catRes.json() : [];
+  const catMap = {};
+  if (Array.isArray(categories)) {
+    for (const c of categories) catMap[String(c.category_id)] = c.category_name || "";
+  }
+
+  console.log("[IPTV] Xtream API: fetching live streams…");
+  const streamRes = await fetch(`${apiBase}&action=get_live_streams`, {
+    headers: FETCH_HEADERS, signal: AbortSignal.timeout(120_000),
+  });
+  if (!streamRes.ok) {
+    throw new Error(`Xtream API error: HTTP ${streamRes.status}`);
+  }
+  const streams = await streamRes.json();
+  if (!Array.isArray(streams) || !streams.length) {
+    throw new Error("Xtream API returned no channels.");
+  }
+
+  const outputFmt = "ts";
+  const lines = ["#EXTM3U"];
+  for (const s of streams) {
+    const name = s.name || `Stream ${s.stream_id}`;
+    const group = catMap[String(s.category_id)] || "";
+    const logo = s.stream_icon || "";
+    const epgId = s.epg_channel_id || "";
+    const sid = s.stream_id;
+    lines.push(
+      `#EXTINF:-1 tvg-id="${m3uAttr(epgId)}" tvg-logo="${m3uAttr(logo)}" group-title="${m3uAttr(group)}" content-type="live",${name}`
+    );
+    lines.push(`${base}/${username}/${password}/${sid}.${outputFmt}`);
+  }
+  console.log("[IPTV] Xtream API: built M3U with", streams.length, "live channels");
+
+  /* ---------- VOD (Movies) ---------- */
+  console.log("[IPTV] Xtream API: fetching VOD categories…");
+  const vodCats = await xtreamJsonFetch(`${apiBase}&action=get_vod_categories`);
+  const vodCatMap = {};
+  for (const c of vodCats) vodCatMap[String(c.category_id)] = c.category_name || "";
+
+  console.log("[IPTV] Xtream API: fetching VOD streams…");
+  const vodStreams = await xtreamJsonFetch(`${apiBase}&action=get_vod_streams`);
+  let vodCount = 0;
+  for (const v of vodStreams) {
+    const name = v.name || `Movie ${v.stream_id}`;
+    const group = vodCatMap[String(v.category_id)] || "Movies";
+    const logo = v.stream_icon || "";
+    const ext = v.container_extension || "mp4";
+    const sid = v.stream_id;
+    const rating = v.rating || "";
+    const year = v.release_date || v.releaseDate || v.year || "";
+    const genre = v.genre || "";
+    const plot = (v.plot || "").replace(/"/g, "'").slice(0, 500);
+    lines.push(
+      `#EXTINF:-1 tvg-logo="${m3uAttr(logo)}" group-title="${m3uAttr(group)}" content-type="movie" rating="${m3uAttr(rating)}" release-year="${m3uAttr(year)}" genre="${m3uAttr(genre)}" plot="${m3uAttr(plot)}" container-ext="${m3uAttr(ext)}",${name}`
+    );
+    lines.push(`${base}/movie/${username}/${password}/${sid}.${ext}`);
+    vodCount++;
+  }
+  console.log("[IPTV] Xtream API:", vodCount, "movies");
+
+  /* ---------- Series ---------- */
+  console.log("[IPTV] Xtream API: fetching series categories…");
+  const seriesCats = await xtreamJsonFetch(`${apiBase}&action=get_series_categories`);
+  const seriesCatMap = {};
+  for (const c of seriesCats) seriesCatMap[String(c.category_id)] = c.category_name || "";
+
+  console.log("[IPTV] Xtream API: fetching series list…");
+  const seriesList = await xtreamJsonFetch(`${apiBase}&action=get_series`);
+
+  /* Add each series as a single show-level entry.
+     Episode details are fetched lazily via IPC when the user drills into a show. */
+  for (const show of seriesList) {
+    if (!show || !show.series_id) continue;
+    const seriesId = show.series_id;
+    const showName = show.name || `Series ${seriesId}`;
+    const showGroup = seriesCatMap[String(show.category_id)] || "Series";
+    const showLogo = show.cover || "";
+    const showGenre = show.genre || "";
+    const showPlot = (show.plot || "").replace(/"/g, "'").slice(0, 500);
+    const showRating = show.rating || "";
+    const showYear = show.releaseDate || show.release_date || show.year || "";
+    lines.push(
+      `#EXTINF:-1 tvg-logo="${m3uAttr(showLogo)}" group-title="${m3uAttr(showGroup)}" content-type="series" series-name="${m3uAttr(showName)}" series-id="${seriesId}" genre="${m3uAttr(showGenre)}" plot="${m3uAttr(showPlot)}" rating="${m3uAttr(showRating)}" release-year="${m3uAttr(showYear)}",${showName}`
+    );
+    lines.push(`${base}/series/${username}/${password}/${seriesId}.ts`);
+  }
+  console.log("[IPTV] Xtream API:", seriesList.length, "series (episodes loaded on demand)");
+
+  console.log("[IPTV] Xtream API: total M3U entries:", streams.length + vodCount + seriesList.length);
+  return lines.join("\n");
+}
+
+/** Fetch episode list for a single Xtream series on demand. */
+ipcMain.handle("iptv-fetch-series-episodes", async (_evt, payload) => {
+  const { server, username, password, seriesId } = payload ?? {};
+  if (!server || !username || !password || !seriesId) return { episodes: [] };
+  const base = String(server).replace(/\/+$/, "");
+  const apiBase = `${base}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`;
+  try {
+    const res = await fetch(`${apiBase}&action=get_series_info&series_id=${seriesId}`, {
+      headers: FETCH_HEADERS, signal: AbortSignal.timeout(30_000),
+    });
+    if (!res.ok) return { episodes: [] };
+    const info = await res.json();
+    const episodes = info?.episodes;
+    if (!episodes || typeof episodes !== "object") return { episodes: [] };
+
+    const result = [];
+    for (const [seasonNum, epList] of Object.entries(episodes)) {
+      if (!Array.isArray(epList)) continue;
+      const sn = parseInt(seasonNum, 10) || 0;
+      for (const ep of epList) {
+        const epId = ep.id || ep.stream_id || ep.episode_id || 0;
+        const ext = ep.container_extension || "mp4";
+        const epNum = ep.episode_num != null ? parseInt(String(ep.episode_num), 10) : 0;
+        const epTitle = ep.title || ep.name || `Episode ${epNum || "?"}`;
+        const epLogo = ep.info?.movie_image || ep.info?.cover_big || "";
+        const epPlot = (ep.info?.plot || "").slice(0, 500);
+        const epRating = ep.info?.rating || "";
+        result.push({
+          id: epId,
+          season: sn,
+          episode: epNum,
+          title: epTitle,
+          logo: epLogo,
+          plot: epPlot,
+          rating: epRating,
+          ext,
+          url: `${base}/series/${username}/${password}/${epId}.${ext}`,
+        });
+      }
+    }
+    return { episodes: result };
+  } catch (e) {
+    console.error("[IPTV] fetch series episodes error:", e?.message);
+    return { episodes: [] };
+  }
+});
+
 ipcMain.handle("iptv-fetch-playlist-text", async (_evt, rawUrl) => {
   const url = assertPlaylistUrlForMain(rawUrl);
-  const res = await fetch(url, {
-    method: "GET",
-    redirect: "follow",
-    headers: { "User-Agent": "IPTV-Player/1.0 (Electron)" },
-    signal: AbortSignal.timeout(120_000),
-  });
-  if (!res.ok) {
-    const snippet = (await res.text()).slice(0, 200).replace(/\s+/g, " ");
-    throw new Error(snippet ? `HTTP ${res.status}: ${snippet}` : `HTTP ${res.status}`);
+  console.log("[IPTV] Fetching playlist:", url.slice(0, 120) + (url.length > 120 ? "…" : ""));
+
+  // Try Node fetch first — works for most servers and handles status codes > 599
+  // that Electron's net.fetch cannot represent (e.g. Cloudflare 530).
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      headers: FETCH_HEADERS,
+      signal: AbortSignal.timeout(120_000),
+    });
+    console.log("[IPTV] fetch status:", res.status);
+    if (res.ok) {
+      const text = await res.text();
+      console.log("[IPTV] fetch OK, length:", text.length, "starts:", text.slice(0, 80).replace(/\s+/g, " "));
+      // If the response looks like valid M3U, return it
+      if (text.includes("#EXTINF") || text.includes("#EXTM3U") || /^https?:\/\//m.test(text)) {
+        return text;
+      }
+      // Otherwise the response might be HTML/JSON — fall through
+      console.log("[IPTV] Response is not M3U, trying Xtream API…");
+    } else {
+      console.log("[IPTV] Blocked (HTTP", res.status + "), trying fallbacks…");
+    }
+  } catch (e) {
+    console.log("[IPTV] fetch error:", e?.message);
   }
-  return res.text();
+
+  // Fallback: if this is an Xtream get.php URL, use the player_api.php JSON endpoints
+  const xtream = parseXtreamGetPhpUrl(url);
+  if (xtream) {
+    try {
+      return await buildM3uFromXtreamApi(xtream.base, xtream.username, xtream.password);
+    } catch (e) {
+      console.log("[IPTV] Xtream API fallback failed:", e?.message);
+      // Fall through to hidden window
+    }
+  }
+
+  // Last resort: load in a real browser context to solve Cloudflare challenge
+  return fetchPlaylistViaHiddenWindow(url);
 });
 
 function parseXmltvTimestampMain(raw) {
@@ -1958,15 +2269,208 @@ ipcMain.handle("iptv-libre-translate", async (_evt, rawPayload) => {
 
 const streamRecordings = new Map();
 
+/** One upstream fetch per stream URL — used for MPEG-TS PVR keep-alive recording only. */
+const upstreamHubs = new Map();
+const PVR_RECORD_PENDING_MAX_BYTES = 48 * 1024 * 1024;
+
+function getOrCreateUpstreamHub(url) {
+  const key = assertPlaylistUrlForMain(url);
+  let hub = upstreamHubs.get(key);
+  if (!hub) {
+    hub = {
+      key,
+      url: key,
+      upstream: null,
+      clients: new Set(),
+      keepAliveRefs: 0,
+      connecting: false,
+      reconnectTimer: null,
+      reconnectFails: 0,
+      destroyed: false,
+    };
+    upstreamHubs.set(key, hub);
+  }
+  return hub;
+}
+
+function hubAddKeepAliveRef(hub) {
+  hub.keepAliveRefs += 1;
+}
+
+function hubReleaseKeepAliveRef(hub) {
+  hub.keepAliveRefs = Math.max(0, hub.keepAliveRefs - 1);
+  if (hub.keepAliveRefs === 0 && hub.clients.size === 0) hubDestroy(hub);
+}
+
+function hubDestroy(hub) {
+  if (!hub || hub.destroyed) return;
+  hub.destroyed = true;
+  if (hub.reconnectTimer) {
+    clearTimeout(hub.reconnectTimer);
+    hub.reconnectTimer = null;
+  }
+  if (hub.upstream) {
+    try {
+      hub.upstream.removeAllListeners();
+      hub.upstream.destroy();
+    } catch {
+      /* noop */
+    }
+    hub.upstream = null;
+  }
+  for (const client of hub.clients) {
+    try {
+      client.onHubDestroy?.();
+    } catch {
+      /* noop */
+    }
+  }
+  hub.clients.clear();
+  upstreamHubs.delete(hub.key);
+}
+
+function hubScheduleReconnect(hub) {
+  if (hub.destroyed || hub.reconnectTimer) return;
+  const attempt = hub.reconnectFails || 0;
+  if (attempt > 120) {
+    hubDestroy(hub);
+    return;
+  }
+  const delay = Math.min(15_000, 1200 + attempt * 400);
+  hub.reconnectTimer = setTimeout(() => {
+    hub.reconnectTimer = null;
+    void hubConnectUpstream(hub);
+  }, delay);
+}
+
+function hubOnUpstreamLost(hub) {
+  if (hub.destroyed) return;
+  if (hub.keepAliveRefs > 0 || hub.clients.size > 0) {
+    hubScheduleReconnect(hub);
+    return;
+  }
+  hubDestroy(hub);
+}
+
+async function hubConnectUpstream(hub) {
+  if (hub.destroyed) return;
+  if (hub.upstream && !hub.upstream.destroyed) return;
+  if (hub.connecting) return;
+  hub.connecting = true;
+  try {
+    if (hub.upstream) {
+      try {
+        hub.upstream.removeAllListeners();
+        hub.upstream.destroy();
+      } catch {
+        /* noop */
+      }
+      hub.upstream = null;
+    }
+    console.log(`[PVR-Hub] Connecting upstream: ${hub.url.slice(0, 120)}`);
+    const res = await net.fetch(hub.url, { headers: streamRecordHeaders(hub.url) });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    console.log(`[PVR-Hub] Connected OK, HTTP ${res.status}`);
+    const upstream = Readable.fromWeb(res.body);
+    hub.upstream = upstream;
+    hub.reconnectFails = 0;
+    let hubDataBytes = 0;
+    upstream.on("data", (chunk) => {
+      hubDataBytes += chunk.length;
+      if (hubDataBytes < 200000 || hubDataBytes % 5000000 < chunk.length) {
+        console.log(`[PVR-Hub] Data: ${(hubDataBytes / 1024).toFixed(0)} KB total, ${hub.clients.size} client(s)`);
+      }
+      for (const client of hub.clients) {
+        try {
+          client.onData(chunk);
+        } catch {
+          /* noop */
+        }
+      }
+    });
+    upstream.on("error", () => {
+      hub.upstream = null;
+      hub.reconnectFails = (hub.reconnectFails || 0) + 1;
+      hubOnUpstreamLost(hub);
+    });
+    upstream.on("end", () => {
+      hub.upstream = null;
+      hub.reconnectFails = (hub.reconnectFails || 0) + 1;
+      hubOnUpstreamLost(hub);
+    });
+  } catch {
+    hub.reconnectFails = (hub.reconnectFails || 0) + 1;
+    hubOnUpstreamLost(hub);
+  } finally {
+    hub.connecting = false;
+  }
+}
+
+function hubSubscribe(hub, client) {
+  hub.clients.add(client);
+  void hubConnectUpstream(hub);
+}
+
+function hubUnsubscribe(hub, client) {
+  hub.clients.delete(client);
+  if (hub.keepAliveRefs === 0 && hub.clients.size === 0) hubDestroy(hub);
+}
+
+/** Fan-out hub bytes into a PassThrough for recording; survives upstream reconnects without ending. */
+function createHubRecordingStream(url, keepAlive) {
+  const hub = getOrCreateUpstreamHub(url);
+  if (keepAlive) hubAddKeepAliveRef(hub);
+  const pt = new PassThrough({ highWaterMark: 4 * 1024 * 1024 });
+  let pending = [];
+  let pendingBytes = 0;
+  const flushPending = () => {
+    while (pending.length && pt.write(pending[0]) !== false) {
+      pendingBytes -= pending[0].length;
+      pending.shift();
+    }
+    if (!pending.length) pendingBytes = 0;
+  };
+  pt.on("drain", flushPending);
+  const client = {
+    onData(chunk) {
+      if (pt.destroyed) return;
+      if (pt.write(chunk) === false) {
+        pending.push(chunk);
+        pendingBytes += chunk.length;
+        while (pendingBytes > PVR_RECORD_PENDING_MAX_BYTES && pending.length > 1) {
+          pendingBytes -= pending.shift().length;
+        }
+      }
+    },
+    onHubDestroy() {
+      try {
+        pt.destroy();
+      } catch {
+        /* noop */
+      }
+    },
+  };
+  hubSubscribe(hub, client);
+  const teardown = () => {
+    hubUnsubscribe(hub, client);
+    if (keepAlive) hubReleaseKeepAliveRef(hub);
+  };
+  return { stream: pt, hubKey: hub.key, teardown };
+}
+
 /** Set when the static server starts; used for same-origin tap URLs in IPC. */
 let rendererOrigin = null;
 
 function streamRecordHeaders(targetUrl) {
   const u = new URL(targetUrl);
+  const isVod = /\.(mkv|mp4|avi|mov|mka)/i.test(targetUrl);
+  // Use VLC-like user agent for VOD files - some IPTV servers block browsers
   return {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "User-Agent": isVod
+      ? "VLC/3.0.18 LibVLC/3.0.18"
+      : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
     Referer: `${u.origin}/`,
+    ...(isVod ? { Accept: "*/*", "Icy-MetaData": "1" } : {}),
   };
 }
 
@@ -2008,6 +2512,24 @@ ipcMain.handle("iptv-get-stream-proxy-origins", () => ({
   origins: streamProxyOriginsForIpc ?? [],
   token: streamProxySessionToken ?? "",
 }));
+
+// Helper to test if direct URL works (bypass proxy for MKV debugging)
+ipcMain.handle("iptv-test-direct-url", async (_evt, url) => {
+  try {
+    console.log(`[DirectURL] Testing: ${url?.slice(0, 120)}`);
+    const u = new URL(url);
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      Referer: `${u.origin}/`,
+    };
+    const res = await net.fetch(url, { method: "HEAD", headers, timeout: 15000 });
+    console.log(`[DirectURL] Response: ${res.status} ${res.statusText}`);
+    return { ok: res.ok, status: res.status, statusText: res.statusText };
+  } catch (e) {
+    console.error(`[DirectURL] Failed:`, e instanceof Error ? e.message : String(e));
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
 
 ipcMain.handle("iptv-set-split-screen-preference", (_evt, enabled) => {
   splitScreenPreferenceEnabled = !!enabled;
@@ -2717,46 +3239,71 @@ async function remuxMkvInputToHls(ffmpegPath, baseArgs, hlsDir, opts = {}) {
 
   let lastErr = null;
   const cacheKey = opts.cacheKey;
+  const directUrl = opts.directUrl; // Fallback direct URL if proxy fails
 
-  for (const attempt of encodeAttempts) {
-    await resetHlsDir();
-    const args = [...baseArgs, ...attempt.extra];
-    if (cacheKey) stopMkvPrepareChild(cacheKey);
-    const { child, done } = spawnFfmpegProcess(ffmpegPath, args);
-    if (cacheKey) {
-      mkvPrepareChildren.set(cacheKey, child);
-      mkvPlaybackSessions.set(cacheKey, { hlsDir, child });
-    }
-    try {
-      await waitForPlayableHls(hlsDir, child, opts.prepareTimeoutMs ?? 120_000);
-      void done.finally(() => {
-        if (cacheKey) {
-          mkvPrepareChildren.delete(cacheKey);
-          const session = mkvPlaybackSessions.get(cacheKey);
-          if (session) session.child = null;
-        }
-        void cleanupMkvCache();
-      });
-      const httpPlayUrl = cacheKey ? mkvHttpHlsPlayUrl(cacheKey) : null;
-      if (!httpPlayUrl || !/^https?:\/\//i.test(httpPlayUrl)) {
-        throw new Error("MKV HLS playback URL is not ready (restart the desktop app).");
+  // Try with proxy first, then fallback to direct URL if provided
+  const attempts = [{ useProxy: true }];
+  if (directUrl) attempts.push({ useProxy: false, directUrl });
+
+  for (const { useProxy, directUrl: attemptDirect } of attempts) {
+    for (let ai = 0; ai < encodeAttempts.length; ai++) {
+      const attempt = encodeAttempts[ai];
+      await resetHlsDir();
+      // Rebuild base args if using direct URL
+      let inputUrl;
+      let args;
+      if (useProxy) {
+        args = [...baseArgs, ...attempt.extra];
+        console.log(`[MKV-HLS] Attempt ${ai + 1}/${encodeAttempts.length} (proxy): transcode=${attempt.usedTranscode}`);
+      } else {
+        // Rebuild args with direct URL
+        const directBaseArgs = mkvRemoteInputArgs(attemptDirect, attemptDirect);
+        args = [...directBaseArgs, ...attempt.extra];
+        console.log(`[MKV-HLS] Attempt ${ai + 1}/${encodeAttempts.length} (direct): transcode=${attempt.usedTranscode}`);
+        console.log(`[MKV-HLS] Direct URL:`, attemptDirect?.slice(0, 150));
       }
-      return {
-        playUrl: httpPlayUrl,
-        mimeType: "application/vnd.apple.mpegurl",
-        playbackFormat: "hls",
-        usedTranscode: attempt.usedTranscode,
-        remuxed: attempt.remuxed,
-        streaming: true,
-      };
-    } catch (e) {
+      if (cacheKey) stopMkvPrepareChild(cacheKey);
+      const { child, done, readStderrTail } = spawnFfmpegProcess(ffmpegPath, args);
+      if (cacheKey) {
+        mkvPrepareChildren.set(cacheKey, child);
+        mkvPlaybackSessions.set(cacheKey, { hlsDir, child });
+      }
       try {
-        child.kill("SIGKILL");
-      } catch {
-        /* noop */
+        await waitForPlayableHls(hlsDir, child, opts.prepareTimeoutMs ?? 120_000);
+        console.log(`[MKV-HLS] Attempt ${ai + 1} SUCCEEDED — HLS segments ready.`);
+        void done.finally(() => {
+          if (cacheKey) {
+            mkvPrepareChildren.delete(cacheKey);
+            const session = mkvPlaybackSessions.get(cacheKey);
+            if (session) session.child = null;
+          }
+          void cleanupMkvCache();
+        });
+        const httpPlayUrl = cacheKey ? mkvHttpHlsPlayUrl(cacheKey) : null;
+        console.log("[MKV-HLS] playUrl:", httpPlayUrl?.slice(0, 200));
+        if (!httpPlayUrl || !/^https?:\/\//i.test(httpPlayUrl)) {
+          throw new Error("MKV HLS playback URL is not ready (restart the desktop app).");
+        }
+        return {
+          playUrl: httpPlayUrl,
+          mimeType: "application/vnd.apple.mpegurl",
+          playbackFormat: "hls",
+          usedTranscode: attempt.usedTranscode,
+          remuxed: attempt.remuxed,
+          streaming: true,
+        };
+      } catch (e) {
+        const stderr = typeof readStderrTail === "function" ? readStderrTail() : "";
+        console.error(`[MKV-HLS] Attempt ${ai + 1} FAILED:`, e?.message || e);
+        if (stderr) console.error(`[MKV-HLS] FFmpeg stderr:\n${stderr.slice(-600)}`);
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* noop */
+        }
+        if (cacheKey) mkvPrepareChildren.delete(cacheKey);
+        lastErr = e;
       }
-      if (cacheKey) mkvPrepareChildren.delete(cacheKey);
-      lastErr = e;
     }
   }
 
@@ -2826,6 +3373,8 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     fileUrlRaw && typeof fileUrlRaw === "object" && typeof fileUrlRaw.url === "string"
       ? String(fileUrlRaw.url).trim()
       : String(fileUrlRaw ?? "").trim();
+  const forceRemux = fileUrlRaw && typeof fileUrlRaw === "object" && fileUrlRaw.forceRemux === true;
+  console.log("[MKV] prepare-mkv-playback called, sourceUrl:", sourceUrl?.slice(0, 200), "forceRemux:", forceRemux);
   if (!sourceUrl) throw new Error("Missing video URL.");
 
   const isFile = /^file:/i.test(sourceUrl);
@@ -2859,14 +3408,20 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
     pathname = "";
   }
   const isXtreamVod = /\/(movie|series)\//i.test(pathname);
-  const nativeBrowserExt = new Set([".mp4", ".webm", ".m4v", ".mov"]);
-  const needsRemux =
-    ext === ".mkv" ||
-    ext === ".mka" ||
-    (isXtreamVod && !nativeBrowserExt.has(ext) && !/\.m3u8$/i.test(ext));
+  // Only MKV/MKA files need remuxing. MP4/WebM/MOV files in VOD paths play directly.
+  const needsRemux = ext === ".mkv" || ext === ".mka";
 
+  // If it's not MKV/MKA, return direct URL (works for MP4, WebM, etc.)
   if (!needsRemux) {
-    return { playUrl: sourceUrl, mimeType: undefined, usedTranscode: false };
+    console.log("[MKV] Direct playback (no remux needed):", ext || "unknown ext", "isXtreamVod:", isXtreamVod);
+    return {
+      playUrl: sourceUrl,
+      mimeType: ext === ".mp4" ? "video/mp4" : ext === ".webm" ? "video/webm" : undefined,
+      usedTranscode: false,
+      remuxed: false,
+      direct: true,
+      playbackFormat: "direct",
+    };
   }
 
   const ffmpegPath = getBundledFfmpegPath();
@@ -2947,16 +3502,39 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
   if (inflight) return inflight;
 
   const work = (async () => {
+    // For remote MKV files, first try direct streaming (like VLC does)
+    // Only remux if direct playback fails in the player
+    if (isRemote && ext === ".mkv" && !forceRemux) {
+      console.log("[MKV] Attempting direct streaming first (VLC-style)...");
+      console.log("[MKV] Direct URL:", upstreamUrl?.slice(0, 200));
+      // Return direct URL and let player try - if it fails, player will retry with remux
+      return {
+        playUrl: upstreamUrl,
+        mimeType: "video/x-matroska",
+        playbackFormat: "direct",
+        usedTranscode: false,
+        remuxed: false,
+        streaming: true,
+        direct: true,
+      };
+    }
+
     const ffmpegInputUrl = isFile ? assertUserAccessibleMediaPath(inPath) : localProxyStreamUrl(upstreamUrl);
+    console.log("[MKV] ffmpegInputUrl:", ffmpegInputUrl?.slice(0, 200));
+    console.log("[MKV] isFile:", isFile, "isRemote:", isRemote, "ext:", ext, "isXtreamVod:", isXtreamVod);
+    console.log("[MKV] cacheKey:", cacheKey, "hlsDir:", hlsDir);
     const baseArgs = isFile
       ? ["-nostdin", "-hide_banner", "-loglevel", "warning", "-y", "-i", ffmpegInputUrl]
       : mkvRemoteInputArgs(ffmpegInputUrl, upstreamUrl);
     if (isRemote && hlsDir) {
+      console.log("[MKV] Starting HLS remux…");
       return remuxMkvInputToHls(ffmpegPath, baseArgs, hlsDir, {
         cacheKey,
         prepareTimeoutMs: 120_000,
+        directUrl: upstreamUrl, // Fallback to direct URL if proxy fails
       });
     }
+    console.log("[MKV] Starting MP4 remux…");
     const result = await remuxMkvInputToCachedMp4(ffmpegPath, baseArgs, outPath, { cacheKey });
     void cleanupMkvCache();
     return result;
@@ -2970,7 +3548,242 @@ ipcMain.handle("iptv-prepare-mkv-playback", async (_evt, fileUrlRaw) => {
   }
 });
 
-function createRecordingOutput(filePath, tapMime) {
+/** Shared FFmpeg args to mux live/HLS/MPEG-TS captures into MP4 with audible audio. */
+function buildStreamRecordingToMp4Attempts(input, outputPath, opts = {}) {
+  const inputIsUrl = !!opts.inputIsUrl;
+  const inputUrl = typeof opts.inputUrl === "string" ? opts.inputUrl : "";
+  const compact = opts.compact !== false;
+  const head = ["-hide_banner", "-loglevel", "warning", "-y"];
+  if (inputIsUrl && inputUrl && isLikelyHlsRecordUrl(inputUrl)) {
+    head.push(
+      "-protocol_whitelist",
+      "file,http,https,tcp,tls,crypto",
+      "-allowed_extensions",
+      "ALL"
+    );
+  }
+  if (inputIsUrl && inputUrl) {
+    const headerLines = ffmpegHeaderLinesForUrl(inputUrl);
+    if (headerLines) head.push("-headers", headerLines);
+    head.push("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "15");
+  }
+  head.push(
+    "-fflags",
+    "+genpts+discardcorrupt",
+    "-probesize",
+    "64M",
+    "-analyzeduration",
+    "20M",
+    "-i",
+    input,
+    "-sn",
+    "-dn"
+  );
+  const tail = ["-max_muxing_queue_size", "4096", "-movflags", "+faststart", outputPath];
+  const encodeAudioCompact = [
+    "-c:a",
+    "aac",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-b:a",
+    "96k",
+    "-af",
+    "aresample=async=1:first_pts=0",
+    "-bsf:a",
+    "aac_adtstoasc",
+  ];
+  const encodeAudioStandard = [
+    "-c:a",
+    "aac",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "-b:a",
+    "128k",
+    "-af",
+    "aresample=async=1:first_pts=0",
+    "-bsf:a",
+    "aac_adtstoasc",
+  ];
+  const compactVideoEncode = [
+    "-map",
+    "0:v:0?",
+    "-map",
+    "0:a?",
+    "-vf",
+    "scale=1280:-2:force_original_aspect_ratio=decrease",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "veryfast",
+    "-crf",
+    "26",
+    "-maxrate",
+    "2500k",
+    "-bufsize",
+    "5000k",
+    ...encodeAudioCompact,
+  ];
+  const copyAttempts = [
+    ["-map", "0:v:0?", "-map", "0:a?", "-c:v", "copy", ...encodeAudioStandard],
+    ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "copy", "-bsf:a", "aac_adtstoasc"],
+    ["-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "copy", ...encodeAudioStandard],
+    ["-map", "0:a?", "-c:a", "copy", "-bsf:a", "aac_adtstoasc"],
+    ["-map", "0:a?", ...encodeAudioStandard],
+  ];
+  const mapAttempts = compact ? [compactVideoEncode, ...copyAttempts] : copyAttempts;
+  return mapAttempts.map((maps) => [...head, ...maps, ...tail]);
+}
+
+async function runStreamRecordingToMp4(ffmpegPath, input, outputPath, opts = {}) {
+  const attempts = buildStreamRecordingToMp4Attempts(input, outputPath, opts);
+  let lastErr = null;
+  for (const args of attempts) {
+    try {
+      await runFfmpeg(ffmpegPath, args);
+      return;
+    } catch (e) {
+      lastErr = e;
+      try {
+        fs.unlinkSync(outputPath);
+      } catch {
+        /* noop */
+      }
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("Could not finalize recording with audio.");
+}
+
+function recordingSegmentTmpPath(filePath, index) {
+  const base = filePath.replace(/\.mp4$/i, "");
+  return `${base}.part${String(index).padStart(3, "0")}.ts`;
+}
+
+function buildHlsRecordingToTsAttempts(inputUrl, outputTsPath) {
+  const head = ["-hide_banner", "-loglevel", "warning", "-y"];
+  if (isLikelyHlsRecordUrl(inputUrl)) {
+    head.push("-protocol_whitelist", "file,http,https,tcp,tls,crypto", "-allowed_extensions", "ALL");
+  }
+  const headerLines = ffmpegHeaderLinesForUrl(inputUrl);
+  if (headerLines) head.push("-headers", headerLines);
+  head.push(
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "15",
+    "-fflags",
+    "+genpts+discardcorrupt",
+    "-probesize",
+    "64M",
+    "-analyzeduration",
+    "20M",
+    "-i",
+    inputUrl,
+    "-sn",
+    "-dn",
+    "-c",
+    "copy",
+    "-f",
+    "mpegts",
+    outputTsPath
+  );
+  return [head];
+}
+
+async function waitForWriteStreamEnd(ws) {
+  if (!ws || ws.writableEnded || ws.destroyed) return;
+  await new Promise((resolve, reject) => {
+    ws.once("finish", resolve);
+    ws.once("error", reject);
+    ws.end();
+  });
+}
+
+async function muxRecordingSegmentsToMp4(ffmpegPath, segmentPaths, outputPath, compact) {
+  const paths = segmentPaths.filter((p) => {
+    try {
+      return fs.statSync(p).size > 0;
+    } catch {
+      return false;
+    }
+  });
+  if (!paths.length) throw new Error("No recording data captured.");
+  if (paths.length === 1) {
+    await runStreamRecordingToMp4(ffmpegPath, paths[0], outputPath, { inputIsUrl: false, compact });
+    try {
+      fs.unlinkSync(paths[0]);
+    } catch {
+      /* noop */
+    }
+    return;
+  }
+  const listPath = `${outputPath}.concat.txt`;
+  const esc = (p) => p.replace(/\\/g, "/").replace(/'/g, "'\\''");
+  fs.writeFileSync(listPath, paths.map((p) => `file '${esc(p)}'`).join("\n"), "utf8");
+  try {
+    await runFfmpeg(ffmpegPath, [
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-y",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      listPath,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+  } catch {
+    const merged = `${outputPath}.merged.ts`;
+    await runFfmpeg(ffmpegPath, [
+      "-hide_banner",
+      "-loglevel",
+      "warning",
+      "-y",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      listPath,
+      "-c",
+      "copy",
+      merged,
+    ]);
+    await runStreamRecordingToMp4(ffmpegPath, merged, outputPath, { inputIsUrl: false, compact });
+    try {
+      fs.unlinkSync(merged);
+    } catch {
+      /* noop */
+    }
+  } finally {
+    try {
+      fs.unlinkSync(listPath);
+    } catch {
+      /* noop */
+    }
+    for (const p of paths) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* noop */
+      }
+    }
+  }
+}
+
+function createRecordingOutput(filePath, tapMime, compact = true, opts = {}) {
+  const deferMux = !!opts.deferMux;
   if (tapMime !== "video/mp2t") {
     const ws = fs.createWriteStream(filePath, { flags: "w", highWaterMark: 4 * 1024 * 1024 });
     const done = new Promise((resolve, reject) => {
@@ -2978,43 +3791,29 @@ function createRecordingOutput(filePath, tapMime) {
       ws.once("error", reject);
     });
     done.catch(() => {});
-    return { writable: ws, done, kind: "raw" };
+    return { writable: ws, done, kind: "raw", deferMux: false };
   }
 
   const ffmpegPath = getBundledFfmpegPath();
   if (!ffmpegPath) {
     throw new Error("FFmpeg is required to save IPTV video recordings as MP4.");
   }
-  const tmpPath = `${filePath}.recording.ts`;
+  const segmentIndex = typeof opts.segmentIndex === "number" ? opts.segmentIndex : 0;
+  const tmpPath =
+    typeof opts.segmentTmpPath === "string" && opts.segmentTmpPath
+      ? opts.segmentTmpPath
+      : deferMux
+        ? recordingSegmentTmpPath(filePath, segmentIndex)
+        : `${filePath}.recording.ts`;
   const ws = fs.createWriteStream(tmpPath, { flags: "w", highWaterMark: 16 * 1024 * 1024 });
   const done = new Promise((resolve, reject) => {
     ws.once("error", reject);
     ws.once("finish", () => {
-      runFfmpeg(ffmpegPath, [
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-y",
-        "-fflags",
-        "+genpts",
-        "-i",
-        tmpPath,
-        "-map",
-        "0:v:0?",
-        "-map",
-        "0:a:0?",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-max_muxing_queue_size",
-        "2048",
-        "-movflags",
-        "+faststart",
-        filePath,
-      ])
+      if (deferMux) {
+        resolve();
+        return;
+      }
+      runStreamRecordingToMp4(ffmpegPath, tmpPath, filePath, { inputIsUrl: false, compact })
         .then(() => {
           try {
             fs.unlinkSync(tmpPath);
@@ -3027,7 +3826,7 @@ function createRecordingOutput(filePath, tapMime) {
     });
   });
   done.catch(() => {});
-  return { writable: ws, done, kind: "mp4", tmpPath };
+  return { writable: ws, done, kind: "mp4", tmpPath, deferMux };
 }
 
 function ffmpegHeaderLinesForUrl(url) {
@@ -3037,47 +3836,67 @@ function ffmpegHeaderLinesForUrl(url) {
     .join("\r\n");
 }
 
-function startFfmpegHlsRecording(id, url, filePath) {
+function startFfmpegHlsRecording(id, url, filePath, compact = true, meta = {}) {
   const ffmpegPath = getBundledFfmpegPath();
   if (!ffmpegPath) {
     throw new Error("FFmpeg is required to record HLS (.m3u8) streams.");
   }
-  const headerLines = ffmpegHeaderLinesForUrl(url);
-  const args = [
-    "-hide_banner",
-    "-loglevel",
-    "warning",
-    "-y",
-    "-headers",
-    headerLines,
-    "-i",
-    url,
-    "-map",
-    "0:v:0?",
-    "-map",
-    "0:a:0?",
-    "-c:v",
-    "copy",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
-    "-max_muxing_queue_size",
-    "2048",
-    "-movflags",
-    "+faststart",
-    filePath,
-  ];
+  const keepAlive = !!meta.keepAlive;
+  const recordUntilMs = typeof meta.recordUntilMs === "number" ? meta.recordUntilMs : 0;
+  const prev = streamRecordings.get(id);
+  const segmentIndex =
+    typeof meta.segmentIndex === "number" ? meta.segmentIndex : prev?.segmentIndex ?? 0;
+  const segmentPath = keepAlive ? recordingSegmentTmpPath(filePath, segmentIndex) : filePath;
+  const args = keepAlive
+    ? buildHlsRecordingToTsAttempts(url, segmentPath)
+    : buildStreamRecordingToMp4Attempts(url, filePath, {
+        inputIsUrl: true,
+        inputUrl: url,
+        compact,
+      })[0];
   const child = spawn(ffmpegPath, args, { windowsHide: process.platform === "win32" });
   const stderrChunks = [];
   child.stderr?.on("data", (d) => {
     stderrChunks.push(d);
     while (stderrChunks.length > 32) stderrChunks.shift();
   });
-  const done = new Promise((resolve, reject) => {
+  let finalizeResolve = prev?.finalizeResolve;
+  let finalizeReject = prev?.finalizeReject;
+  const finalizeDone =
+    prev?.done ||
+    new Promise((resolve, reject) => {
+      finalizeResolve = resolve;
+      finalizeReject = reject;
+    });
+  const childDone = new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code, signal) => {
-      streamRecordings.delete(id);
+      const h = streamRecordings.get(id);
+      if (h?.keepAlive && !h.stopped && h.recordUntilMs > Date.now()) {
+        if (h.segmentPath) {
+          h.segmentPaths = h.segmentPaths || [];
+          try {
+            if (fs.statSync(h.segmentPath).size > 0) h.segmentPaths.push(h.segmentPath);
+          } catch {
+            /* noop */
+          }
+        }
+        h.reconnectAttempt = (h.reconnectAttempt || 0) + 1;
+        if (h.reconnectAttempt <= 60) {
+          const nextIndex = (h.segmentIndex ?? 0) + 1;
+          setTimeout(() => {
+            try {
+              startFfmpegHlsRecording(id, url, filePath, compact, {
+                ...meta,
+                segmentIndex: nextIndex,
+              });
+            } catch {
+              void finalizeRecordingStream(id);
+            }
+          }, 2500);
+          return;
+        }
+      }
       if (code === 0 || code === 255 || signal === "SIGINT" || signal === "SIGTERM") {
         resolve();
         return;
@@ -3086,33 +3905,319 @@ function startFfmpegHlsRecording(id, url, filePath) {
       reject(new Error(stderr || `FFmpeg exited with code ${code ?? "unknown"}.`));
     });
   });
-  done.catch(() => {});
+  childDone.catch(() => {});
   streamRecordings.set(id, {
     child,
     filePath,
-    done,
+    done: keepAlive ? finalizeDone : childDone,
     tapRes: null,
     tapMime: "application/octet-stream",
-    tmpPath: null,
+    tmpPath: keepAlive ? segmentPath : null,
+    segmentPath: keepAlive ? segmentPath : null,
+    segmentPaths: prev?.segmentPaths || [],
+    segmentIndex,
     upstream: null,
     ws: null,
+    keepAlive,
+    recordUntilMs,
+    url,
+    compact,
+    stopped: prev?.stopped ?? false,
+    finalizing: false,
+    reconnectAttempt: prev?.reconnectAttempt || 0,
+    finalizeResolve: prev?.finalizeResolve ?? finalizeResolve,
+    finalizeReject: prev?.finalizeReject ?? finalizeReject,
+    stopTimer:
+      prev?.stopTimer ||
+      (keepAlive && recordUntilMs > Date.now()
+        ? setTimeout(() => void finalizeRecordingStream(id), recordUntilMs - Date.now())
+        : null),
   });
+  if (!keepAlive) {
+    childDone.then(() => streamRecordings.delete(id)).catch(() => streamRecordings.delete(id));
+  }
   return { ok: true, id, filePath, playbackUrl: null };
 }
 
-function attachRecordingFanout(id, upstream, recordOutput, filePath, tapMime) {
-  const ws = recordOutput.writable;
-  const handle = {
-    upstream,
-    ws,
-    filePath,
-    tapRes: null,
-    tapMime: tapMime || "video/mp2t",
-    done: recordOutput.done,
-    ffmpeg: recordOutput.child || null,
-    tmpPath: recordOutput.tmpPath || null,
+async function finalizeKeepAliveRecording(id) {
+  const h = streamRecordings.get(id);
+  if (!h?.keepAlive || !h.filePath) return;
+  console.log(`[PVR] Finalizing recording ${id}: filePath=${h.filePath}`);
+  const ffmpegPath = getBundledFfmpegPath();
+  if (!ffmpegPath) throw new Error("FFmpeg is required to finalize PVR recordings.");
+  if (h.ws && !h.ws.writableEnded) {
+    console.log(`[PVR] Ending write stream for ${id}…`);
+    try {
+      await waitForWriteStreamEnd(h.ws);
+    } catch (e) {
+      console.log(`[PVR] Write stream end error for ${id}:`, e?.message);
+    }
+  }
+  if (h.child && !h.child.killed) {
+    console.log(`[PVR] Stopping FFmpeg child for ${id}…`);
+    await new Promise((resolve) => {
+      const onClose = () => resolve();
+      h.child.once("close", onClose);
+      try {
+        h.child.kill("SIGINT");
+      } catch {
+        resolve();
+      }
+      setTimeout(resolve, 4000);
+    });
+  }
+  const segments = [...(h.segmentPaths || [])];
+  if (h.tmpPath) {
+    try {
+      if (fs.statSync(h.tmpPath).size > 0) segments.push(h.tmpPath);
+    } catch {
+      /* noop */
+    }
+  }
+  if (h.segmentPath) {
+    try {
+      if (fs.statSync(h.segmentPath).size > 0 && !segments.includes(h.segmentPath)) {
+        segments.push(h.segmentPath);
+      }
+    } catch {
+      /* noop */
+    }
+  }
+  console.log(`[PVR] Muxing ${segments.length} segment(s) to ${h.filePath}`);
+  if (!segments.length) {
+    console.log(`[PVR] WARNING: No segments captured for ${id}. Nothing to mux.`);
+    return;
+  }
+  for (const seg of segments) {
+    try {
+      const sz = fs.statSync(seg).size;
+      console.log(`[PVR]   segment: ${path.basename(seg)} (${(sz / 1024).toFixed(0)} KB)`);
+    } catch { /* noop */ }
+  }
+  try {
+    await muxRecordingSegmentsToMp4(ffmpegPath, segments, h.filePath, h.compact !== false);
+    console.log(`[PVR] Mux complete: ${h.filePath}`);
+  } catch (e) {
+    console.error(`[PVR] Mux FAILED for ${id}:`, e?.message || e);
+    throw e;
+  }
+}
+
+async function finalizeRecordingStream(id) {
+  const h = streamRecordings.get(id);
+  if (!h || h.finalizing) return;
+  h.finalizing = true;
+  h.stopped = true;
+  if (h._dataLogInterval) {
+    clearInterval(h._dataLogInterval);
+    h._dataLogInterval = null;
+  }
+  if (h.stopTimer) {
+    clearTimeout(h.stopTimer);
+    h.stopTimer = null;
+  }
+  if (h.reconnectTimer) {
+    clearTimeout(h.reconnectTimer);
+    h.reconnectTimer = null;
+  }
+  try {
+    if (h.hubTeardown) {
+      try {
+        h.hubTeardown();
+      } catch {
+        /* noop */
+      }
+      h.hubTeardown = null;
+    }
+  } catch {
+    /* noop */
+  }
+  try {
+    if (h.upstream) {
+      h.upstream.removeAllListeners();
+      try { h.upstream.destroy(); } catch { /* noop */ }
+    }
+  } catch {
+    /* noop */
+  }
+  try {
+    if (h.tapRes && !h.tapRes.writableEnded) {
+      h.tapRes.removeAllListeners("drain");
+      h.tapRes.end();
+    }
+  } catch {
+    /* noop */
+  }
+  try {
+    if (h.keepAlive) {
+      console.log(`[PVR] finalizeRecordingStream(${id}): keepAlive path`);
+      await finalizeKeepAliveRecording(id);
+      if (h.finalizeResolve) h.finalizeResolve();
+    } else if (h.ws && !h.ws.writableEnded) {
+      h.ws.end();
+    }
+  } catch (e) {
+    console.error(`[PVR] finalizeRecordingStream(${id}) error:`, e?.message || e);
+    if (h.finalizeReject) h.finalizeReject(e);
+    throw e;
+  }
+  streamRecordings.delete(id);
+}
+
+async function rotateRecordingSegment(id) {
+  const h = streamRecordings.get(id);
+  if (!h || h.stopped || h.finalizing || h.rotating) return;
+  if (!h.keepAlive || !h.url || Date.now() >= h.recordUntilMs) {
+    await finalizeRecordingStream(id);
+    return;
+  }
+  h.rotating = true;
+  try {
+    if (h.upstream && !h.hubKey) {
+      try {
+        h.upstream.removeAllListeners();
+        h.upstream.destroy();
+      } catch {
+        /* noop */
+      }
+      h.upstream = null;
+    }
+    if (h.ws && !h.ws.writableEnded) {
+      await waitForWriteStreamEnd(h.ws);
+    }
+    if (h.tmpPath) {
+      h.segmentPaths = h.segmentPaths || [];
+      try {
+        if (fs.statSync(h.tmpPath).size > 0) h.segmentPaths.push(h.tmpPath);
+      } catch {
+        /* noop */
+      }
+    }
+    const nextIndex = (h.segmentIndex ?? 0) + 1;
+    const nextTmp = recordingSegmentTmpPath(h.filePath, nextIndex);
+    const recordOutput = createRecordingOutput(h.filePath, h.tapMime || "video/mp2t", h.compact !== false, {
+      deferMux: true,
+      segmentTmpPath: nextTmp,
+      segmentIndex: nextIndex,
+    });
+    h.segmentIndex = nextIndex;
+    h.ws = recordOutput.writable;
+    h.tmpPath = nextTmp;
+    h.lastSegmentRotateAt = Date.now();
+    h.reconnecting = false;
+    await reconnectRecordingUpstream(id);
+  } catch {
+    const fails = (h.reconnectFail || 0) + 1;
+    h.reconnectFail = fails;
+    if (fails > 25 || Date.now() >= h.recordUntilMs) {
+      await finalizeRecordingStream(id);
+    } else {
+      h.reconnectTimer = setTimeout(() => {
+        h.reconnectTimer = null;
+        void reconnectRecordingUpstream(id);
+      }, 2500);
+    }
+  } finally {
+    if (streamRecordings.get(id)) h.rotating = false;
+  }
+}
+
+async function reconnectRecordingUpstream(id) {
+  const h = streamRecordings.get(id);
+  if (!h || h.stopped || h.finalizing) return;
+  if (!h.keepAlive || !h.url) {
+    void finalizeRecordingStream(id);
+    return;
+  }
+  if (Date.now() >= h.recordUntilMs) {
+    void finalizeRecordingStream(id);
+    return;
+  }
+  if (h.reconnecting || h.rotating) return;
+  h.reconnecting = true;
+  try {
+    if (h.hubKey) {
+      const hub = upstreamHubs.get(h.hubKey);
+      if (hub) {
+        await hubConnectUpstream(hub);
+        h.reconnectFail = 0;
+        return;
+      }
+    }
+    if (h.upstream) {
+      try {
+        h.upstream.removeAllListeners();
+        if (!h.hubKey) h.upstream.destroy();
+      } catch {
+        /* noop */
+      }
+      if (!h.hubKey) h.upstream = null;
+    }
+    if (h.hubKey) return;
+    const res = await net.fetch(h.url, { headers: streamRecordHeaders(h.url) });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    const upstream = Readable.fromWeb(res.body);
+    h.reconnectFail = 0;
+    h.reconnectAttempt = (h.reconnectAttempt || 0) + 1;
+    bindRecordingUpstream(id, upstream);
+  } catch {
+    const attempt = (h.reconnectFail || 0) + 1;
+    h.reconnectFail = attempt;
+    if (attempt > 80 || Date.now() >= h.recordUntilMs) {
+      void finalizeRecordingStream(id);
+      return;
+    }
+    const delay = Math.min(15_000, 1500 + attempt * 500);
+    h.reconnectTimer = setTimeout(() => {
+      h.reconnectTimer = null;
+      void reconnectRecordingUpstream(id);
+    }, delay);
+  } finally {
+    h.reconnecting = false;
+  }
+}
+
+async function handleRecordingUpstreamLost(id, reason) {
+  const h = streamRecordings.get(id);
+  if (!h || h.stopped || h.finalizing || h.rotating || h.reconnecting) return;
+  if (!h.keepAlive || !h.url || Date.now() >= h.recordUntilMs) {
+    void finalizeRecordingStream(id);
+    return;
+  }
+  const wsAlive = h.ws && !h.ws.writableEnded;
+  if (wsAlive) {
+    await reconnectRecordingUpstream(id);
+    return;
+  }
+  const now = Date.now();
+  const sinceRotate = h.lastSegmentRotateAt ? now - h.lastSegmentRotateAt : Infinity;
+  if (sinceRotate < 45_000 && (h.reconnectFail || 0) < 5) {
+    await reconnectRecordingUpstream(id);
+    return;
+  }
+  void rotateRecordingSegment(id);
+}
+
+function bindRecordingUpstream(id, upstream) {
+  const h = streamRecordings.get(id);
+  if (!h || h.stopped || h.finalizing) return;
+  h.upstream = upstream;
+  const bp = h._bp || (h._bp = { fileOk: true, tapOk: true });
+  const pending = h._pendingChunks || (h._pendingChunks = []);
+  let pendingBytes = h._pendingBytes || 0;
+  const ws = h.ws;
+
+  const flushPendingToDisk = () => {
+    while (pending.length && ws && !ws.writableEnded) {
+      const chunk = pending[0];
+      if (ws.write(chunk) === false) break;
+      pendingBytes -= chunk.length;
+      pending.shift();
+    }
+    if (!pending.length) pendingBytes = 0;
+    h._pendingBytes = pendingBytes;
+    if (!pending.length) bp.fileOk = true;
   };
-  const bp = { fileOk: true, tapOk: true };
 
   const resumeIfReady = () => {
     if (!upstream.isPaused()) return;
@@ -3120,73 +4225,208 @@ function attachRecordingFanout(id, upstream, recordOutput, filePath, tapMime) {
   };
 
   const fail = () => {
-    teardownRecording(id, true);
+    if (h.keepAlive && !h.stopped && Date.now() < h.recordUntilMs) {
+      void handleRecordingUpstreamLost(id, "error");
+      return;
+    }
+    void finalizeRecordingStream(id);
   };
 
   upstream.on("data", (chunk) => {
-    bp.fileOk = ws.write(chunk) !== false;
-    if (handle.tapRes && !handle.tapRes.writableEnded) {
+    if (h.tapRes && !h.tapRes.writableEnded) {
       try {
-        bp.tapOk = handle.tapRes.write(chunk) !== false;
+        bp.tapOk = h.tapRes.write(chunk) !== false;
       } catch {
         bp.tapOk = true;
         try {
-          handle.tapRes.removeAllListeners("drain");
-          handle.tapRes.destroy();
+          h.tapRes.removeAllListeners("drain");
+          h.tapRes.destroy();
         } catch {
           /* noop */
         }
-        handle.tapRes = null;
+        h.tapRes = null;
       }
     } else {
       bp.tapOk = true;
     }
-    if (!bp.tapOk || (!handle.tapRes && !bp.fileOk)) upstream.pause();
+    if (!ws || ws.writableEnded) {
+      bp.fileOk = true;
+    } else if (!bp.fileOk && h.keepAlive) {
+      pending.push(chunk);
+      pendingBytes += chunk.length;
+      while (pendingBytes > PVR_RECORD_PENDING_MAX_BYTES && pending.length > 1) {
+        pendingBytes -= pending.shift().length;
+      }
+      h._pendingBytes = pendingBytes;
+    } else {
+      bp.fileOk = ws.write(chunk) !== false;
+      if (!bp.fileOk && h.keepAlive) {
+        pending.push(chunk);
+        pendingBytes += chunk.length;
+        h._pendingBytes = pendingBytes;
+      } else {
+        flushPendingToDisk();
+      }
+    }
+    if (!h.keepAlive && (!bp.tapOk || (!h.tapRes && !bp.fileOk))) upstream.pause();
   });
 
   upstream.on("error", fail);
-  ws.on("error", fail);
-
   upstream.on("end", () => {
-    try {
-      ws.end();
-    } catch {
-      /* noop */
+    if (h.keepAlive && !h.stopped && Date.now() < h.recordUntilMs) {
+      void handleRecordingUpstreamLost(id, "end");
+      return;
     }
-    try {
-      if (handle.tapRes && !handle.tapRes.writableEnded) {
-        handle.tapRes.removeAllListeners("drain");
-        handle.tapRes.end();
-      }
-    } catch {
-      /* noop */
+    void finalizeRecordingStream(id);
+  });
+
+  if (!h._pendingDrainBound) {
+    h._pendingDrainBound = true;
+    ws?.on("drain", () => {
+      flushPendingToDisk();
+      resumeIfReady();
+    });
+  }
+}
+
+function attachRecordingFanout(id, upstream, recordOutput, filePath, tapMime, meta = {}) {
+  const ws = recordOutput.writable;
+  const keepAlive = !!meta.keepAlive;
+  const recordUntilMs = typeof meta.recordUntilMs === "number" ? meta.recordUntilMs : 0;
+  const deferMux = !!recordOutput.deferMux;
+  let finalizeResolve;
+  let finalizeReject;
+  const done = deferMux
+    ? new Promise((resolve, reject) => {
+        finalizeResolve = resolve;
+        finalizeReject = reject;
+      })
+    : recordOutput.done;
+  const handle = {
+    upstream: null,
+    ws,
+    filePath,
+    tapRes: null,
+    tapMime: tapMime || "video/mp2t",
+    done,
+    ffmpeg: recordOutput.child || null,
+    tmpPath: recordOutput.tmpPath || null,
+    keepAlive,
+    recordUntilMs,
+    url: typeof meta.url === "string" ? meta.url : "",
+    compact: meta.compact !== false,
+    stopped: false,
+    finalizing: false,
+    reconnecting: false,
+    rotating: false,
+    reconnectFail: 0,
+    reconnectAttempt: 0,
+    segmentPaths: [],
+    segmentIndex: 0,
+    hubKey: typeof meta.hubKey === "string" ? meta.hubKey : "",
+    hubTeardown: typeof meta.hubTeardown === "function" ? meta.hubTeardown : null,
+    lastSegmentRotateAt: 0,
+    finalizeResolve,
+    finalizeReject,
+    _bp: { fileOk: true, tapOk: true },
+  };
+
+  const resumeIfReady = () => {
+    const up = handle.upstream;
+    if (!up || !up.isPaused()) return;
+    if (handle._bp.fileOk && handle._bp.tapOk) up.resume();
+  };
+
+  ws.on("error", (err) => {
+    console.error(`[PVR] Write stream error for ${id}:`, err?.message || err);
+    if (handle.keepAlive && !handle.stopped && Date.now() < handle.recordUntilMs) {
+      void handleRecordingUpstreamLost(id, "ws-error");
+      return;
     }
-    streamRecordings.delete(id);
+    void finalizeRecordingStream(id);
   });
 
   ws.on("drain", () => {
-    bp.fileOk = true;
+    handle._bp.fileOk = true;
     resumeIfReady();
   });
 
   handle._onTapDrain = () => {
-    bp.tapOk = true;
+    handle._bp.tapOk = true;
     resumeIfReady();
   };
 
   streamRecordings.set(id, handle);
+  bindRecordingUpstream(id, upstream);
+
+  if (keepAlive && recordUntilMs > Date.now()) {
+    const delayMs = recordUntilMs - Date.now();
+    console.log(`[PVR] Auto-stop timer set for ${id}: ${(delayMs / 1000).toFixed(0)}s from now (until ${new Date(recordUntilMs).toISOString()})`);
+    handle.stopTimer = setTimeout(() => {
+      console.log(`[PVR] Auto-stop timer fired for ${id}`);
+      void finalizeRecordingStream(id);
+    }, delayMs);
+  } else if (keepAlive) {
+    console.log(`[PVR] WARNING: recordUntilMs (${recordUntilMs}) is in the past for ${id}, no auto-stop timer set.`);
+  }
+
+  if (keepAlive) {
+    let bytesLogged = 0;
+    const logInterval = setInterval(() => {
+      const h2 = streamRecordings.get(id);
+      if (!h2 || h2.stopped || h2.finalizing) { clearInterval(logInterval); return; }
+      try {
+        const tmpSz = h2.tmpPath ? fs.statSync(h2.tmpPath).size : 0;
+        if (tmpSz !== bytesLogged) {
+          bytesLogged = tmpSz;
+          console.log(`[PVR] Recording ${id}: ${(tmpSz / 1024).toFixed(0)} KB written to ${path.basename(h2.tmpPath || '')}`);
+        }
+      } catch { /* noop */ }
+    }, 10_000);
+    handle._dataLogInterval = logInterval;
+  }
 }
 
 function teardownRecording(id, removeMap) {
   const h = streamRecordings.get(id);
   if (!h) return;
+  h.stopped = true;
+  if (h.stopTimer) {
+    clearTimeout(h.stopTimer);
+    h.stopTimer = null;
+  }
+  if (h.reconnectTimer) {
+    clearTimeout(h.reconnectTimer);
+    h.reconnectTimer = null;
+  }
+  if (h.keepAlive) {
+    void finalizeRecordingStream(id).finally(() => {
+      if (removeMap) streamRecordings.delete(id);
+    });
+    return;
+  }
   try {
-    h.upstream?.destroy();
+    if (h.ws && !h.ws.writableEnded) h.ws.end();
   } catch {
     /* noop */
   }
   try {
-    h.ws?.end();
+    if (h.hubTeardown) {
+      try {
+        h.hubTeardown();
+      } catch {
+        /* noop */
+      }
+      h.hubTeardown = null;
+    }
+  } catch {
+    /* noop */
+  }
+  try {
+    if (h.upstream) {
+      h.upstream.removeAllListeners();
+      if (!h.hubKey) h.upstream.destroy();
+    }
   } catch {
     /* noop */
   }
@@ -3218,59 +4458,136 @@ function teardownRecording(id, removeMap) {
 ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
   const outDir = typeof payload?.outDir === "string" ? payload.outDir.trim() : "";
   if (!outDir) throw new Error("No output folder.");
+  try {
+    fs.mkdirSync(outDir, { recursive: true });
+  } catch (e) {
+    throw new Error(`Cannot create recording folder: ${e.message}`);
+  }
   const url = assertPlaylistUrlForMain(payload?.url);
   const id = `rec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const tapMime = normalizeRecordTapMime(payload?.tapContentType);
   const recordMode = normalizeRecordMode(payload?.recordMode, url, tapMime);
   const requestedFilenameExt = normalizeRecordFilenameExt(payload?.filenameExt);
   const filenameExt = recordMode === "hls" || recordMode === "mpegts" ? ".mp4" : requestedFilenameExt;
+  const sanitizeRecordBasename = (raw) => {
+    const base = String(raw || "")
+      .trim()
+      .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+      .replace(/\s+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^\.+|\.+$/g, "")
+      .replace(/^_|_$/g, "");
+    if (!base || base === "." || base === "..") return null;
+    return base.slice(0, 180);
+  };
+  const customBasename = sanitizeRecordBasename(payload?.outputBasename);
   const d = new Date();
   const pad = (n, l = 2) => String(n).padStart(l, "0");
-  const name = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}_${pad(d.getMilliseconds(), 3)}${filenameExt}`;
-  const filePath = path.join(outDir, name);
+  const defaultName = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}_${pad(d.getMilliseconds(), 3)}${filenameExt}`;
+  let name = customBasename
+    ? customBasename.toLowerCase().endsWith(filenameExt.toLowerCase())
+      ? customBasename
+      : `${customBasename}${filenameExt}`
+    : defaultName;
+  let filePath = path.join(outDir, name);
+  if (customBasename) {
+    let n = 2;
+    while (fs.existsSync(filePath)) {
+      const stem = `${customBasename}_${n}`;
+      name = `${stem}${filenameExt}`;
+      filePath = path.join(outDir, name);
+      n += 1;
+    }
+  }
   allowedRecordOutputDirs.add(path.resolve(outDir));
   allowedRecordRevealPaths.add(path.resolve(filePath));
+  console.log(`[PVR] Starting recording ${id}: mode=${recordMode}, keepAlive=${payload?.keepAlive}, file=${filePath}, outDir=${outDir}`);
+  console.log(`[PVR]   url=${url.slice(0, 120)}`);
+  console.log(`[PVR]   recordUntilMs=${payload?.recordUntilMs} (${payload?.recordUntilMs ? new Date(payload.recordUntilMs).toISOString() : 'none'})`);
+  const recordingCompact = payload?.recordingCompact !== false;
+  const keepAlive = payload?.keepAlive === true;
+  const recordUntilMs =
+    typeof payload?.recordUntilMs === "number" && Number.isFinite(payload.recordUntilMs)
+      ? payload.recordUntilMs
+      : 0;
+  const recordMeta = { keepAlive, recordUntilMs, url };
   if (recordMode === "hls") {
-    return startFfmpegHlsRecording(id, url, filePath);
+    return startFfmpegHlsRecording(id, url, filePath, recordingCompact, recordMeta);
   }
-  const recordOutput = createRecordingOutput(filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
-  let res;
-  try {
-    res = await net.fetch(url, { headers: streamRecordHeaders(url) });
-  } catch (e) {
-    recordOutput.writable.destroy();
+  const recordOutput = createRecordingOutput(
+    filePath,
+    recordMode === "mpegts" ? "video/mp2t" : tapMime,
+    recordingCompact,
+    keepAlive && recordMode === "mpegts" ? { deferMux: true, segmentIndex: 0 } : {}
+  );
+  let upstream;
+  let hubMeta = {};
+  const useSharedHub = recordMode === "mpegts";
+  if (useSharedHub) {
     try {
-      fs.unlinkSync(filePath);
-    } catch {
-      /* noop */
+      const hubbed = createHubRecordingStream(url, keepAlive);
+      upstream = hubbed.stream;
+      hubMeta = { hubKey: hubbed.hubKey, hubTeardown: hubbed.teardown };
+    } catch (e) {
+      recordOutput.writable.destroy();
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        /* noop */
+      }
+      try {
+        if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
+      } catch {
+        /* noop */
+      }
+      throw new Error(e instanceof Error ? e.message : "Network error");
     }
+  } else {
+    let res;
     try {
-      if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
-    } catch {
-      /* noop */
+      res = await net.fetch(url, { headers: streamRecordHeaders(url) });
+    } catch (e) {
+      recordOutput.writable.destroy();
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        /* noop */
+      }
+      try {
+        if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
+      } catch {
+        /* noop */
+      }
+      throw new Error(e instanceof Error ? e.message : "Network error");
     }
-    throw new Error(e instanceof Error ? e.message : "Network error");
+    if (!res.ok) {
+      recordOutput.writable.destroy();
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        /* noop */
+      }
+      try {
+        if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
+      } catch {
+        /* noop */
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
+    if (!res.body) {
+      recordOutput.writable.end();
+      return { ok: true, id, filePath, playbackUrl: null };
+    }
+    upstream = Readable.fromWeb(res.body);
   }
-  if (!res.ok) {
-    recordOutput.writable.destroy();
-    try {
-      fs.unlinkSync(filePath);
-    } catch {
-      /* noop */
-    }
-    try {
-      if (recordOutput.tmpPath) fs.unlinkSync(recordOutput.tmpPath);
-    } catch {
-      /* noop */
-    }
-    throw new Error(`HTTP ${res.status}`);
-  }
-  if (!res.body) {
-    recordOutput.writable.end();
-    return { ok: true, id, filePath, playbackUrl: null };
-  }
-  const upstream = Readable.fromWeb(res.body);
-  attachRecordingFanout(id, upstream, recordOutput, filePath, recordMode === "mpegts" ? "video/mp2t" : tapMime);
+  attachRecordingFanout(
+    id,
+    upstream,
+    recordOutput,
+    filePath,
+    recordMode === "mpegts" ? "video/mp2t" : tapMime,
+    { ...recordMeta, compact: recordingCompact, ...hubMeta }
+  );
   const playbackUrl =
     rendererOrigin != null
       ? `${rendererOrigin}/__tap/stream?id=${encodeURIComponent(id)}&token=${encodeURIComponent(streamProxySessionToken ?? "")}`
@@ -3281,16 +4598,23 @@ ipcMain.handle("iptv-start-stream-record", async (_evt, payload) => {
 ipcMain.handle("iptv-stop-stream-record", async (_evt, id) => {
   const h = streamRecordings.get(id);
   if (!h) return { ok: true };
+  console.log(`[PVR] Stopping recording ${id}, filePath=${h.filePath}`);
   const done = h.done;
   const filePath = h.filePath;
   teardownRecording(id, true);
   if (done) {
-    await Promise.race([
-      done,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Recording is still finalizing. Try opening the folder in a moment.")), 120_000)
-      ),
-    ]);
+    try {
+      await Promise.race([
+        done,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Recording is still finalizing. Try opening the folder in a moment.")), 120_000)
+        ),
+      ]);
+      console.log(`[PVR] Recording ${id} finalized OK.`);
+    } catch (e) {
+      console.error(`[PVR] Recording ${id} finalize error:`, e?.message || e);
+      throw e;
+    }
   }
   return { ok: true, filePath };
 });
@@ -4061,22 +5385,42 @@ async function tryServeStreamProxy(req, res) {
     return true;
   }
   const tObj = new URL(validated);
+  const isVod = /\.(mkv|mp4|avi|mov|mka)/i.test(validated);
+  // Use VLC-like user agent for VOD files - some IPTV servers block browsers
+  const userAgent = isVod
+    ? "VLC/3.0.18 LibVLC/3.0.18"
+    : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
   const headers = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "User-Agent": userAgent,
     Referer: `${tObj.origin}/`,
   };
+  if (isVod) {
+    headers.Accept = "*/*";
+    headers["Accept-Language"] = "en-US,en;q=0.9";
+    headers["Icy-MetaData"] = "1";
+  }
   if (req.headers.range) {
     headers.Range = req.headers.range;
   }
 
   let up;
   try {
-    up = await net.fetch(validated, { method: req.method, headers });
+    console.log(`[Proxy] Fetching upstream: ${validated.slice(0, 120)}`);
+    // Add timeout for MKV/VOD files that may be slow to respond
+    const fetchTimeout = isVod ? 30000 : 10000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), fetchTimeout);
+    up = await net.fetch(validated, { method: req.method, headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+    console.log(`[Proxy] Upstream response: ${up.status} ${up.statusText}`);
+    if (!up.ok && up.status >= 400) {
+      console.error(`[Proxy] Upstream returned error status: ${up.status}`);
+    }
   } catch (e) {
+    console.error(`[Proxy] Upstream fetch FAILED: ${e instanceof Error ? e.message : String(e)}`);
     res
       .writeHead(502, { "Content-Type": "text/plain; charset=utf-8" })
-      .end(e instanceof Error ? e.message : "Upstream fetch failed");
+      .end(e instanceof Error ? e.message : "Upstream fetch failed (check VPN/connection)");
     return true;
   }
 

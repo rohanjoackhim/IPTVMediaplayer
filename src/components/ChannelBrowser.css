@@ -21,6 +21,7 @@
 .browser-header {
   position: relative;
   z-index: 8;
+  overflow: visible;
   padding: 10px 12px 8px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -121,10 +122,167 @@
   gap: 0.35em;
 }
 
+.tv-toolbar-block {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  gap: 0;
+  overflow: visible;
+}
+
+.tv-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: visible;
+}
+
+.pvr-toolbar-labels {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+  margin-right: auto;
+}
+
+.pvr-toolbar-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 9.5rem;
+  min-height: 20px;
+  padding: 2px 6px;
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.1);
+  font-family: inherit;
+  font-size: 0.5625rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  color: var(--accent-hover);
+  cursor: pointer;
+}
+
+.pvr-toolbar-label--scheduled {
+  border-style: dashed;
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.pvr-toolbar-label--recording {
+  border-color: rgba(220, 38, 38, 0.45);
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+}
+
+.pvr-toolbar-label-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--accent-hover);
+}
+
+.pvr-toolbar-label--recording .pvr-toolbar-label-dot {
+  background: #b91c1c;
+  animation: pvr-toolbar-label-blink 0.9s steps(2, start) infinite;
+}
+
+@keyframes pvr-toolbar-label-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pvr-toolbar-label-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-toolbar-row-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.pvr-tools-shell,
 .tv-tools-shell {
   position: relative;
   display: flex;
   justify-content: flex-end;
+  overflow: visible;
+}
+
+.pvr-tools-toggle {
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: var(--accent-muted);
+  color: var(--accent-hover);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pvr-tools-toggle:hover,
+.pvr-tools-toggle[aria-expanded="true"],
+.pvr-tools-toggle--active {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #fff;
+}
+
+.pvr-tools-badge {
+  min-width: 1.1rem;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #b91c1c;
+  color: #fff;
+  font-size: 0.625rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.pvr-toolbar-panel {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 6px 8px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.1);
+}
+
+.pvr-toolbar-panel-head {
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pvr-toolbar-panel-title {
+  font-size: 0.5625rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-hover);
 }
 
 .tv-tools-toggle {
@@ -151,11 +309,10 @@
 .tv-tools-popover {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
   right: 0;
-  z-index: 30;
-  width: auto;
-  max-width: 100%;
+  left: auto;
+  z-index: 50;
+  width: min(360px, calc(var(--sidebar-width, 400px) - 20px));
   box-sizing: border-box;
   padding: 10px;
   border: 1px solid #111;
@@ -167,6 +324,30 @@
 .tv-tools-popover .url-row {
   margin-top: 0;
   gap: 6px;
+}
+
+.tv-tools-popover .url-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.tv-tools-popover .xtream-login-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.tv-tools-popover .url-row .playlist-url-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.tv-tools-popover .url-row .url-btn,
+.tv-tools-popover .url-row .file-btn,
+.tv-tools-popover .xtream-login-panel .url-btn {
+  width: 100%;
 }
 
 .tv-tools-popover .url-row + .url-row,
@@ -413,10 +594,12 @@
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   background: rgba(255, 255, 255, 0.82);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .browser-tab {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 28px;
   padding: 4px 8px;
   border-radius: 999px;
@@ -426,6 +609,7 @@
   font-size: 0.68rem;
   font-weight: 600;
   cursor: pointer;
+  white-space: nowrap;
   transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
 
@@ -574,15 +758,19 @@
   background: rgba(220, 38, 38, 0.1);
 }
 
-.channel-rec-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 5px;
-  border-radius: 4px;
+.channel-row-actions .channel-rec-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 26px;
+  padding: 0 6px;
+  border-right: 1px solid var(--border-subtle);
+  border-radius: 0;
   font-size: 0.5625rem;
   font-weight: 800;
   letter-spacing: 0.06em;
-  vertical-align: middle;
+  line-height: 1;
   color: #fef2f2;
   background: #b91c1c;
 }
@@ -908,4 +1096,238 @@
 
 .channel-row:hover {
   background: #f7f7f7;
+}
+
+/* ---- Series drill-down ---- */
+
+.series-drilldown,
+.series-show-list {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  contain: none;
+}
+
+.series-drilldown-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.series-back-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.series-back-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.series-drilldown-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.series-season-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  background: var(--bg-elevated);
+}
+
+.series-season-btn {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.series-season-btn:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.series-season-btn.active {
+  background: #111;
+  color: #fff;
+  border-color: #111;
+}
+
+.series-episode-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.series-episode-list .channel-row {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  width: 100%;
+  height: var(--row-h);
+  min-height: var(--row-h);
+  transform: none;
+  will-change: auto;
+  contain: none;
+  display: flex;
+  align-items: stretch;
+}
+
+.series-episode-list .channel-row .channel-row-actions {
+  display: flex;
+  align-items: center;
+  z-index: 1;
+}
+
+.series-episode-row,
+.series-show-row {
+  cursor: pointer;
+}
+
+/* Enlarged cover art for movies - row height exactly matches 64px cover */
+.channel-row--movie {
+  height: 64px;
+  min-height: 64px;
+  padding: 0 8px 0 0;
+  align-items: center;
+}
+
+.channel-row--movie .channel-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+}
+
+.channel-row--movie .channel-logo.placeholder {
+  width: 64px;
+  height: 64px;
+  font-size: 1.1rem;
+}
+
+.channel-row--movie .channel-row-hit {
+  gap: 10px;
+  padding-left: 6px;
+  height: 100%;
+}
+
+/* Center buttons vertically in movie rows */
+.channel-row--movie .channel-row-actions {
+  align-items: center;
+  margin: 6px 4px 6px 0;
+}
+
+/* Make favorite button same size as play/remove buttons in movie rows */
+.channel-row--movie .fav-btn {
+  width: 28px;
+  height: 28px;
+  margin: 6px 4px 6px 0;
+  align-self: center;
+  border-radius: 999px;
+}
+
+/* Enlarged episode cover art in series drilldown (3x size) */
+.series-episode-row .channel-logo {
+  width: 90px;
+  height: 90px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+}
+
+.series-episode-row .channel-logo.placeholder {
+  width: 90px;
+  height: 90px;
+  font-size: 1.4rem;
+}
+
+.series-episode-row {
+  height: 106px;
+  min-height: 106px;
+  padding: 8px 8px 8px 0;
+  align-items: center;
+}
+
+.series-episode-row .channel-row-hit {
+  gap: 12px;
+  padding-left: 8px;
+  height: 100%;
+}
+
+.series-show-row .channel-row-actions {
+  padding-right: 8px;
+}
+
+/* Center buttons vertically in series episode rows */
+.series-episode-row .channel-row-actions {
+  align-items: center;
+  margin: 0 4px 0 0;
+}
+
+/* Favorite button styling for series episodes */
+.series-episode-row .fav-btn {
+  margin: 0 4px 0 0;
+  flex-shrink: 0;
+}
+
+.series-arrow {
+  font-size: 1rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+/* Favorites sectioned layout with headings */
+.favorites-sectioned {
+  padding: 8px 0;
+}
+
+.favorites-section {
+  margin-bottom: 16px;
+}
+
+.favorites-section-heading {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 8px 12px 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+  background: var(--bg-subtle);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.favorites-section .channel-row {
+  position: relative;
+  transform: none;
+  height: auto;
+  min-height: var(--row-h);
 }

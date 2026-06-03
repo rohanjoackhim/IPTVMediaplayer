@@ -1,0 +1,78 @@
+.pvr-record-dir-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.pvr-record-dir-label {
+  flex-shrink: 0;
+  font-size: 0.5625rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.pvr-record-dir-path {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  font-size: 0.625rem;
+  line-height: 1.3;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pvr-record-dir-missing {
+  flex: 1;
+  min-width: 8rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: #b45309;
+  line-height: 1.3;
+}
+
+.pvr-record-dir-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.pvr-record-dir-btn {
+  min-height: 20px;
+  padding: 2px 8px;
+  border: 1px solid var(--accent-border);
+  border-radius: 3px;
+  background: var(--accent-muted);
+  color: var(--accent-hover);
+  font-family: inherit;
+  font-size: 0.5625rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.pvr-record-dir-btn:hover {
+  border-color: var(--accent);
+}
+
+.pvr-record-dir-btn--clear {
+  border-color: var(--border-subtle);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.pvr-record-dir-btn--clear:hover {
+  color: var(--text);
+  border-color: var(--border);
+}

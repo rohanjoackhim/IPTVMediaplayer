@@ -4,6 +4,15 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+.channel-epg--collapsed {
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.channel-epg--collapsed .channel-epg-head {
+  margin-bottom: 0;
+}
+
 .channel-epg-head {
   display: flex;
   flex-wrap: wrap;
@@ -66,6 +75,23 @@
   margin-left: auto;
 }
 
+/* Live toolbar row — aligned to the right end of the tool strip. */
+.channel-epg-toolbar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.now-row-tool-strip .channel-epg-toolbar .channel-epg-lookup-inline-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  font-size: 0.625rem;
+}
+
 .channel-epg-lookup-inline-btn {
   padding: 4px 10px;
   font-size: 0.625rem;
@@ -82,6 +108,12 @@
 .channel-epg-lookup-inline-btn--primary {
   background: var(--accent-muted);
   border-color: var(--accent);
+}
+
+.channel-epg-lookup-inline-btn--open {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-color: var(--border-subtle);
 }
 
 .channel-epg-lookup-inline-btn:hover:not(:disabled) {
@@ -124,6 +156,13 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.channel-epg-pvr-hint {
+  margin: 0 0 8px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--accent-hover);
+}
+
 .channel-epg-slot {
   flex-shrink: 0;
   min-width: 72px;
@@ -141,6 +180,35 @@
   cursor: default;
   scroll-snap-align: center;
   transition: border-color 0.15s ease, background 0.15s ease;
+  font-family: inherit;
+}
+
+.channel-epg-slot--selectable {
+  cursor: pointer;
+}
+
+.channel-epg-slot--selectable:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  background: var(--accent-muted);
+}
+
+.channel-epg-slot--future {
+  border-style: dashed;
+}
+
+.channel-epg-slot--pvr-selected {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.channel-epg-slot--pvr-selected.channel-epg-slot--future {
+  border-style: solid;
+}
+
+.channel-epg-slot--ended {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .channel-epg-slot:hover {

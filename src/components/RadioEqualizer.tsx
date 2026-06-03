@@ -85,7 +85,7 @@ export function RadioEqualizer({
 
   const masterLevel = useCallback(() => {
     const v = volumeRef.current;
-    return typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+    return typeof v === "number" && Number.isFinite(v) ? Math.min(1.5, Math.max(0, v)) : 1;
   }, []);
 
   const setActive = useCallback((active: boolean) => {

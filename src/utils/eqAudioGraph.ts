@@ -138,8 +138,11 @@ export function setEqMasterGain(el: HTMLMediaElement, level: number): void {
   }
 }
 
+/** Allow boost up to 150% via Web Audio gain. */
+const MAX_MASTER_GAIN = 1.5;
+
 function clampMasterGain(level: number): number {
-  return Math.min(1, Math.max(0, level));
+  return Math.min(MAX_MASTER_GAIN, Math.max(0, level));
 }
 
 /** Routes that should use createMediaElementSource (no mute / captureStream). */
@@ -549,8 +552,20 @@ export async function ensureElementPlaybackAudible(
     routeLegacyPassthrough(el, ctx, level);
     return;
   }
+  // If boost > 1.0 requested, route through Web Audio gain node
+  if (level > 1) {
+    const ctx = getSharedEqContext();
+    if (ctx) {
+      const mes = tryRegisterLegacyMes(el, ctx);
+      if (mes) {
+        routeLegacyPassthrough(el, ctx, level);
+        await resumeEqContextForPlayback();
+        return;
+      }
+    }
+  }
   el.muted = false;
-  el.volume = level;
+  el.volume = Math.min(1, level);
 }
 
 export function releaseEqForMediaElement(

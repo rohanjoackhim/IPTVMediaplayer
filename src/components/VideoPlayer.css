@@ -103,22 +103,106 @@
   max-height: min(34vh, 400px);
 }
 
+/* Live IPTV: cap bottom chrome so the stream gets more vertical space. */
+.player-below-video--live {
+  max-height: min(34vh, 340px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.player-below-video--split.player-below-video--live {
+  max-height: min(34vh, 340px);
+}
+
+.player-below-video--live .player-now-playing {
+  padding: 6px 12px;
+}
+
+.player-below-video--live .player-now-playing-inner {
+  gap: 8px;
+}
+
+.player-below-video--live .player-now-playing-logo {
+  width: 34px;
+  height: 34px;
+}
+
+.player-below-video--live .player-now-playing-name {
+  font-size: 0.875rem;
+}
+
+.player-below-video--live .player-now-playing-group {
+  margin-top: 0;
+  font-size: 0.6875rem;
+}
+
+.player-below-video--live .player-chrome {
+  padding: 6px 10px 8px;
+  gap: 4px;
+  box-shadow: 0 -4px 18px rgba(0, 0, 0, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.82);
+}
+
+.player-below-video--live .now-row {
+  gap: 6px;
+}
+
+.player-below-video--live .now-row-tool-strip {
+  gap: 5px;
+}
+
+.player-below-video--live .buffer-stats {
+  margin: 0;
+  font-size: 0.5625rem;
+  line-height: 1.2;
+}
+
+.player-below-video--live .now-url {
+  display: none;
+}
+
+.player-below-video--live .now-row-record-path {
+  font-size: 0.5625rem;
+}
+
+.player-below-video--live .channel-epg {
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+.player-below-video--live .channel-epg--collapsed {
+  margin-top: 2px;
+  padding-top: 2px;
+}
+
 .player-root--split .player-top {
   flex: 1 1 0%;
   min-height: 0;
+}
+
+.player-root:has(.player-below-video--live) .player-top {
+  flex: 1 1 0%;
+  min-height: min(62vh, calc(100% - 72px));
 }
 
 .player-top {
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
   position: relative;
 }
 
+.player-top > .video-wrap,
+.player-top > .player-placeholder {
+  flex: 1 1 0%;
+  min-height: 0;
+  width: 100%;
+}
+
 .player-top:has(.video-wrap--ebook) {
-  align-items: stretch;
   justify-content: stretch;
 }
 
@@ -1663,6 +1747,12 @@
   box-shadow: 0 0 0 1px var(--border-subtle);
 }
 
+/* Movie cover art - 2x browser size (128x128px) */
+.player-now-playing-logo--movie {
+  width: 128px;
+  height: 128px;
+}
+
 .player-now-playing-logo--placeholder {
   display: flex;
   align-items: center;
@@ -1697,6 +1787,28 @@
   text-overflow: ellipsis;
 }
 
+.player-now-playing-url {
+  margin-top: 2px;
+  font-size: 0.68rem;
+  font-family: monospace;
+  color: var(--text-muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  user-select: all;
+}
+
+/* Movie plot/description below title */
+.player-now-playing-plot {
+  margin-top: 6px;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  max-width: 100%;
+}
+
 .player-now-playing-group {
   margin-top: 4px;
   font-size: 0.75rem;
@@ -1705,6 +1817,20 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Movie URL displayed under buffer stats */
+.player-movie-url-under-buffer {
+  margin-top: 4px;
+  font-size: 0.68rem;
+  font-family: monospace;
+  color: var(--text-muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  user-select: all;
 }
 
 .player-placeholder {
@@ -1744,6 +1870,111 @@
   gap: 12px;
 }
 
+.now-row--live-toolbar {
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.now-row--live-toolbar .now-row-main {
+  flex: 1 1 auto;
+  align-items: center;
+}
+
+.now-row-tool-strip {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  min-width: 0;
+  width: 100%;
+}
+
+.now-row-tool-strip .rec-btn,
+.now-row-tool-strip .screen-off-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  align-self: center;
+}
+
+.now-row-tool-strip .rec-btn--stop {
+  min-width: 34px;
+  padding: 5px 9px;
+}
+
+.now-row-tool-strip .now-row-pvr-cluster {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.now-row-tool-strip .now-row-pvr-cluster .player-pvr-bar--compact {
+  flex: 0 0 auto;
+}
+
+.now-row-tool-strip .now-row-pvr-cluster .player-pvr-start-btn,
+.now-row-tool-strip .now-row-pvr-cluster .player-pvr-stop-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+}
+
+.now-row-tool-strip-primary {
+  display: inline-flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.now-row-tool-strip .channel-epg-toolbar {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.now-row-tool-strip:has(.player-pvr-active--strip) {
+  row-gap: 4px;
+}
+
+.now-row-tool-strip .now-row-pvr-cluster:has(.player-pvr-active--strip) {
+  flex: 0 1 50%;
+  width: 50%;
+  max-width: 50%;
+  min-width: 0;
+  order: 5;
+}
+
+.now-row-tool-strip .now-row-pvr-cluster:has(.player-pvr-active--strip) .player-pvr-bar--compact {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.now-row-record-path {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-size: 0.625rem;
+  line-height: 1.3;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.now-row-record-path.record-path--link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
 .now-row-main {
   flex: 1;
   min-width: 0;
@@ -1751,6 +1982,20 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+}
+
+.now-row-actions-col {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+  max-width: min(44vw, 380px);
+}
+
+.now-row-actions-col--pvr {
+  min-width: min(100%, 260px);
 }
 
 .now-row-actions {
@@ -2647,6 +2892,29 @@ button.record-path--link:not(.record-path--inline):focus-visible {
 .cc-toggle--inline input {
   width: 13px;
   height: 13px;
+}
+
+.cc-toggle--unavailable {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.cc-track-select {
+  min-height: 28px;
+  max-width: 8.5rem;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.625rem;
+  font-weight: 600;
+}
+
+.cc-track-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .yt-search-err {

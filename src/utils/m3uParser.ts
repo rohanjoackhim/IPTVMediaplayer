@@ -1,4 +1,4 @@
-import type { Channel, ParseResult } from "../types";
+import type { Channel, ChannelContentType, ParseResult } from "../types";
 import { inferCountryFromGroupTitle, normalizeCountryLabel } from "./countryFromM3u";
 
 let idCounter = 0;
@@ -14,6 +14,17 @@ export function normalizeM3uText(text: string): string {
   let t = text;
   if (t.charCodeAt(0) === 0xfeff) t = t.slice(1);
   return t.trim();
+}
+
+/** Infer content type from a stream URL path (Xtream-style). */
+function inferContentTypeFromUrl(url: string): ChannelContentType | undefined {
+  try {
+    const p = new URL(url).pathname.toLowerCase();
+    if (/\/movie\//.test(p)) return "movie";
+    if (/\/series\//.test(p)) return "series";
+    if (/\/live\//.test(p)) return "live";
+  } catch { /* invalid URL */ }
+  return undefined;
 }
 
 export function parseM3U(text: string): ParseResult {
@@ -36,7 +47,7 @@ export function parseM3U(text: string): ParseResult {
 
     const url = line;
     if (pending) {
-      channels.push({
+      const ch: Channel = {
         id: nextId(),
         name: pending.name ?? "Unnamed channel",
         url,
@@ -44,13 +55,26 @@ export function parseM3U(text: string): ParseResult {
         group: pending.group,
         country: pending.country,
         tvgId: pending.tvgId,
-      });
+        contentType: pending.contentType ?? inferContentTypeFromUrl(url),
+        seriesName: pending.seriesName,
+        seriesSeason: pending.seriesSeason,
+        seriesEpisode: pending.seriesEpisode,
+        episodeTitle: pending.episodeTitle,
+        seriesId: pending.seriesId,
+        releaseYear: pending.releaseYear,
+        rating: pending.rating,
+        plot: pending.plot,
+        genre: pending.genre,
+        containerExtension: pending.containerExtension,
+      };
+      channels.push(ch);
       pending = null;
     } else if (/^https?:\/\//i.test(url) || url.startsWith("rtmp://") || url.startsWith("rtsp://")) {
       channels.push({
         id: nextId(),
         name: `Stream ${channels.length + 1}`,
         url,
+        contentType: inferContentTypeFromUrl(url),
       });
     }
   }
@@ -76,6 +100,19 @@ function countryFromAttrs(attrs: Record<string, string>): string | undefined {
   return out || undefined;
 }
 
+function parseContentType(attrs: Record<string, string>): ChannelContentType | undefined {
+  const ct = (attrs["content-type"] || "").trim().toLowerCase();
+  if (ct === "live" || ct === "movie" || ct === "series") return ct;
+  return undefined;
+}
+
+function parseIntAttr(attrs: Record<string, string>, key: string): number | undefined {
+  const v = attrs[key];
+  if (v == null) return undefined;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function parseExtInf(line: string): Partial<Channel> {
   // #EXTINF:-1 tvg-id="x" tvg-logo="..." group-title="News",Channel Name
   const attrs: Record<string, string> = {};
@@ -99,5 +136,16 @@ function parseExtInf(line: string): Partial<Channel> {
     group,
     country: countryFromAttrs(attrs),
     tvgId: tvgId?.trim() || undefined,
+    contentType: parseContentType(attrs),
+    seriesName: attrs["series-name"]?.trim() || undefined,
+    seriesSeason: parseIntAttr(attrs, "series-season"),
+    seriesEpisode: parseIntAttr(attrs, "series-episode"),
+    episodeTitle: attrs["episode-title"]?.trim() || undefined,
+    seriesId: parseIntAttr(attrs, "series-id"),
+    releaseYear: attrs["release-year"]?.trim() || undefined,
+    rating: attrs["rating"]?.trim() || undefined,
+    plot: attrs["plot"]?.trim() || attrs["tvg-description"]?.trim() || undefined,
+    genre: attrs["genre"]?.trim() || undefined,
+    containerExtension: attrs["container-ext"]?.trim() || undefined,
   };
 }

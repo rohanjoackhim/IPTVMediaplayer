@@ -181,12 +181,39 @@ declare global {
         remuxed?: boolean;
         streaming?: boolean;
       }>;
+      /** Desktop: test if direct URL works (bypass proxy for debugging VPN/proxy issues). */
+      testDirectUrl: (url: string) => Promise<{ ok: boolean; status?: number; statusText?: string; error?: string }>;
+      fetchSeriesEpisodes: (payload: {
+        server: string;
+        username: string;
+        password: string;
+        seriesId: number;
+      }) => Promise<{
+        episodes: Array<{
+          id: number;
+          season: number;
+          episode: number;
+          title: string;
+          logo: string;
+          plot: string;
+          rating: string;
+          ext: string;
+          url: string;
+        }>;
+      }>;
       startStreamRecord: (payload: {
         url: string;
         outDir: string;
+        /** Base name without extension, e.g. Channel_Show_7-59PM_to_8-00PM */
+        outputBasename?: string;
         filenameExt?: string;
         tapContentType?: string;
         recordMode?: "hls" | "mpegts" | "raw";
+        /** When true (default), re-encode to smaller H.264/AAC MP4 on save. */
+        recordingCompact?: boolean;
+        /** PVR: reconnect when the IPTV feed drops until `recordUntilMs`. */
+        keepAlive?: boolean;
+        recordUntilMs?: number;
       }) => Promise<{
         ok: true;
         id: string;

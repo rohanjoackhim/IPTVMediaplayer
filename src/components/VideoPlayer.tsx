@@ -82,6 +82,10 @@ import {
 } from "../utils/radioLiveCaptions";
 import { RadioLiveCaptionsPanel } from "./RadioLiveCaptionsPanel";
 import { ChannelEpgGuide } from "./ChannelEpgGuide";
+import { ChannelEpgToolbar } from "./ChannelEpgToolbar";
+import { useChannelEpgGuide } from "../hooks/useChannelEpgGuide";
+import { PlayerPvrBar } from "./PlayerPvrBar";
+import type { PvrManagedSession, PvrStartRequest } from "../utils/pvrRecordingManager";
 import "./VideoPlayer.css";
 import "./LyricsTranslateMenu.css";
 import "./RadioLiveCaptionsPanel.css";
@@ -118,6 +122,12 @@ export interface VideoPlayerProps {
     channelName?: string | null;
     sourceUrl?: string | null;
   }) => void;
+  /** Resolve active / scheduled PVR for a channel id. */
+  getChannelPvrSession?: (channelId: string | null | undefined) => PvrManagedSession | null;
+  onRequestStartPvr?: (req: PvrStartRequest) => Promise<{ ok: boolean; error?: string }>;
+  onRequestStopPvr?: (sessionId: string) => void | Promise<void>;
+  /** Channel ids with a PVR capture running in the background (not scheduled-only). */
+  backgroundPvrRecordingChannelIds?: string[];
   /** Compact layout: TV strip dock or reader-focused chrome. */
   layoutMode?: "default" | "compactTvDock" | "compactReader";
 }
@@ -126,6 +136,12 @@ interface TrackOption {
   id: string;
   label: string;
   index: number;
+}
+
+function defaultCcTrackId(opts: TrackOption[], current: string): string {
+  if (!opts.length) return "off";
+  if (current !== "off" && opts.some((o) => o.id === current)) return current;
+  return opts[0]!.id;
 }
 
 interface EbookSpeechBoundary {
@@ -546,6 +562,15 @@ export type PlaybackModeLabel =
   | "MKV · MP4"
   | "MKV · native (fallback)"
   | "MKV · native (direct)"
+  | "VOD · preparing…"
+  | "VOD · HLS (cache)"
+  | "VOD · HLS (remux)"
+  | "VOD · HLS (transcoded)"
+  | "VOD · HLS"
+  | "VOD · MP4 (cache)"
+  | "VOD · MP4 (remux)"
+  | "VOD · MP4 (transcoded)"
+  | "VOD · MP4"
   | "VOD · blocked"
   | "URL · blocked";
 
@@ -1477,6 +1502,10 @@ export function VideoPlayer({
   inSplitView = false,
   onLocalLibraryAudioEnded,
   onRecordingStatusChange,
+  getChannelPvrSession,
+  onRequestStartPvr,
+  onRequestStopPvr,
+  backgroundPvrRecordingChannelIds = [],
   layoutMode = "default",
 }: VideoPlayerProps) {
   const mediaRef = useRef<HTMLVideoElement>(null);
@@ -1494,7 +1523,6 @@ export function VideoPlayer({
   const externalUrlRef = useRef<string | null>(null);
   const recordIdRef = useRef<string | null>(null);
   /** Same bytes as disk recording; only set in desktop after REC (single upstream). */
-  const [recordTapPlayUrl, setRecordTapPlayUrl] = useState<string | null>(null);
   const prevStreamUrlForResetRef = useRef<string | null>(null);
   const volumeRef = useRef(volume);
   volumeRef.current = volume;
@@ -1506,6 +1534,7 @@ export function VideoPlayer({
   const [recordingSourceUrl, setRecordingSourceUrl] = useState<string | null>(null);
   const [recordingChannelId, setRecordingChannelId] = useState<string | null>(null);
   const [recordingChannelName, setRecordingChannelName] = useState<string | null>(null);
+  const [recordingCompact, setRecordingCompact] = useState(() => loadUiSession().recordingCompact);
   const [screenPlaybackOff, setScreenPlaybackOff] = useState(false);
   const [playbackMode, setPlaybackMode] = useState<PlaybackModeLabel | null>(null);
   const [trackOptions, setTrackOptions] = useState<TrackOption[]>([]);
@@ -1725,7 +1754,7 @@ export function VideoPlayer({
     isPodcastChannel ||
     isLocalVideoChannel ||
     (!!channel && !isEbookChannel && !isEmbeddedWebChannel && !isRadioChannel);
-  /** Live IPTV / HLS television (not radio, podcast, library, or embedded web). */
+  /** Live IPTV / HLS television (not radio, podcast, library, embedded web, movies, or series). */
   const isIptvLiveChannel =
     !!channel &&
     !isEbookChannel &&
@@ -1733,7 +1762,9 @@ export function VideoPlayer({
     !isRadioChannel &&
     !isPodcastChannel &&
     !isLibraryChannel &&
-    !isLocalVideoChannel;
+    !isLocalVideoChannel &&
+    channel.contentType !== "movie" &&
+    channel.contentType !== "series";
   const webVideoEmbedSrc =
     isYoutubeChannel && channel?.youtubeVideoId
       ? `https://www.youtube-nocookie.com/embed/${encodeURIComponent(channel.youtubeVideoId)}?autoplay=1&rel=0`
@@ -2693,14 +2724,28 @@ export function VideoPlayer({
   const canStartRecording = recordable && streamOkForRecord && hasDesktopRecordApi && !isYoutubeChannel && !isEbookChannel;
   /** Hide REC and related chrome for local library audio, ebooks, and YouTube embeds. */
   const showRecordChrome = recordable && !isLibraryChannel && !isYoutubeChannel && !isEbookChannel;
+  const showPvrBar = showRecordChrome && isIptvLiveChannel && !!channel;
+  const channelEpgGuide = useChannelEpgGuide(isIptvLiveChannel && channel ? channel : null);
+  const channelPvrSession = getChannelPvrSession?.(channel?.id ?? null) ?? null;
+  const pvrRecordingOnChannel = channelPvrSession?.status === "recording";
+  const recordingThisChannel =
+    pvrRecordingOnChannel ||
+    (recording && !!channel && (recordingChannelId === channel.id || recordingSourceUrl === channel.url?.trim()));
   const showScreenOffChrome = !!channel && !isLibraryChannel && !isInternetAudioStream && !isEbookChannel && !isEmbeddedWebChannel;
-  const effectiveRecordTapPlayUrl =
-    recordingSourceUrl && channel?.url?.trim() === recordingSourceUrl ? recordTapPlayUrl : null;
+  const useLiveToolStrip =
+    isIptvLiveChannel &&
+    !!(showRecordChrome || showScreenOffChrome || showPvrBar || channelEpgGuide || recording);
+  /** Keep the live stream in the player while recording — record-tap rebinding blanks MPEG-TS video. */
+  const effectiveRecordTapPlayUrl = null as string | null;
+  const pvrRecordingOtherChannel = backgroundPvrRecordingChannelIds.some(
+    (id) => id !== channel?.id
+  );
   const watchingOtherChannelWhileRecording =
-    recording &&
-    !!recordingSourceUrl &&
-    !!channel?.url?.trim() &&
-    channel.url.trim() !== recordingSourceUrl;
+    pvrRecordingOtherChannel ||
+    (recording &&
+      !!recordingSourceUrl &&
+      !!channel?.url?.trim() &&
+      channel.url.trim() !== recordingSourceUrl);
 
   const recordButtonTitle = !recordable
     ? ""
@@ -2714,7 +2759,9 @@ export function VideoPlayer({
             : "REC needs a direct http(s) media stream URL, not an embedded website page."
         : isInternetAudioStream
           ? "Save the live audio stream to disk. You can switch to another station while recording continues in the background."
-          : "Save the live IPTV stream, then finalize it as .mp4 after Stop. Switch channels anytime — recording keeps the original stream.";
+          : recordingCompact
+            ? "Save a smaller .mp4 (re-encoded, max 720p). Switch channels anytime — recording continues in the background."
+            : "Save the full-quality stream as .mp4 after Stop. Switch channels anytime — recording keeps the original stream.";
 
   const notifyRecordingStatus = useCallback(
     (active: boolean) => {
@@ -2741,7 +2788,6 @@ export function VideoPlayer({
       }
       recordIdRef.current = null;
       setRecording(false);
-      setRecordTapPlayUrl(null);
       setRecordingSourceUrl(null);
       setRecordingChannelId(null);
       setRecordingChannelName(null);
@@ -2810,7 +2856,8 @@ export function VideoPlayer({
       opts.push({ id: `native-${i}`, label, index: i });
     }
     setTrackOptions(opts);
-  }, []);
+    setSelectedTrack((prev) => defaultCcTrackId(opts, ccEnabled ? prev : "off"));
+  }, [ccEnabled]);
 
   useEffect(() => {
     const video = mediaRef.current;
@@ -3051,7 +3098,9 @@ export function VideoPlayer({
     const startDesktopRemuxPlayback = (sourceUrl: string) => {
       if (typeof window === "undefined" || typeof window.iptv?.prepareMkvPlayback !== "function") return;
       skipDefaultFinish = true;
-      setPlaybackMode("MKV · preparing…");
+      const isVod = /\/(movie|series)\//i.test(sourceUrl);
+      const vodLabel: "VOD" | "MKV" = isVod ? "VOD" : "MKV";
+      setPlaybackMode(`${vodLabel} · preparing…` as PlaybackModeLabel);
       setError(null);
       const bindPreparedMkvHls = (
         manifestSrc: string,
@@ -3064,12 +3113,11 @@ export function VideoPlayer({
         hlsRef.current = null;
         el.removeAttribute("src");
         el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
-        el.load();
 
-        if (r.fromCache) setPlaybackMode("MKV · HLS (cache)");
-        else if (r.remuxed) setPlaybackMode("MKV · HLS (remux)");
-        else if (r.usedTranscode) setPlaybackMode("MKV · HLS (transcoded)");
-        else setPlaybackMode("MKV · HLS");
+        if (r.fromCache) setPlaybackMode(`${vodLabel} · HLS (cache)` as PlaybackModeLabel);
+        else if (r.remuxed) setPlaybackMode(`${vodLabel} · HLS (remux)` as PlaybackModeLabel);
+        else if (r.usedTranscode) setPlaybackMode(`${vodLabel} · HLS (transcoded)` as PlaybackModeLabel);
+        else setPlaybackMode(`${vodLabel} · HLS` as PlaybackModeLabel);
         setError(null);
 
         const hls = new Hls({
@@ -3086,6 +3134,7 @@ export function VideoPlayer({
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           clearIptvLoadWatch();
           onTracks();
+          void el.play().catch(() => {});
         });
         hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, onTracks);
         hls.on(Hls.Events.ERROR, (_, data) => {
@@ -3105,9 +3154,9 @@ export function VideoPlayer({
           el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
         };
         hls.attachMedia(el);
+        console.log("[MKV-UI] hls.loadSource:", manifestSrc?.slice(0, 200));
         hls.loadSource(manifestSrc);
         startIptvLoadWatch();
-        void el.play().catch(() => {});
       };
 
       const bindPreparedMkv = (
@@ -3117,17 +3166,120 @@ export function VideoPlayer({
           remuxed?: boolean;
           usedTranscode?: boolean;
           playbackFormat?: string;
+          direct?: boolean;
+          mimeType?: string;
         }
       ) => {
         if (r.playbackFormat === "hls" || /\.m3u8(\?|#|$)/i.test(playUrl)) {
           bindPreparedMkvHls(playUrl, r);
           return;
         }
+
+        // Handle direct playback (MP4, WebM, MKV without remux)
+        console.log("[MKV-UI] bindPreparedMkv called with format:", r.playbackFormat, "direct:", r.direct, "mimeType:", r.mimeType);
+        if (r.playbackFormat === "direct" || r.direct) {
+          console.log("[MKV-UI] Attempting direct playback for:", playUrl?.slice(0, 100));
+          setPlaybackMode(`${vodLabel} · direct` as PlaybackModeLabel);
+          setError(null);
+
+          function onDirectMkvReady() {
+            el.removeEventListener("error", onDirectMkvError);
+            clearIptvLoadWatch();
+            onTracks();
+            console.log("[MKV-UI] Direct MKV streaming succeeded!");
+          }
+
+          function onDirectMkvError(e: Event) {
+            const videoEl = e.target as HTMLVideoElement;
+            console.error("[MKV-UI] Direct playback FAILED:");
+            console.error("[MKV-UI] Video error code:", videoEl?.error?.code);
+            console.error("[MKV-UI] Video error message:", videoEl?.error?.message);
+            console.error("[MKV-UI] Network state:", videoEl?.networkState);
+            console.error("[MKV-UI] Ready state:", videoEl?.readyState);
+            console.error("[MKV-UI] Current src:", videoEl?.currentSrc?.slice(0, 100));
+            el.removeEventListener("loadedmetadata", onDirectMkvReady);
+            el.removeEventListener("loadeddata", onDirectMkvReady);
+            el.removeEventListener("canplay", onDirectMkvReady);
+            clearIptvLoadWatch();
+            el.removeAttribute("src");
+            el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+
+            // For MKV files, retry with FFmpeg remux automatically
+            if (sourceUrl.endsWith(".mkv") || sourceUrl.includes(".mkv?")) {
+              console.log("[MKV-UI] MKV direct failed, retrying with FFmpeg remux...");
+              setPlaybackMode(`${vodLabel} · remuxing…` as PlaybackModeLabel);
+              setError("MKV requires transcoding. Starting FFmpeg...");
+
+              // Clear any pending state
+              skipDefaultFinish = true;
+
+              // Retry with remux by calling prepareMkvPlayback with a flag in the URL object
+              const retryUrl = { url: sourceUrl, forceRemux: true } as unknown as string;
+              void window.iptv
+                ?.prepareMkvPlayback(retryUrl)
+                .then((r2) => {
+                  if (!effectLive) return;
+                  console.log("[MKV-UI] Remux retry succeeded:", r2?.playbackFormat);
+                  if (r2.playbackFormat === "hls" || r2.playUrl?.includes(".m3u8")) {
+                    bindPreparedMkvHls(r2.playUrl, r2);
+                  } else {
+                    bindPreparedMkv(r2.playUrl, r2);
+                  }
+                })
+                .catch((e2) => {
+                  console.error("[MKV-UI] Remux retry failed:", e2);
+                  setPlaybackMode(null);
+                  setError(`MKV transcoding failed: ${e2?.message || "Unknown error"}`);
+                });
+              return;
+            }
+
+            // For non-MKV files, show error
+            const errorCode = videoEl?.error?.code;
+            let errorMsg = "Direct playback failed. ";
+            if (errorCode === 1) errorMsg += "Aborted by user.";
+            else if (errorCode === 2) errorMsg += "Network error. Check VPN/connection.";
+            else if (errorCode === 3) errorMsg += "Decode error. Codecs not supported.";
+            else if (errorCode === 4) errorMsg += "Source not supported (format/codecs).";
+            else errorMsg += `Error code: ${errorCode}.`;
+
+            setPlaybackMode(null);
+            setError(errorMsg + " The file may use unsupported codecs or your provider blocks browser requests.");
+          }
+
+          nativeErrCleanup = () => {
+            el.removeEventListener("error", onDirectMkvError);
+            el.removeEventListener("loadedmetadata", onDirectMkvReady);
+            el.removeEventListener("loadeddata", onDirectMkvReady);
+            el.removeEventListener("canplay", onDirectMkvReady);
+            el.removeAttribute("src");
+            el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+          };
+
+          el.addEventListener("error", onDirectMkvError, { once: true });
+          el.addEventListener("loadedmetadata", onDirectMkvReady);
+          el.addEventListener("loadeddata", onDirectMkvReady);
+          el.addEventListener("canplay", onDirectMkvReady);
+          el.removeAttribute("src");
+          el.querySelectorAll("source[data-iptv-mkv]").forEach((node) => node.remove());
+          const srcEl = document.createElement("source");
+          srcEl.setAttribute("data-iptv-mkv", "1");
+          srcEl.src = playUrl;
+          // Use provided mimeType or detect from URL
+          srcEl.type = r.mimeType || (playUrl.endsWith(".mkv") ? "video/x-matroska" : playUrl.endsWith(".mp4") ? "video/mp4" : "video/mp4");
+          console.log("[MKV-UI] Direct playback with MIME type:", srcEl.type);
+          el.appendChild(srcEl);
+          el.load();
+          startIptvLoadWatch();
+          void el.play().catch(() => {});
+          return;
+        }
+
         clearIptvLoadWatch();
-        if (r.fromCache) setPlaybackMode("MKV · MP4 (cache)");
-        else if (r.remuxed) setPlaybackMode("MKV · MP4 (remux)");
-        else if (r.usedTranscode) setPlaybackMode("MKV · MP4 (transcoded)");
-        else setPlaybackMode("MKV · MP4");
+        if (r.fromCache) setPlaybackMode(`${vodLabel} · MP4 (cache)` as PlaybackModeLabel);
+        else if (r.remuxed) setPlaybackMode(`${vodLabel} · MP4 (remux)` as PlaybackModeLabel);
+        else if (r.usedTranscode) setPlaybackMode(`${vodLabel} · MP4 (transcoded)` as PlaybackModeLabel);
+        else setPlaybackMode(`${vodLabel} · MP4` as PlaybackModeLabel);
         setError(null);
         function onMkvReady() {
           el.removeEventListener("error", onMkvError);
@@ -3167,16 +3319,19 @@ export function VideoPlayer({
         startIptvLoadWatch();
         void el.play().catch(() => {});
       };
+      console.log("[MKV-UI] Calling prepareMkvPlayback, url:", sourceUrl?.slice(0, 150));
       void window.iptv
         .prepareMkvPlayback(sourceUrl)
         .then((r) => {
           if (!effectLive) return;
+          console.log("[MKV-UI] prepareMkvPlayback resolved:", JSON.stringify({ playUrl: r?.playUrl?.slice(0, 150), playbackFormat: r?.playbackFormat, remuxed: r?.remuxed, usedTranscode: r?.usedTranscode, fromCache: r?.fromCache }));
           const playUrl =
             typeof r?.playUrl === "string" && r.playUrl.trim() ? r.playUrl.trim() : sourceUrl;
           bindPreparedMkv(playUrl, r ?? {});
         })
         .catch((e) => {
           if (!effectLive) return;
+          console.error("[MKV-UI] prepareMkvPlayback FAILED:", e?.message || e);
           clearIptvLoadWatch();
           setPlaybackMode(null);
           const msg = e instanceof Error ? e.message : String(e);
@@ -3829,8 +3984,7 @@ export function VideoPlayer({
     const v = mediaRef.current;
     if (!v) return;
     const vol = typeof volume === "number" && Number.isFinite(volume) ? volume : 1;
-    const clamped = Math.min(1, Math.max(0, vol));
-    void ensureElementPlaybackAudible(v, clamped);
+    void ensureElementPlaybackAudible(v, Math.max(0, vol));
   }, [volume, channel?.id, eqActive]);
 
   useEffect(() => {
@@ -3838,7 +3992,7 @@ export function VideoPlayer({
     if (!v || !isInternetAudioStream) return;
     const prime = () => {
       const vol = typeof volume === "number" && Number.isFinite(volume) ? volume : 1;
-      void ensureElementPlaybackAudible(v, Math.min(1, Math.max(0, vol)));
+      void ensureElementPlaybackAudible(v, Math.max(0, vol));
     };
     v.addEventListener("playing", prime);
     v.addEventListener("loadeddata", prime);
@@ -3853,13 +4007,25 @@ export function VideoPlayer({
   useEffect(() => {
     const video = mediaRef.current;
     if (!video) return;
+    const hls = hlsRef.current;
+
     for (let i = 0; i < video.textTracks.length; i++) {
       const t = video.textTracks[i];
       if (t.kind === "subtitles" || t.kind === "captions") {
         t.mode = "disabled";
       }
     }
-    if (selectedTrack === "off" || !ccEnabled) return;
+
+    if (hls?.subtitleTracks?.length) {
+      try {
+        hls.subtitleTrack = -1;
+      } catch {
+        /* noop */
+      }
+    }
+
+    if (selectedTrack === "off" || !ccEnabled || !trackOptions.length) return;
+
     const m = /^native-(\d+)$/.exec(selectedTrack);
     if (!m) return;
     const idx = Number(m[1]);
@@ -3867,7 +4033,63 @@ export function VideoPlayer({
     if (t && (t.kind === "subtitles" || t.kind === "captions")) {
       t.mode = "showing";
     }
+    if (hls?.subtitleTracks?.length && Number.isFinite(idx) && idx >= 0) {
+      const hlsIdx = Math.min(idx, hls.subtitleTracks.length - 1);
+      try {
+        hls.subtitleTrack = hlsIdx;
+      } catch {
+        /* noop */
+      }
+    }
   }, [selectedTrack, ccEnabled, trackOptions]);
+
+  const ccTracksAvailable = trackOptions.length > 0;
+
+  const onCcEnabledChange = useCallback(
+    (enabled: boolean) => {
+      setCcEnabled(enabled);
+      if (enabled && trackOptions.length) {
+        setSelectedTrack((prev) => defaultCcTrackId(trackOptions, prev));
+      }
+    },
+    [trackOptions]
+  );
+
+  const renderCcControls = () => (
+    <>
+      <label
+        className={`cc-toggle cc-toggle--inline${!ccTracksAvailable ? " cc-toggle--unavailable" : ""}`}
+        title={
+          ccTracksAvailable
+            ? "Show closed captions when the stream includes them"
+            : "No closed-caption tracks detected on this stream"
+        }
+      >
+        <input
+          type="checkbox"
+          checked={ccEnabled && ccTracksAvailable}
+          disabled={!ccTracksAvailable}
+          onChange={(e) => onCcEnabledChange(e.target.checked)}
+        />
+        Show CC
+      </label>
+      {ccTracksAvailable && trackOptions.length > 1 ? (
+        <select
+          className="cc-track-select"
+          value={ccEnabled ? selectedTrack : "off"}
+          disabled={!ccEnabled}
+          aria-label="Caption language"
+          onChange={(e) => setSelectedTrack(e.target.value)}
+        >
+          {trackOptions.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      ) : null}
+    </>
+  );
 
   const startRecording = useCallback(async () => {
     if (isLibraryChannel) return;
@@ -3892,13 +4114,13 @@ export function VideoPlayer({
         filenameExt: hint.filenameExt,
         tapContentType: hint.tapContentType,
         recordMode: hint.recordMode,
+        recordingCompact,
       };
       const out = await window.iptv!.startStreamRecord(recordPayload);
       recordIdRef.current = out.id;
       flushSync(() => {
         setRecording(true);
         setRecordSavedPath(out.filePath);
-        setRecordTapPlayUrl(out.playbackUrl ?? null);
         setRecordingSourceUrl(recordUrl);
         setRecordingChannelId(recordChannelId);
         setRecordingChannelName(recordName);
@@ -3909,7 +4131,7 @@ export function VideoPlayer({
     } finally {
       setRecordBusy(false);
     }
-  }, [channel, canStartRecording, isLibraryChannel, notifyRecordingStatus]);
+  }, [channel, canStartRecording, isLibraryChannel, notifyRecordingStatus, recordingCompact]);
 
   const stopRecording = useCallback(async () => {
     const id = recordIdRef.current;
@@ -3922,7 +4144,6 @@ export function VideoPlayer({
     } finally {
       recordIdRef.current = null;
       setRecording(false);
-      setRecordTapPlayUrl(null);
       setRecordingSourceUrl(null);
       setRecordingChannelId(null);
       setRecordingChannelName(null);
@@ -3931,6 +4152,33 @@ export function VideoPlayer({
       notifyRecordingStatus(false);
     }
   }, [notifyRecordingStatus]);
+
+  const startPvrRecording = useCallback(
+    async (stopAtMs: number, label: string, startAtMs?: number) => {
+      if (!channel || !onRequestStartPvr || !playbackPane) return;
+      setRecordErr(null);
+      const res = await onRequestStartPvr({
+        pane: playbackPane,
+        channel,
+        stopAtMs,
+        label,
+        startAtMs,
+        recordingCompact,
+      });
+      if (!res.ok) {
+        setRecordErr(res.error ?? "Could not start PVR.");
+      }
+    },
+    [channel, onRequestStartPvr, playbackPane, recordingCompact]
+  );
+
+  const stopPvrOnChannel = useCallback(() => {
+    if (channelPvrSession?.sessionId) {
+      void onRequestStopPvr?.(channelPvrSession.sessionId);
+      return;
+    }
+    void stopRecording();
+  }, [channelPvrSession, onRequestStopPvr, stopRecording]);
 
   const canRevealRecordingInExplorer =
     typeof window !== "undefined" && typeof window.iptv?.showRecordInFolder === "function";
@@ -4219,7 +4467,7 @@ export function VideoPlayer({
           type="range"
           className="volume-popover-slider"
           min={0}
-          max={1}
+          max={1.5}
           step={0.01}
           value={volume}
           aria-valuetext={`${Math.round(volume * 100)} percent`}
@@ -4712,15 +4960,15 @@ export function VideoPlayer({
 
       <div
         className={`${inSplitView ? "player-below-video player-below-video--split" : "player-below-video"}${
-          isEbookChannel ? " player-below-video--hidden" : ""
-        }`}
+          isIptvLiveChannel ? " player-below-video--live" : ""
+        }${isEbookChannel ? " player-below-video--hidden" : ""}`}
       >
       {channel && !isLibraryChannel ? (
         <div className="player-now-playing" aria-label="Now playing">
           <div className="player-now-playing-inner">
             {channel.logo?.trim() && !underLogoFailed ? (
               <img
-                className="player-now-playing-logo"
+                className={`player-now-playing-logo${channel.contentType === "movie" ? " player-now-playing-logo--movie" : ""}`}
                 src={channel.logo.trim()}
                 alt=""
                 loading="lazy"
@@ -4728,7 +4976,7 @@ export function VideoPlayer({
                 onError={() => setUnderLogoFailed(true)}
               />
             ) : (
-              <span className="player-now-playing-logo player-now-playing-logo--placeholder" aria-hidden>
+              <span className={`player-now-playing-logo player-now-playing-logo--placeholder${channel.contentType === "movie" ? " player-now-playing-logo--movie" : ""}`} aria-hidden>
                 {isRadioChannel ? "♪" : isPodcastChannel ? "🎙" : "TV"}
               </span>
             )}
@@ -4743,6 +4991,9 @@ export function VideoPlayer({
                 ) : null}
                 <span className="player-now-playing-title-text">{channel.name}</span>
               </div>
+              {channel.contentType === "movie" && channel.plot?.trim() ? (
+                <div className="player-now-playing-plot">{channel.plot.trim()}</div>
+              ) : null}
               {channel.group?.trim() ? (
                 <div className="player-now-playing-group">{channel.group.trim()}</div>
               ) : null}
@@ -4754,7 +5005,15 @@ export function VideoPlayer({
       <div className={`player-chrome${layoutMode === "compactTvDock" || (layoutMode === "compactReader" && isEbookChannel) ? " player-chrome--hidden" : ""}`}>
         {channel ? (
           <>
-              <div className={`now-row${showRecordChrome || showScreenOffChrome || recording ? " now-row--with-actions" : ""}`}>
+              <div
+                className={`now-row${
+                  useLiveToolStrip
+                    ? " now-row--live-toolbar"
+                    : showRecordChrome || showScreenOffChrome || recording
+                      ? " now-row--with-actions"
+                      : ""
+                }`}
+              >
               <div className="now-row-main">
                 {paneLabel ? (
                   <span className="pane-label" title="Player pane">
@@ -4775,30 +5034,115 @@ export function VideoPlayer({
                     ) : null}
                     {renderVolumeEq("volume-eq-wrap--chrome-inline")}
                   </div>
-                ) : playbackMode ? (
-                  <span
-                    className={`playback-badge${playbackMode.includes("blocked") ? " playback-badge--warn" : ""}`}
-                    title={playbackBadgeTitle}
-                  >
-                    {playbackMode}
-                  </span>
-                ) : null}
-                {(onVolumeChange && !isLibraryChannel && !isInternetAudioStream) ||
-                (!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel) ? (
-                  <div className="now-row-playback-cluster">
-                    {!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel ? (
-                      <label className="cc-toggle cc-toggle--inline">
-                        <input type="checkbox" checked={ccEnabled} onChange={(e) => setCcEnabled(e.target.checked)} />
-                        Show CC
-                      </label>
+                ) : useLiveToolStrip ? (
+                  <>
+                    {playbackMode ? (
+                      <span
+                        className={`playback-badge${playbackMode.includes("blocked") ? " playback-badge--warn" : ""}`}
+                        title={playbackBadgeTitle}
+                      >
+                        {playbackMode}
+                      </span>
                     ) : null}
-                    {onVolumeChange && !isLibraryChannel && !isInternetAudioStream
-                      ? renderVolumeEq("volume-eq-wrap--chrome-inline")
-                      : null}
-                  </div>
-                ) : null}
+                    <div className="now-row-tool-strip">
+                      <div className="now-row-tool-strip-primary">
+                      {renderCcControls()}
+                      {onVolumeChange ? renderVolumeEq("volume-eq-wrap--chrome-inline") : null}
+                      {recording ? (
+                        <button
+                          type="button"
+                          className="rec-btn rec-btn--stop"
+                          disabled={recordBusy}
+                          title={
+                            watchingOtherChannelWhileRecording
+                              ? `Stop recording ${recordingChannelName ?? "channel"}`
+                              : "Stop recording"
+                          }
+                          onClick={() => void stopRecording()}
+                        >
+                          ■
+                        </button>
+                      ) : showRecordChrome ? (
+                        <button
+                          type="button"
+                          className="rec-btn"
+                          disabled={recordBusy || !canStartRecording}
+                          title={recordButtonTitle}
+                          onClick={() => void startRecording()}
+                        >
+                          REC
+                        </button>
+                      ) : null}
+                      {showScreenOffChrome || (showPvrBar && channel) ? (
+                        <div className="now-row-pvr-cluster">
+                          {showScreenOffChrome ? (
+                            <button
+                              type="button"
+                              className={`screen-off-btn${screenPlaybackOff ? " screen-off-btn--on" : ""}`}
+                              title={
+                                screenPlaybackOff
+                                  ? "Turn the stream screen back on."
+                                  : recording
+                                    ? "Hide the video while audio playback and recording continue."
+                                    : "Hide the video and keep the stream audio playing."
+                              }
+                              aria-pressed={screenPlaybackOff}
+                              onClick={() => setScreenPlaybackOff((v) => !v)}
+                            >
+                              {screenPlaybackOff ? "Screen on" : "Screen off"}
+                            </button>
+                          ) : null}
+                          {showPvrBar && channel ? (
+                            <PlayerPvrBar
+                              compact
+                              channel={channel}
+                              canRecord={canStartRecording}
+                              recordBusy={recordBusy}
+                              recordingCompact={recordingCompact}
+                              onRecordingCompactChange={(compact) => {
+                                setRecordingCompact(compact);
+                                saveUiSession({ recordingCompact: compact });
+                              }}
+                              channelPvrSession={channelPvrSession ?? null}
+                              recordingThisChannel={recordingThisChannel}
+                              onStartPvr={(stopAtMs, label, startAtMs) =>
+                                void startPvrRecording(stopAtMs, label, startAtMs)
+                              }
+                              onStopPvr={() => stopPvrOnChannel()}
+                            />
+                          ) : null}
+                        </div>
+                      ) : null}
+                      </div>
+                      {channelEpgGuide ? <ChannelEpgToolbar guide={channelEpgGuide} /> : null}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    {playbackMode ? (
+                      <span
+                        className={`playback-badge${playbackMode.includes("blocked") ? " playback-badge--warn" : ""}`}
+                        title={playbackBadgeTitle}
+                      >
+                        {playbackMode}
+                      </span>
+                    ) : null}
+                    {(onVolumeChange && !isLibraryChannel && !isInternetAudioStream) ||
+                    (!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel) ? (
+                      <div className="now-row-playback-cluster">
+                        {!isRadioChannel && !isLibraryChannel && !isEmbeddedWebChannel && !isEbookChannel
+                          ? renderCcControls()
+                          : null}
+                        {onVolumeChange && !isLibraryChannel && !isInternetAudioStream
+                          ? renderVolumeEq("volume-eq-wrap--chrome-inline")
+                          : null}
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
-              {showRecordChrome || showScreenOffChrome || recording ? (
+              {!useLiveToolStrip && (showRecordChrome || showScreenOffChrome || recording) ? (
+                <div className="now-row-actions-col">
                 <div className="now-row-actions">
                   {showRecordChrome && recordSavedPath ? (
                     canRevealRecordingInExplorer ? (
@@ -4859,15 +5203,32 @@ export function VideoPlayer({
                     </button>
                   ) : null}
                 </div>
+                </div>
               ) : null}
             </div>
+            {useLiveToolStrip && showRecordChrome && recordSavedPath ? (
+              canRevealRecordingInExplorer ? (
+                <button
+                  type="button"
+                  className="now-row-record-path record-path--compact record-path--link"
+                  title={`${recordSavedPath}\nClick to open this folder in File Explorer and select the file`}
+                  onClick={openRecordedFileInExplorer}
+                >
+                  {recordSavedPath.length > 72 ? `…${recordSavedPath.slice(-68)}` : recordSavedPath}
+                </button>
+              ) : (
+                <div className="now-row-record-path record-path--compact" title={recordSavedPath}>
+                  {recordSavedPath.length > 72 ? `…${recordSavedPath.slice(-68)}` : recordSavedPath}
+                </div>
+              )
+            ) : null}
             <div className="buffer-stats" title="Buffered seconds ahead, buffer fill rate (s/s), optional HLS level bitrate">
               {bufferLine}
             </div>
+            {useChromeSeek && !isIptvLiveChannel ? renderChromeSeekRow() : null}
+            {channelEpgGuide ? <ChannelEpgGuide guide={channelEpgGuide} /> : null}
             {useChromeSeek ? (
               <>
-                {renderChromeSeekRow()}
-                {isIptvLiveChannel && channel ? <ChannelEpgGuide channel={channel} /> : null}
                 {isLibraryChannel ? (
                 <div className="library-controls-bar">
                   <div className="library-transport-row library-transport-row--compact" aria-label="Playback controls">

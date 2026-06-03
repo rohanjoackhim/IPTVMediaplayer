@@ -1,3 +1,5 @@
+export type ChannelContentType = "live" | "movie" | "series";
+
 export interface Channel {
   id: string;
   name: string;
@@ -8,6 +10,28 @@ export interface Channel {
   tvgId?: string;
   /** From tvg-country / group-title heuristics (IPTV lists vary). */
   country?: string;
+  /** Content classification: live TV, VOD movie, or series episode. */
+  contentType?: ChannelContentType;
+  /** Series show name (for grouping episodes under a show). */
+  seriesName?: string;
+  /** Season number within a series. */
+  seriesSeason?: number;
+  /** Episode number within a season. */
+  seriesEpisode?: number;
+  /** Episode title (if different from the channel name). */
+  episodeTitle?: string;
+  /** Xtream series ID (for fetching episode info from the API). */
+  seriesId?: number;
+  /** Year / release date for movies. */
+  releaseYear?: string;
+  /** Rating (e.g. "7.5" from TMDb). */
+  rating?: string;
+  /** Plot / description for movies or series. */
+  plot?: string;
+  /** Genre label for movies/series (e.g. "Action, Drama"). */
+  genre?: string;
+  /** Container extension hint from Xtream (e.g. "mp4", "mkv"). */
+  containerExtension?: string;
   /** Online radio metadata from Radio Browser. */
   radioTags?: string;
   radioHomepage?: string;

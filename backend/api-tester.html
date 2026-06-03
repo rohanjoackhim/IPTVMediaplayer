@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IPTV Backend API Tester</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f13; color: #e0e0e0; min-height: 100vh; }
+
+    header { background: #1a1a24; border-bottom: 1px solid #2a2a3a; padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 18px; font-weight: 600; color: #fff; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #666; flex-shrink: 0; }
+    .status-dot.online { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
+    .status-dot.offline { background: #f87171; box-shadow: 0 0 6px #f87171; }
+    #status-text { font-size: 13px; color: #888; }
+    .token-display { margin-left: auto; font-size: 12px; color: #888; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .token-display span { color: #a78bfa; }
+
+    .layout { display: grid; grid-template-columns: 220px 1fr; height: calc(100vh - 57px); }
+
+    nav { background: #141420; border-right: 1px solid #2a2a3a; overflow-y: auto; padding: 12px 0; }
+    .nav-section { padding: 8px 16px 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #555; }
+    .nav-item { display: block; width: 100%; text-align: left; padding: 8px 16px; font-size: 13px; cursor: pointer; border: none; background: none; color: #aaa; transition: all 0.15s; border-left: 3px solid transparent; }
+    .nav-item:hover { background: #1e1e2e; color: #e0e0e0; }
+    .nav-item.active { background: #1e1e2e; color: #fff; border-left-color: #7c3aed; }
+    .method-badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px; margin-right: 6px; min-width: 38px; text-align: center; }
+    .GET { background: #064e3b; color: #4ade80; }
+    .POST { background: #1e3a5f; color: #60a5fa; }
+    .PUT { background: #3d2000; color: #fb923c; }
+    .DELETE { background: #3b0000; color: #f87171; }
+    .PATCH { background: #2d1b4e; color: #c084fc; }
+
+    main { display: flex; flex-direction: column; overflow: hidden; }
+    .request-panel { padding: 20px 24px; border-bottom: 1px solid #2a2a3a; flex-shrink: 0; }
+    .request-panel h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .request-panel p { font-size: 13px; color: #888; margin-bottom: 14px; }
+
+    .url-bar { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
+    .url-bar input { flex: 1; background: #1e1e2e; border: 1px solid #3a3a4a; border-radius: 6px; padding: 8px 12px; color: #e0e0e0; font-size: 13px; font-family: monospace; }
+    .url-bar input:focus { outline: none; border-color: #7c3aed; }
+    .send-btn { background: #7c3aed; color: #fff; border: none; border-radius: 6px; padding: 8px 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s; white-space: nowrap; }
+    .send-btn:hover { background: #6d28d9; }
+    .send-btn:active { background: #5b21b6; }
+    .send-btn:disabled { background: #444; cursor: not-allowed; }
+
+    .body-label { font-size: 12px; color: #888; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    textarea.body-input { width: 100%; background: #1e1e2e; border: 1px solid #3a3a4a; border-radius: 6px; padding: 10px 12px; color: #e0e0e0; font-size: 13px; font-family: monospace; resize: vertical; min-height: 100px; }
+    textarea.body-input:focus { outline: none; border-color: #7c3aed; }
+
+    .response-panel { flex: 1; overflow: hidden; display: flex; flex-direction: column; padding: 16px 24px; }
+    .response-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-shrink: 0; }
+    .response-header h3 { font-size: 14px; font-weight: 600; }
+    .status-badge { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+    .s2xx { background: #064e3b; color: #4ade80; }
+    .s4xx { background: #3b0000; color: #f87171; }
+    .s5xx { background: #3d2000; color: #fb923c; }
+    .copy-btn { margin-left: auto; font-size: 12px; background: #2a2a3a; border: none; color: #aaa; padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+    .copy-btn:hover { background: #3a3a4a; color: #fff; }
+    pre.response-body { flex: 1; overflow-y: auto; background: #141420; border: 1px solid #2a2a3a; border-radius: 6px; padding: 14px; font-size: 13px; font-family: monospace; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+    .key { color: #60a5fa; }
+    .string { color: #4ade80; }
+    .number { color: #fb923c; }
+    .boolean { color: #c084fc; }
+    .null { color: #888; }
+    .empty-state { color: #555; font-size: 13px; text-align: center; margin-top: 40px; }
+
+    .quick-fill { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .quick-btn { font-size: 11px; background: #1e1e2e; border: 1px solid #3a3a4a; color: #aaa; padding: 3px 8px; border-radius: 4px; cursor: pointer; }
+    .quick-btn:hover { background: #2a2a3a; color: #fff; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="status-dot" id="status-dot"></div>
+  <h1>IPTV API Tester</h1>
+  <span id="status-text">Checking...</span>
+  <div class="token-display" id="token-display"></div>
+</header>
+
+<div class="layout">
+  <nav id="nav"></nav>
+  <main>
+    <div class="request-panel">
+      <h2 id="endpoint-title">Select an endpoint</h2>
+      <p id="endpoint-desc">Choose an endpoint from the sidebar</p>
+      <div class="url-bar">
+        <input type="text" id="url-input" placeholder="http://localhost:3001/..." />
+        <button class="send-btn" id="send-btn" onclick="sendRequest()">Send</button>
+      </div>
+      <div id="body-section" style="display:none">
+        <div class="body-label">Request Body (JSON)</div>
+        <div class="quick-fill" id="quick-fill"></div>
+        <textarea class="body-input" id="body-input" rows="5" placeholder='{"key": "value"}'></textarea>
+      </div>
+    </div>
+    <div class="response-panel">
+      <div class="response-header">
+        <h3>Response</h3>
+        <span class="status-badge" id="status-badge" style="display:none"></span>
+        <button class="copy-btn" onclick="copyResponse()" style="display:none" id="copy-btn">Copy</button>
+      </div>
+      <pre class="response-body" id="response-body"><span class="empty-state">No request sent yet</span></pre>
+    </div>
+  </main>
+</div>
+
+<script>
+const BASE = 'http://localhost:3001';
+let currentMethod = 'GET';
+let authToken = localStorage.getItem('iptv_token') || '';
+
+const endpoints = [
+  { section: 'Health' },
+  { method: 'GET', path: '/health', title: 'Health Check', desc: 'Check if the server is running', body: null },
+
+  { section: 'Auth' },
+  { method: 'POST', path: '/api/auth/register', title: 'Register', desc: 'Create a new account', body: '{"email":"test@example.com","password":"password123"}' },
+  { method: 'POST', path: '/api/auth/login', title: 'Login', desc: 'Login and receive a JWT token', body: '{"email":"test@example.com","password":"password123"}' },
+  { method: 'GET', path: '/api/auth/me', title: 'Get Current User', desc: 'Get your profile (requires auth)', body: null, auth: true },
+
+  { section: 'API Keys' },
+  { method: 'GET', path: '/api/keys', title: 'List API Keys', desc: 'Get all your API keys', body: null, auth: true },
+  { method: 'POST', path: '/api/keys', title: 'Create API Key', desc: 'Generate a new API key', body: '{"name":"My Key"}', auth: true },
+  { method: 'DELETE', path: '/api/keys/:id', title: 'Revoke API Key', desc: 'Delete an API key by ID', body: null, auth: true },
+  { method: 'PATCH', path: '/api/keys/:id/toggle', title: 'Toggle API Key', desc: 'Enable/disable an API key', body: null, auth: true },
+
+  { section: 'Channels' },
+  { method: 'GET', path: '/api/channels', title: 'List Channels', desc: 'Get all your channels', body: null, auth: true },
+  { method: 'POST', path: '/api/channels', title: 'Create Channel', desc: 'Add a new channel', body: '{"name":"BBC News","url":"http://stream.example.com/bbc","content_type":"live","group":"News"}', auth: true },
+  { method: 'PUT', path: '/api/channels/:id', title: 'Update Channel', desc: 'Update a channel by ID', body: '{"name":"Updated Name","is_active":true}', auth: true },
+  { method: 'DELETE', path: '/api/channels/:id', title: 'Delete Channel', desc: 'Delete a channel by ID', body: null, auth: true },
+  { method: 'GET', path: '/api/channels/public', title: 'Public Channels (API Key)', desc: 'Get channels using an API key (set x-api-key header below)', body: null, apiKey: true },
+
+  { section: 'Payments' },
+  { method: 'GET', path: '/api/payments/status', title: 'Subscription Status', desc: 'Check your subscription', body: null, auth: true },
+  { method: 'POST', path: '/api/payments/create-intent', title: 'Create Payment Intent', desc: 'Start a Stripe payment', body: '{"period":"monthly"}', auth: true },
+  { method: 'GET', path: '/api/payments/history', title: 'Payment History', desc: 'View past payments', body: null, auth: true },
+];
+
+function buildNav() {
+  const nav = document.getElementById('nav');
+  endpoints.forEach((ep, i) => {
+    if (ep.section) {
+      const s = document.createElement('div');
+      s.className = 'nav-section';
+      s.textContent = ep.section;
+      nav.appendChild(s);
+    } else {
+      const btn = document.createElement('button');
+      btn.className = 'nav-item';
+      btn.dataset.index = i;
+      btn.innerHTML = `<span class="method-badge ${ep.method}">${ep.method}</span>${ep.title}`;
+      btn.onclick = () => selectEndpoint(i);
+      nav.appendChild(btn);
+    }
+  });
+}
+
+function selectEndpoint(index) {
+  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
+  document.querySelector(`.nav-item[data-index="${index}"]`)?.classList.add('active');
+
+  const ep = endpoints[index];
+  currentMethod = ep.method;
+  document.getElementById('endpoint-title').textContent = `${ep.method} ${ep.path}`;
+  document.getElementById('endpoint-desc').textContent = ep.desc + (ep.auth ? ' 🔒 Requires Auth Token' : '') + (ep.apiKey ? ' 🔑 Requires API Key header' : '');
+  document.getElementById('url-input').value = BASE + ep.path;
+
+  const bodySection = document.getElementById('body-section');
+  const quickFill = document.getElementById('quick-fill');
+  quickFill.innerHTML = '';
+
+  if (ep.body) {
+    bodySection.style.display = 'block';
+    document.getElementById('body-input').value = JSON.stringify(JSON.parse(ep.body), null, 2);
+
+    // Quick fill buttons
+    if (ep.path.includes('/auth/')) {
+      addQuickBtn('Use saved email/pass', () => {
+        const saved = localStorage.getItem('iptv_creds');
+        if (saved) document.getElementById('body-input').value = saved;
+        else alert('No saved credentials yet. Register first.');
+      });
+    }
+    if (ep.path === '/api/auth/register' || ep.path === '/api/auth/login') {
+      addQuickBtn('Save credentials', () => {
+        localStorage.setItem('iptv_creds', document.getElementById('body-input').value);
+        showToast('Credentials saved!');
+      });
+    }
+  } else {
+    bodySection.style.display = 'none';
+    document.getElementById('body-input').value = '';
+  }
+
+  // Add ID helper if path has :id
+  if (ep.path.includes(':id')) {
+    addQuickBtn('Paste ID from clipboard', async () => {
+      const text = await navigator.clipboard.readText();
+      const url = document.getElementById('url-input');
+      url.value = url.value.replace(':id', text.trim());
+    });
+  }
+
+  document.getElementById('response-body').innerHTML = '<span class="empty-state">Press Send to execute</span>';
+  document.getElementById('status-badge').style.display = 'none';
+  document.getElementById('copy-btn').style.display = 'none';
+}
+
+function addQuickBtn(label, fn) {
+  const btn = document.createElement('button');
+  btn.className = 'quick-btn';
+  btn.textContent = label;
+  btn.onclick = fn;
+  document.getElementById('quick-fill').appendChild(btn);
+}
+
+async function sendRequest() {
+  const url = document.getElementById('url-input').value.trim();
+  const bodyText = document.getElementById('body-input').value.trim();
+  const sendBtn = document.getElementById('send-btn');
+
+  sendBtn.disabled = true;
+  sendBtn.textContent = 'Sending...';
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+  // Support x-api-key via prompt if hitting public endpoint
+  if (url.includes('/channels/public') && !authToken) {
+    const key = prompt('Enter your API key (x-api-key):');
+    if (key) headers['x-api-key'] = key;
+  }
+
+  const opts = { method: currentMethod, headers };
+  if (bodyText && ['POST','PUT','PATCH'].includes(currentMethod)) {
+    try { opts.body = JSON.stringify(JSON.parse(bodyText)); }
+    catch { opts.body = bodyText; }
+  }
+
+  const start = Date.now();
+  try {
+    const res = await fetch(url, opts);
+    const elapsed = Date.now() - start;
+    let data;
+    try { data = await res.json(); } catch { data = { raw: await res.text() }; }
+
+    // Auto-save token from login/register
+    if (data.token) {
+      authToken = data.token;
+      localStorage.setItem('iptv_token', authToken);
+      updateTokenDisplay();
+    }
+
+    showResponse(res.status, data, elapsed);
+  } catch (err) {
+    showResponse(0, { error: err.message + ' — Is the server running? (npm run dev in /backend)' }, Date.now() - start);
+  }
+
+  sendBtn.disabled = false;
+  sendBtn.textContent = 'Send';
+}
+
+function showResponse(status, data, ms) {
+  const badge = document.getElementById('status-badge');
+  badge.style.display = 'inline-block';
+  badge.textContent = status ? `${status} · ${ms}ms` : `Error · ${ms}ms`;
+  badge.className = 'status-badge ' + (status >= 200 && status < 300 ? 's2xx' : status >= 400 && status < 500 ? 's4xx' : status >= 500 ? 's5xx' : 's4xx');
+
+  document.getElementById('copy-btn').style.display = 'inline-block';
+  document.getElementById('response-body').innerHTML = syntaxHighlight(JSON.stringify(data, null, 2));
+}
+
+function syntaxHighlight(json) {
+  return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, match => {
+    if (/^"/.test(match)) {
+      if (/:$/.test(match)) return `<span class="key">${match}</span>`;
+      return `<span class="string">${match}</span>`;
+    }
+    if (/true|false/.test(match)) return `<span class="boolean">${match}</span>`;
+    if (/null/.test(match)) return `<span class="null">${match}</span>`;
+    return `<span class="number">${match}</span>`;
+  });
+}
+
+function copyResponse() {
+  const text = document.getElementById('response-body').innerText;
+  navigator.clipboard.writeText(text).then(() => showToast('Copied!'));
+}
+
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#7c3aed;color:#fff;padding:8px 16px;border-radius:6px;font-size:13px;z-index:9999;';
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2000);
+}
+
+function updateTokenDisplay() {
+  const el = document.getElementById('token-display');
+  if (authToken) {
+    el.innerHTML = `<span>Token:</span> ${authToken.slice(0, 30)}... <button onclick="clearToken()" style="background:#3a2a4a;border:none;color:#f87171;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:11px;">Clear</button>`;
+  } else {
+    el.innerHTML = '<span style="color:#555">No token — login first</span>';
+  }
+}
+
+function clearToken() {
+  authToken = '';
+  localStorage.removeItem('iptv_token');
+  updateTokenDisplay();
+}
+
+async function checkHealth() {
+  try {
+    const res = await fetch(`${BASE}/health`);
+    const dot = document.getElementById('status-dot');
+    const txt = document.getElementById('status-text');
+    if (res.ok) {
+      dot.className = 'status-dot online';
+      txt.textContent = 'Server online · localhost:3001';
+    } else {
+      dot.className = 'status-dot offline';
+      txt.textContent = 'Server error';
+    }
+  } catch {
+    document.getElementById('status-dot').className = 'status-dot offline';
+    document.getElementById('status-text').textContent = 'Server offline — run: npm run dev in /backend';
+  }
+}
+
+buildNav();
+updateTokenDisplay();
+checkHealth();
+setInterval(checkHealth, 5000);
+</script>
+</body>
+</html>

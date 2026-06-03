@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IPTV Stream Portal</title>
+  <script src="https://js.stripe.com/v3/"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: #13131a;
+      --surface2: #1c1c28;
+      --border: #2a2a3e;
+      --accent: #6c63ff;
+      --accent2: #a78bfa;
+      --green: #4ade80;
+      --red: #f87171;
+      --yellow: #fbbf24;
+      --text: #e2e8f0;
+      --muted: #64748b;
+      --radius: 12px;
+    }
+
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    /* ── NAV ── */
+    nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 32px; height: 60px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+    .nav-brand { font-size: 18px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
+    .nav-brand span { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .nav-actions { display: flex; gap: 10px; align-items: center; }
+    .nav-user { font-size: 13px; color: var(--muted); }
+
+    /* ── PAGES ── */
+    .page { display: none; }
+    .page.active { display: block; }
+
+    /* ── HERO ── */
+    .hero { padding: 80px 32px 60px; text-align: center; max-width: 760px; margin: 0 auto; }
+    .hero h1 { font-size: clamp(28px, 5vw, 48px); font-weight: 800; line-height: 1.2; margin-bottom: 16px; }
+    .hero h1 em { font-style: normal; background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero p { font-size: 17px; color: var(--muted); line-height: 1.7; margin-bottom: 36px; }
+    .hero-btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+    /* ── PRICING ── */
+    .pricing-section { padding: 60px 32px; max-width: 900px; margin: 0 auto; }
+    .pricing-section h2 { text-align: center; font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+    .pricing-section .sub { text-align: center; color: var(--muted); margin-bottom: 40px; }
+    .pricing-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; }
+    .pricing-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; position: relative; transition: border-color .2s; }
+    .pricing-card:hover { border-color: var(--accent); }
+    .pricing-card.featured { border-color: var(--accent); background: linear-gradient(135deg, #13131a 0%, #1a1530 100%); }
+    .pricing-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; padding: 4px 14px; border-radius: 20px; letter-spacing: .5px; text-transform: uppercase; }
+    .pricing-name { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+    .pricing-price { font-size: 44px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+    .pricing-price sup { font-size: 22px; vertical-align: super; }
+    .pricing-price span { font-size: 16px; color: var(--muted); font-weight: 400; }
+    .pricing-desc { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+    .pricing-features { list-style: none; margin-bottom: 32px; }
+    .pricing-features li { font-size: 14px; padding: 7px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+    .pricing-features li:last-child { border-bottom: none; }
+    .pricing-features li::before { content: '✓'; color: var(--green); font-weight: 700; flex-shrink: 0; }
+
+    /* ── FEATURES ── */
+    .features-section { padding: 60px 32px; max-width: 900px; margin: 0 auto; }
+    .features-section h2 { text-align: center; font-size: 28px; font-weight: 700; margin-bottom: 40px; }
+    .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+    .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+    .feature-icon { font-size: 28px; margin-bottom: 12px; }
+    .feature-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+    .feature-card p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+    /* ── BUTTONS ── */
+    .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 22px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; border: none; transition: all .15s; text-decoration: none; white-space: nowrap; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #5b52e8; }
+    .btn-outline { background: transparent; color: var(--text); border: 1px solid var(--border); }
+    .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-danger { background: #3f1515; color: var(--red); border: 1px solid #5a2020; }
+    .btn-danger:hover { background: #5a2020; }
+    .btn-sm { padding: 6px 14px; font-size: 13px; }
+    .btn-lg { padding: 14px 32px; font-size: 16px; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-full { width: 100%; }
+
+    /* ── AUTH MODAL ── */
+    .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 200; align-items: center; justify-content: center; padding: 16px; }
+    .modal-overlay.open { display: flex; }
+    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 36px; width: 100%; max-width: 420px; position: relative; }
+    .modal h2 { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+    .modal .modal-sub { font-size: 14px; color: var(--muted); margin-bottom: 28px; }
+    .modal-close { position: absolute; top: 16px; right: 16px; background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; line-height: 1; }
+    .modal-close:hover { color: var(--text); }
+    .modal-switch { text-align: center; font-size: 13px; color: var(--muted); margin-top: 20px; }
+    .modal-switch a { color: var(--accent2); cursor: pointer; text-decoration: none; }
+    .modal-switch a:hover { text-decoration: underline; }
+
+    /* ── FORMS ── */
+    .form-group { margin-bottom: 18px; }
+    .form-label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 6px; }
+    .form-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color .15s; }
+    .form-input:focus { border-color: var(--accent); }
+    .form-input::placeholder { color: var(--muted); }
+    .form-select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; cursor: pointer; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    /* ── ALERTS ── */
+    .alert { padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+    .alert.show { display: block; }
+    .alert-error { background: #2a1515; border: 1px solid var(--red); color: var(--red); }
+    .alert-success { background: #132a1f; border: 1px solid var(--green); color: var(--green); }
+    .alert-info { background: #1a1530; border: 1px solid var(--accent); color: var(--accent2); }
+
+    /* ── DASHBOARD ── */
+    .dashboard { max-width: 980px; margin: 0 auto; padding: 32px 24px; }
+    .dash-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 32px; flex-wrap: wrap; gap: 12px; }
+    .dash-header h1 { font-size: 22px; font-weight: 700; }
+    .dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-bottom: 28px; }
+
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; }
+    .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+    .card-title-icon { font-size: 16px; }
+
+    .stat-value { font-size: 36px; font-weight: 800; color: #fff; margin-bottom: 4px; }
+    .stat-label { font-size: 13px; color: var(--muted); }
+
+    .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .badge-active { background: #132a1f; color: var(--green); border: 1px solid #1e4030; }
+    .badge-inactive { background: #1a1515; color: var(--muted); border: 1px solid #2a2020; }
+    .badge-trial { background: #1a1f2a; color: var(--yellow); border: 1px solid #2a3440; }
+    .badge-unlimited { background: #1a1f33; color: var(--accent2); border: 1px solid #2a3340; }
+    .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+    /* subscription card */
+    .sub-info { display: flex; flex-direction: column; gap: 10px; }
+    .sub-row { display: flex; justify-content: space-between; align-items: center; font-size: 14px; }
+    .sub-row .label { color: var(--muted); }
+    .sub-row .value { font-weight: 600; }
+
+    /* api key box */
+    .api-key-box { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-family: monospace; font-size: 13px; color: var(--accent2); word-break: break-all; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .api-key-value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .api-key-copy { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+    .api-key-copy:hover { color: var(--text); border-color: var(--accent); }
+
+    /* channels table */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    td { padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+    .td-url { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; font-family: monospace; }
+    .td-type { font-size: 11px; background: var(--surface2); border: 1px solid var(--border); padding: 2px 8px; border-radius: 4px; color: var(--muted); }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
+    .empty-icon { font-size: 36px; margin-bottom: 12px; }
+
+    /* channel add form */
+    .add-channel-form { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; display: none; }
+    .add-channel-form.open { display: block; }
+
+    /* payment modal */
+    .payment-step { display: none; }
+    .payment-step.active { display: block; }
+    #card-element { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }
+    .stripe-label { font-size: 13px; color: var(--muted); margin-bottom: 8px; display: block; }
+    .price-summary { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+    .price-summary .price-line { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 8px; }
+    .price-summary .price-line:last-child { margin-bottom: 0; font-weight: 700; font-size: 16px; color: #fff; border-top: 1px solid var(--border); padding-top: 8px; margin-top: 8px; }
+
+    /* spinner */
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* toast */
+    #toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 18px; font-size: 14px; z-index: 999; transform: translateY(80px); opacity: 0; transition: all .3s; max-width: 320px; }
+    #toast.show { transform: translateY(0); opacity: 1; }
+    #toast.toast-success { border-color: var(--green); color: var(--green); }
+    #toast.toast-error { border-color: var(--red); color: var(--red); }
+
+    @media (max-width: 600px) {
+      nav { padding: 0 16px; }
+      .hero { padding: 48px 16px 40px; }
+      .pricing-section, .features-section { padding: 40px 16px; }
+      .dashboard { padding: 20px 14px; }
+      .form-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-brand">📺 <span>IPTV</span>Stream</div>
+  <div class="nav-actions">
+    <span class="nav-user" id="nav-user-label"></span>
+    <button class="btn btn-outline btn-sm" id="btn-login" onclick="openAuth('login')">Log in</button>
+    <button class="btn btn-primary btn-sm" id="btn-signup" onclick="openAuth('register')">Get Started</button>
+    <button class="btn btn-outline btn-sm" id="btn-dashboard" style="display:none" onclick="showPage('dashboard')">Dashboard</button>
+    <button class="btn btn-outline btn-sm" id="btn-logout" style="display:none" onclick="logout()">Log out</button>
+  </div>
+</nav>
+
+<!-- ════════════ LANDING PAGE ════════════ -->
+<div id="page-landing" class="page active">
+
+  <section class="hero">
+    <h1>Stream Your Channels on <em>Any Device</em></h1>
+    <p>Upload your IPTV streams, manage your channels, and play them instantly in our desktop application. One subscription, unlimited streams.</p>
+    <div class="hero-btns">
+      <button class="btn btn-primary btn-lg" onclick="openAuth('register')">Start for $25/month</button>
+      <button class="btn btn-outline btn-lg" onclick="document.querySelector('.pricing-section').scrollIntoView({behavior:'smooth'})">See pricing</button>
+    </div>
+  </section>
+
+  <section class="features-section">
+    <h2>Everything you need to stream</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">📡</div>
+        <h3>Upload Channels</h3>
+        <p>Add live streams, movies or series via our web dashboard or REST API.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🔑</div>
+        <h3>Secure API Key</h3>
+        <p>Get a personal API key to connect the desktop app to your channel library.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">▶️</div>
+        <h3>Play Instantly</h3>
+        <p>Channels appear in the "API Channels" tab of the IPTV desktop app in real-time.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🛡️</div>
+        <h3>Private & Secure</h3>
+        <p>Your channels are private — only accessible with your API key.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="pricing-section">
+    <h2>Simple pricing</h2>
+    <p class="sub">No hidden fees. Cancel anytime.</p>
+    <div class="pricing-cards">
+      <div class="pricing-card featured">
+        <div class="pricing-badge">Most Popular</div>
+        <div class="pricing-name">Monthly</div>
+        <div class="pricing-price"><sup>$</sup>25<span>/mo</span></div>
+        <div class="pricing-desc">Full access, billed monthly</div>
+        <ul class="pricing-features">
+          <li>Unlimited channels</li>
+          <li>Personal API key</li>
+          <li>Desktop app access</li>
+          <li>Live, Movies &amp; Series</li>
+          <li>24/7 stream uptime</li>
+        </ul>
+        <button class="btn btn-primary btn-full" onclick="openAuth('register')">Get started</button>
+      </div>
+      <div class="pricing-card">
+        <div class="pricing-name">Yearly</div>
+        <div class="pricing-price"><sup>$</sup>199<span>/yr</span></div>
+        <div class="pricing-desc">Save $101 vs monthly</div>
+        <ul class="pricing-features">
+          <li>Everything in Monthly</li>
+          <li>Priority support</li>
+          <li>Early access features</li>
+          <li>2 months free</li>
+        </ul>
+        <button class="btn btn-outline btn-full" onclick="openAuth('register')">Get started</button>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<!-- ════════════ DASHBOARD PAGE ════════════ -->
+<div id="page-dashboard" class="page">
+  <div class="dashboard">
+    <div class="dash-header">
+      <h1>My Dashboard</h1>
+      <button class="btn btn-outline btn-sm" onclick="loadDashboard()">↻ Refresh</button>
+    </div>
+
+    <div id="dash-sub-warning" class="alert alert-info" style="display:none; margin-bottom:24px;">
+      ⚠️ You don't have an active subscription. <a href="#" onclick="openPayment()" style="color:var(--accent2);font-weight:600;">Subscribe now ($25/mo)</a> to get your API key and upload channels.
+    </div>
+
+    <div class="dash-grid">
+      <!-- Subscription card -->
+      <div class="card">
+        <div class="card-title"><span class="card-title-icon">💳</span> Subscription</div>
+        <div class="sub-info" id="sub-info">
+          <div class="sub-row"><span class="label">Status</span><span class="value" id="sub-status">—</span></div>
+          <div class="sub-row"><span class="label">Plan</span><span class="value" id="sub-plan">—</span></div>
+          <div class="sub-row"><span class="label">Expires</span><span class="value" id="sub-expires">—</span></div>
+        </div>
+        <div style="margin-top:20px;">
+          <button id="btn-subscribe" class="btn btn-primary btn-sm" onclick="openPayment()" style="display:none">Subscribe — $25/mo</button>
+        </div>
+        
+        <!-- Coupon section -->
+        <div style="margin-top:20px; padding-top:20px; border-top:1px solid var(--border);">
+          <div style="font-size:13px;color:var(--muted);margin-bottom:8px;">Have a coupon code?</div>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="coupon-input" placeholder="Enter coupon code" style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:13px;">
+            <button class="btn btn-outline btn-sm" onclick="applyCoupon()">Apply</button>
+          </div>
+          <div id="coupon-alert" class="alert" style="margin-top:10px;display:none;"></div>
+        </div>
+      </div>
+
+      <!-- API Key card -->
+      <div class="card">
+        <div class="card-title"><span class="card-title-icon">🔑</span> API Key</div>
+        <div id="api-key-section">
+          <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Use this key in the IPTV desktop app under <strong style="color:var(--text)">Television → API Channels</strong>.</p>
+          <div id="api-key-list"></div>
+          <button class="btn btn-outline btn-sm" id="btn-create-key" onclick="createApiKey()">+ Generate API Key</button>
+        </div>
+      </div>
+
+      <!-- Stats card -->
+      <div class="card">
+        <div class="card-title"><span class="card-title-icon">📊</span> Stats</div>
+        <div style="display:flex;gap:24px;">
+          <div>
+            <div class="stat-value" id="stat-channels">0</div>
+            <div class="stat-label">Channels</div>
+          </div>
+          <div>
+            <div class="stat-value" id="stat-active">0</div>
+            <div class="stat-label">Active</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Channels -->
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+        <div class="card-title" style="margin-bottom:0"><span class="card-title-icon">📺</span> My Channels</div>
+        <button class="btn btn-primary btn-sm" id="btn-add-channel" onclick="toggleAddForm()">+ Add Channel</button>
+      </div>
+
+      <!-- Add channel form -->
+      <div class="add-channel-form" id="add-channel-form">
+        <div id="add-alert" class="alert"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Channel Name *</label>
+            <input class="form-input" id="ch-name" placeholder="e.g. BBC News" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Type</label>
+            <select class="form-select" id="ch-type">
+              <option value="live">Live TV</option>
+              <option value="movie">Movie</option>
+              <option value="series">Series</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Stream URL *</label>
+          <input class="form-input" id="ch-url" placeholder="http://stream.example.com/channel" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Logo URL</label>
+            <input class="form-input" id="ch-logo" placeholder="https://…/logo.png" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Group / Category</label>
+            <input class="form-input" id="ch-group" placeholder="e.g. News, Sports" />
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="btn btn-primary btn-sm" onclick="submitChannel()">Save Channel</button>
+          <button class="btn btn-outline btn-sm" onclick="toggleAddForm()">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="table-wrap">
+        <table id="channels-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>URL</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="channels-body"></tbody>
+        </table>
+        <div class="empty-state" id="channels-empty" style="display:none">
+          <div class="empty-icon">📭</div>
+          No channels yet. Click <strong>+ Add Channel</strong> to get started.
+        </div>
+      </div>
+    </div>
+
+    <!-- Media Library -->
+    <div class="card" style="margin-top:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+        <div class="card-title" style="margin-bottom:0"><span class="card-title-icon">🎵</span> Media Library <span id="media-count-badge" style="font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:2px 9px;margin-left:6px;color:var(--muted);font-weight:600;"></span></div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-outline btn-sm" onclick="loadMedia()">↻ Refresh</button>
+          <button class="btn btn-primary btn-sm" onclick="document.getElementById('media-upload-input').click()">+ Upload Files</button>
+          <input type="file" id="media-upload-input" multiple accept="audio/*,.mp3,.flac,.m4a,.m4b,.aac,.ogg,.opus,.wav" style="display:none" onchange="uploadMediaFiles(this)" />
+        </div>
+      </div>
+
+      <div id="media-storage-info" style="font-size:12px;color:var(--muted);margin-bottom:14px;padding:10px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;display:none;">
+        📂 <strong style="color:var(--text)">Your storage path:</strong> <span id="media-storage-path" style="font-family:monospace;color:var(--accent2);"></span><br/>
+        Stream your files in the desktop app: <strong style="color:var(--text)">Audio → My Library tab</strong> (enter your API key)
+      </div>
+
+      <div id="media-upload-progress" style="display:none;margin-bottom:14px;">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:8px;" id="media-upload-label">Uploading…</div>
+        <div style="background:var(--surface2);border-radius:4px;height:6px;overflow:hidden;">
+          <div id="media-upload-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s;border-radius:4px;"></div>
+        </div>
+      </div>
+
+      <div id="media-alert" class="alert"></div>
+
+      <div class="table-wrap">
+        <table id="media-table" style="display:none;">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Artist</th>
+              <th>Type</th>
+              <th>Size</th>
+              <th>Added</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="media-body"></tbody>
+        </table>
+        <div class="empty-state" id="media-empty">
+          <div class="empty-icon">🎶</div>
+          No audio files yet.<br/>Upload MP3, FLAC, AAC, M4A, OGG or WAV files to get started.
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════ AUTH MODAL ════════════ -->
+<div class="modal-overlay" id="auth-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeAuth()">✕</button>
+    <div id="auth-login-view">
+      <h2>Welcome back</h2>
+      <p class="modal-sub">Log in to your account</p>
+      <div id="login-alert" class="alert"></div>
+      <div class="form-group">
+        <label class="form-label">Email</label>
+        <input class="form-input" id="login-email" type="email" placeholder="you@example.com" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <input class="form-input" id="login-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()" />
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doLogin()" id="btn-do-login">Log in</button>
+      <div class="modal-switch">Don't have an account? <a onclick="switchAuth('register')">Sign up free</a></div>
+    </div>
+
+    <div id="auth-register-view" style="display:none">
+      <h2>Create account</h2>
+      <p class="modal-sub">Get started with your free account</p>
+      <div id="register-alert" class="alert"></div>
+      <div class="form-group">
+        <label class="form-label">Email</label>
+        <input class="form-input" id="reg-email" type="email" placeholder="you@example.com" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password <span style="color:var(--muted)">(min 8 chars)</span></label>
+        <input class="form-input" id="reg-password" type="password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doRegister()" />
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doRegister()" id="btn-do-register">Create account</button>
+      <div class="modal-switch">Already have an account? <a onclick="switchAuth('login')">Log in</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════ PAYMENT MODAL ════════════ -->
+<div class="modal-overlay" id="payment-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closePayment()">✕</button>
+
+    <!-- Step 1: plan select -->
+    <div class="payment-step active" id="pay-step-1">
+      <h2>Subscribe</h2>
+      <p class="modal-sub">Choose your plan to unlock channels &amp; API access</p>
+      <div id="pay-alert" class="alert"></div>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:24px;">
+        <label style="background:var(--surface2);border:2px solid var(--accent);border-radius:10px;padding:18px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-weight:700;font-size:15px;">Monthly</div>
+            <div style="color:var(--muted);font-size:13px;">Billed every month</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-size:22px;font-weight:800;">$25</div>
+            <div style="font-size:12px;color:var(--muted)">/ month</div>
+          </div>
+        </label>
+      </div>
+      <div class="price-summary">
+        <div class="price-line"><span>Monthly plan</span><span>$25.00</span></div>
+        <div class="price-line"><span>Total today</span><span>$25.00</span></div>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="startPayment()">Continue to payment →</button>
+    </div>
+
+    <!-- Step 2: card -->
+    <div class="payment-step" id="pay-step-2">
+      <h2>Payment details</h2>
+      <p class="modal-sub">Monthly plan — $25.00/mo</p>
+      <div id="pay-card-alert" class="alert"></div>
+      <label class="stripe-label">Card information</label>
+      <div id="card-element"></div>
+      <button class="btn btn-primary btn-full" id="btn-pay" onclick="confirmPayment()">Pay $25.00</button>
+      <p style="font-size:12px;color:var(--muted);text-align:center;margin-top:12px;">🔒 Secured by Stripe. We never store your card details.</p>
+    </div>
+
+    <!-- Step 3: success -->
+    <div class="payment-step" id="pay-step-3">
+      <div style="text-align:center;padding:20px 0;">
+        <div style="font-size:56px;margin-bottom:16px;">🎉</div>
+        <h2 style="margin-bottom:8px;">You're subscribed!</h2>
+        <p style="color:var(--muted);font-size:14px;margin-bottom:28px;">Your API key has been generated. Head to your dashboard to start adding channels.</p>
+        <button class="btn btn-primary btn-lg" onclick="closePayment();showPage('dashboard');loadDashboard()">Go to Dashboard →</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<script>
+const API = 'http://localhost:3001/api';
+let token = localStorage.getItem('iptv_token') || '';
+let currentUser = null;
+let stripeInstance = null;
+let cardElement = null;
+
+// ─── HELPERS ───────────────────────────────────────────────
+function toast(msg, type = 'success') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show toast-' + type;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = '', 3000);
+}
+
+function showAlert(id, msg, type = 'error') {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'alert alert-' + type + ' show';
+}
+
+function clearAlert(id) {
+  const el = document.getElementById(id);
+  el.className = 'alert';
+}
+
+function setLoading(btnId, loading, text) {
+  const btn = document.getElementById(btnId);
+  btn.disabled = loading;
+  btn.innerHTML = loading ? '<span class="spinner"></span>' : text;
+}
+
+async function api(method, path, body, useToken = true) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (useToken && token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(API + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+// ─── PAGES ─────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  window.scrollTo(0, 0);
+}
+
+// ─── AUTH STATE ────────────────────────────────────────────
+function updateNav() {
+  const loggedIn = !!token;
+  document.getElementById('btn-login').style.display = loggedIn ? 'none' : '';
+  document.getElementById('btn-signup').style.display = loggedIn ? 'none' : '';
+  document.getElementById('btn-dashboard').style.display = loggedIn ? '' : 'none';
+  document.getElementById('btn-logout').style.display = loggedIn ? '' : 'none';
+  document.getElementById('nav-user-label').textContent = currentUser ? currentUser.email : '';
+}
+
+function logout() {
+  token = '';
+  currentUser = null;
+  localStorage.removeItem('iptv_token');
+  updateNav();
+  showPage('landing');
+  toast('Logged out');
+}
+
+// ─── AUTH MODAL ────────────────────────────────────────────
+function openAuth(view) {
+  document.getElementById('auth-modal').classList.add('open');
+  switchAuth(view);
+}
+
+function closeAuth() {
+  document.getElementById('auth-modal').classList.remove('open');
+}
+
+function switchAuth(view) {
+  document.getElementById('auth-login-view').style.display = view === 'login' ? '' : 'none';
+  document.getElementById('auth-register-view').style.display = view === 'register' ? '' : 'none';
+  clearAlert('login-alert'); clearAlert('register-alert');
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  if (!email || !password) { showAlert('login-alert', 'Please fill in all fields'); return; }
+  clearAlert('login-alert');
+  setLoading('btn-do-login', true, 'Log in');
+  try {
+    const data = await api('POST', '/auth/login', { email, password }, false);
+    token = data.token;
+    currentUser = data.user;
+    localStorage.setItem('iptv_token', token);
+    closeAuth();
+    updateNav();
+    showPage('dashboard');
+    loadDashboard();
+    toast('Welcome back, ' + email);
+  } catch (e) {
+    showAlert('login-alert', e.message);
+  } finally {
+    setLoading('btn-do-login', false, 'Log in');
+  }
+}
+
+async function doRegister() {
+  const email = document.getElementById('reg-email').value.trim();
+  const password = document.getElementById('reg-password').value;
+  if (!email || !password) { showAlert('register-alert', 'Please fill in all fields'); return; }
+  if (password.length < 8) { showAlert('register-alert', 'Password must be at least 8 characters'); return; }
+  clearAlert('register-alert');
+  setLoading('btn-do-register', true, 'Create account');
+  try {
+    const data = await api('POST', '/auth/register', { email, password }, false);
+    token = data.token;
+    currentUser = data.user;
+    localStorage.setItem('iptv_token', token);
+    closeAuth();
+    updateNav();
+    showPage('dashboard');
+    loadDashboard();
+    openPayment();
+    toast('Account created! Subscribe to get your API key.');
+  } catch (e) {
+    showAlert('register-alert', e.message);
+  } finally {
+    setLoading('btn-do-register', false, 'Create account');
+  }
+}
+
+// ─── DASHBOARD ─────────────────────────────────────────────
+async function loadDashboard() {
+  if (!token) return;
+  try {
+    const [userData, channelsData, keysData, subData] = await Promise.all([
+      api('GET', '/auth/me'),
+      api('GET', '/channels'),
+      api('GET', '/keys'),
+      api('GET', '/payments/status'),
+    ]);
+    currentUser = userData.user;
+    updateNav();
+    renderSubscription(subData);
+    renderApiKeys(keysData.keys || []);
+    renderChannels(channelsData.channels || []);
+    loadMedia();
+  } catch (e) {
+    toast('Failed to load dashboard: ' + e.message, 'error');
+  }
+}
+
+function renderSubscription(sub) {
+  const isActive = sub.is_active;
+  const isTrial = sub.status === 'trial';
+  const isUnlimited = sub.status === 'active' && !sub.expires_at;
+  
+  // Status badge
+  let statusHtml = '';
+  if (isTrial) {
+    statusHtml = '<span class="badge badge-trial"><span class="badge-dot"></span>Trial</span>';
+  } else if (isUnlimited) {
+    statusHtml = '<span class="badge badge-unlimited"><span class="badge-dot"></span>Unlimited</span>';
+  } else if (isActive) {
+    statusHtml = '<span class="badge badge-active"><span class="badge-dot"></span>Active</span>';
+  } else {
+    statusHtml = '<span class="badge badge-inactive">Inactive</span>';
+  }
+  document.getElementById('sub-status').innerHTML = statusHtml;
+  
+  // Plan
+  let planText = '—';
+  if (isTrial) planText = '7-Day Trial';
+  else if (isUnlimited) planText = 'Unlimited (Coupon)';
+  else if (sub.period) planText = sub.period.charAt(0).toUpperCase() + sub.period.slice(1);
+  document.getElementById('sub-plan').textContent = planText;
+  
+  // Expires
+  let expiresText = '—';
+  if (isTrial && sub.trial_expires_at) {
+    expiresText = new Date(sub.trial_expires_at).toLocaleDateString() + ' (Trial)';
+  } else if (isUnlimited) {
+    expiresText = 'Never';
+  } else if (sub.expires_at) {
+    expiresText = new Date(sub.expires_at).toLocaleDateString();
+  }
+  document.getElementById('sub-expires').textContent = expiresText;
+  
+  const warn = document.getElementById('dash-sub-warning');
+  const subBtn = document.getElementById('btn-subscribe');
+  const couponSection = document.querySelector('[style*="margin-top:20px; padding-top:20px; border-top:1px solid var(--border);"]');
+  
+  if (isActive) {
+    warn.style.display = 'none';
+    subBtn.style.display = 'none';
+    // Hide coupon section for active users
+    if (couponSection) couponSection.style.display = 'none';
+  } else {
+    warn.style.display = 'block';
+    subBtn.style.display = '';
+    // Show coupon section for inactive users
+    if (couponSection) couponSection.style.display = '';
+  }
+}
+
+function renderApiKeys(keys) {
+  const list = document.getElementById('api-key-list');
+  const createBtn = document.getElementById('btn-create-key');
+  if (!keys.length) {
+    list.innerHTML = '<p style="font-size:13px;color:var(--muted);margin-bottom:12px;">No API keys yet.</p>';
+    createBtn.style.display = '';
+    return;
+  }
+  list.innerHTML = keys.map(k => `
+    <div class="api-key-box">
+      <div class="api-key-value" title="${k.key}">${k.name ? '<strong style="color:var(--text);font-family:sans-serif;">' + k.name + '</strong> — ' : ''}${k.key}</div>
+      <button class="api-key-copy" onclick="copyKey('${k.key}')">Copy</button>
+      <button class="api-key-copy" style="color:var(--red);border-color:#5a2020;" onclick="revokeKey('${k.id}')">×</button>
+    </div>
+  `).join('');
+  createBtn.style.display = keys.length < 3 ? '' : 'none';
+}
+
+function copyKey(key) {
+  navigator.clipboard.writeText(key).then(() => toast('API key copied!'));
+}
+
+async function createApiKey() {
+  try {
+    const name = prompt('Name for this key (optional):') || 'My Key';
+    await api('POST', '/keys', { name });
+    toast('API key created!');
+    loadDashboard();
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function revokeKey(id) {
+  if (!confirm('Revoke this API key? Apps using it will stop working.')) return;
+  try {
+    await api('DELETE', '/keys/' + id);
+    toast('API key revoked');
+    loadDashboard();
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+function renderChannels(channels) {
+  document.getElementById('stat-channels').textContent = channels.length;
+  document.getElementById('stat-active').textContent = channels.filter(c => c.is_active).length;
+  const tbody = document.getElementById('channels-body');
+  const empty = document.getElementById('channels-empty');
+  if (!channels.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = channels.map(c => `
+    <tr>
+      <td style="font-weight:600;">${esc(c.name)}</td>
+      <td><div class="td-url" title="${esc(c.url)}">${esc(c.url)}</div></td>
+      <td><span class="td-type">${c.content_type || 'live'}</span></td>
+      <td>${c.is_active ? '<span class="badge badge-active"><span class="badge-dot"></span>Active</span>' : '<span class="badge badge-inactive">Off</span>'}</td>
+      <td style="text-align:right;">
+        <button class="btn btn-danger btn-sm" onclick="deleteChannel('${c.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function toggleAddForm() {
+  const form = document.getElementById('add-channel-form');
+  form.classList.toggle('open');
+  if (form.classList.contains('open')) {
+    document.getElementById('ch-name').focus();
+  }
+}
+
+async function submitChannel() {
+  const name = document.getElementById('ch-name').value.trim();
+  const url = document.getElementById('ch-url').value.trim();
+  const content_type = document.getElementById('ch-type').value;
+  const logo = document.getElementById('ch-logo').value.trim();
+  const group = document.getElementById('ch-group').value.trim();
+  if (!name || !url) { showAlert('add-alert', 'Name and URL are required', 'error'); return; }
+  clearAlert('add-alert');
+  try {
+    await api('POST', '/channels', { name, url, content_type, logo: logo || undefined, group: group || undefined });
+    toast('Channel added!');
+    document.getElementById('ch-name').value = '';
+    document.getElementById('ch-url').value = '';
+    document.getElementById('ch-logo').value = '';
+    document.getElementById('ch-group').value = '';
+    toggleAddForm();
+    loadDashboard();
+  } catch (e) {
+    showAlert('add-alert', e.message, 'error');
+  }
+}
+
+async function deleteChannel(id) {
+  if (!confirm('Delete this channel?')) return;
+  try {
+    await api('DELETE', '/channels/' + id);
+    toast('Channel deleted');
+    loadDashboard();
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+// ─── PAYMENT ───────────────────────────────────────────────
+function openPayment() {
+  document.getElementById('payment-modal').classList.add('open');
+  showPayStep(1);
+  clearAlert('pay-alert');
+  clearAlert('pay-card-alert');
+  initStripe();
+}
+
+function closePayment() {
+  document.getElementById('payment-modal').classList.remove('open');
+}
+
+function showPayStep(n) {
+  document.querySelectorAll('.payment-step').forEach((el, i) => {
+    el.classList.toggle('active', i + 1 === n);
+  });
+}
+
+function initStripe() {
+  const pubKey = 'pk_test_your_stripe_publishable_key'; // Replace with your Stripe publishable key
+  if (!pubKey.startsWith('pk_')) return;
+  try {
+    if (!stripeInstance) stripeInstance = Stripe(pubKey);
+    const elements = stripeInstance.elements();
+    cardElement = elements.create('card', {
+      style: {
+        base: { color: '#e2e8f0', fontSize: '15px', fontFamily: '-apple-system,sans-serif', '::placeholder': { color: '#64748b' }, iconColor: '#6c63ff' },
+        invalid: { color: '#f87171' },
+      }
+    });
+    setTimeout(() => {
+      const mount = document.getElementById('card-element');
+      if (mount && !mount.firstChild) cardElement.mount('#card-element');
+    }, 100);
+  } catch(e) { /* Stripe.js not loaded or key not set */ }
+}
+
+async function startPayment() {
+  clearAlert('pay-alert');
+  const stripeKey = 'pk_test_your_stripe_publishable_key';
+  if (stripeKey === 'pk_test_your_stripe_publishable_key') {
+    // Demo mode — activate subscription locally
+    try {
+      await api('POST', '/payments/create-intent', { period: 'monthly' });
+      await api('POST', '/keys', { name: 'My API Key' }).catch(() => {});
+      showPayStep(3);
+      loadDashboard();
+    } catch(e) {
+      showAlert('pay-alert', e.message);
+    }
+    return;
+  }
+  showPayStep(2);
+}
+
+async function confirmPayment() {
+  if (!stripeInstance || !cardElement) {
+    showAlert('pay-card-alert', 'Stripe not initialized. Check your publishable key.', 'error');
+    return;
+  }
+  setLoading('btn-pay', true, 'Pay $25.00');
+  clearAlert('pay-card-alert');
+  try {
+    const { clientSecret } = await api('POST', '/payments/create-intent', { period: 'monthly' });
+    const result = await stripeInstance.confirmCardPayment(clientSecret, {
+      payment_method: { card: cardElement },
+    });
+    if (result.error) throw new Error(result.error.message);
+    await api('POST', '/keys', { name: 'My API Key' }).catch(() => {});
+    showPayStep(3);
+    loadDashboard();
+  } catch (e) {
+    showAlert('pay-card-alert', e.message, 'error');
+  } finally {
+    setLoading('btn-pay', false, 'Pay $25.00');
+  }
+}
+
+// ─── COUPON FUNCTIONS ───────────────────────────────────────
+async function applyCoupon() {
+  const code = document.getElementById('coupon-input').value.trim();
+  if (!code) {
+    showAlert('coupon-alert', 'Please enter a coupon code', 'error');
+    return;
+  }
+  
+  clearAlert('coupon-alert');
+  try {
+    // First validate the coupon
+    const validation = await api('POST', '/coupons/validate', { code });
+    if (!validation.valid) {
+      showAlert('coupon-alert', 'Invalid coupon code', 'error');
+      return;
+    }
+    
+    // Apply the coupon
+    const result = await api('POST', '/coupons/apply', { code });
+    toast('Coupon applied successfully! ' + result.message);
+    document.getElementById('coupon-input').value = '';
+    loadDashboard(); // Refresh to show updated subscription
+  } catch (e) {
+    showAlert('coupon-alert', e.message, 'error');
+  }
+}
+
+// Admin function to create coupons (for development)
+async function createUnlimitedCoupon() {
+  const code = prompt('Enter coupon code (or leave empty for random):');
+  if (code === null) return;
+  
+  const couponCode = code.trim() || 'UNLIMITED_' + Math.random().toString(36).substr(2, 8).toUpperCase();
+  
+  try {
+    await api('POST', '/coupons/create', {
+      code: couponCode,
+      description: 'Unlimited access coupon',
+      discountType: 'unlimited',
+      discountValue: 0,
+      maxUses: null
+    });
+    toast('Unlimited coupon created: ' + couponCode);
+  } catch (e) {
+    toast('Failed to create coupon: ' + e.message, 'error');
+  }
+}
+
+// Add a small admin button to the page (development only)
+document.addEventListener('DOMContentLoaded', () => {
+  const adminBtn = document.createElement('button');
+  adminBtn.textContent = 'Admin: Create Coupon';
+  adminBtn.className = 'btn btn-outline btn-sm';
+  adminBtn.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:1000;font-size:11px;';
+  adminBtn.onclick = createUnlimitedCoupon;
+  document.body.appendChild(adminBtn);
+});
+
+// ─── MEDIA LIBRARY ────────────────────────────────────────
+async function loadMedia() {
+  if (!token) return;
+  try {
+    const data = await api('GET', '/media');
+    renderMedia(data.files || [], data.storage_path || '');
+  } catch (e) {
+    showAlert('media-alert', 'Could not load media files: ' + e.message, 'error');
+  }
+}
+
+function renderMedia(files, storagePath) {
+  const badge = document.getElementById('media-count-badge');
+  const info = document.getElementById('media-storage-info');
+  const pathEl = document.getElementById('media-storage-path');
+  const table = document.getElementById('media-table');
+  const empty = document.getElementById('media-empty');
+  const tbody = document.getElementById('media-body');
+
+  badge.textContent = files.length ? files.length + ' file' + (files.length === 1 ? '' : 's') : '';
+
+  if (storagePath) {
+    pathEl.textContent = storagePath;
+    info.style.display = 'block';
+  }
+
+  if (!files.length) {
+    table.style.display = 'none';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  table.style.display = 'table';
+
+  tbody.innerHTML = files.map(f => `
+    <tr>
+      <td style="font-weight:600;">${esc(f.title || f.original_name)}</td>
+      <td style="color:var(--muted);font-size:13px;">${esc(f.artist || '—')}</td>
+      <td><span class="td-type">${f.media_type || 'music'}</span></td>
+      <td style="color:var(--muted);font-size:12px;">${formatBytes(f.size_bytes)}</td>
+      <td style="color:var(--muted);font-size:12px;">${new Date(f.created_at).toLocaleDateString()}</td>
+      <td style="text-align:right;">
+        <a href="${API}${f.stream_url}" target="_blank" class="btn btn-outline btn-sm" style="margin-right:6px;">▶ Play</a>
+        <button class="btn btn-danger btn-sm" onclick="deleteMedia('${f.id}')">Delete</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '—';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function uploadMediaFiles(input) {
+  const files = Array.from(input.files);
+  input.value = '';
+  if (!files.length) return;
+
+  const progress = document.getElementById('media-upload-progress');
+  const bar = document.getElementById('media-upload-bar');
+  const label = document.getElementById('media-upload-label');
+  clearAlert('media-alert');
+  progress.style.display = 'block';
+  bar.style.width = '0%';
+  label.textContent = `Uploading ${files.length} file${files.length > 1 ? 's' : ''}…`;
+
+  const formData = new FormData();
+  files.forEach(f => formData.append('files', f));
+
+  try {
+    const xhr = new XMLHttpRequest();
+    await new Promise((resolve, reject) => {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) bar.style.width = Math.round(e.loaded / e.total * 100) + '%';
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+        else reject(new Error(JSON.parse(xhr.responseText).error || 'Upload failed'));
+      };
+      xhr.onerror = () => reject(new Error('Network error'));
+      xhr.open('POST', API + '/media/upload');
+      xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.send(formData);
+    });
+    bar.style.width = '100%';
+    label.textContent = 'Upload complete!';
+    toast(`${files.length} file${files.length > 1 ? 's' : ''} uploaded successfully!`);
+    setTimeout(() => { progress.style.display = 'none'; }, 1500);
+    loadMedia();
+  } catch (e) {
+    progress.style.display = 'none';
+    showAlert('media-alert', 'Upload failed: ' + e.message, 'error');
+  }
+}
+
+async function deleteMedia(id) {
+  if (!confirm('Delete this audio file? This cannot be undone.')) return;
+  try {
+    await api('DELETE', '/media/' + id);
+    toast('File deleted');
+    loadMedia();
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'error');
+  }
+}
+
+// ─── INIT ──────────────────────────────────────────────────
+(async function init() {
+  if (token) {
+    try {
+      const data = await api('GET', '/auth/me');
+      currentUser = data.user;
+      updateNav();
+      showPage('dashboard');
+      loadDashboard();
+    } catch {
+      token = '';
+      localStorage.removeItem('iptv_token');
+      updateNav();
+    }
+  }
+  // Close modals on overlay click
+  document.getElementById('auth-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeAuth();
+  });
+  document.getElementById('payment-modal').addEventListener('click', function(e) {
+    if (e.target === this) closePayment();
+  });
+})();
+</script>
+</body>
+</html>

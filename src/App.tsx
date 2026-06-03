@@ -27,6 +27,22 @@ import { clampSidebarWidthPx, loadUiSession, saveUiSession } from "./utils/uiSes
 import { setStreamProxyToken } from "./utils/streamProxyAuth";
 import { isPodcastChannelId, isRadioStationChannelId } from "./utils/recordableStream";
 import type { Channel } from "./types";
+import { PVR_STOP_REQUEST_EVENT, type PvrStopRequestDetail } from "./utils/pvrSession";
+import {
+  findPvrSessionForChannel,
+  appendPvrHistory,
+  removePvrHistoryEntry,
+  clearPvrHistory,
+  loadPersistedScheduledPvrSessions,
+  loadPvrHistory,
+  newPvrSessionId,
+  persistScheduledPvrSessions,
+  shouldSchedulePvrStart,
+  startElectronPvrRecord,
+  type PvrManagedSession,
+  type PvrStartRequest,
+} from "./utils/pvrRecordingManager";
+import { loadPvrRecordDir, savePvrRecordDir } from "./utils/pvrRecordDirStorage";
 
 const VideoPlayer = lazy(() =>
   import("./components/VideoPlayer").then((m) => ({ default: m.VideoPlayer }))
@@ -158,8 +174,17 @@ export default function App() {
   const [sidebarMode, setSidebarMode] = useState(() => loadUiSession().sidebarMode);
   const [recordingPanes, setRecordingPanes] = useState<Record<"L" | "R", boolean>>({ L: false, R: false });
   const [recordingPaneMeta, setRecordingPaneMeta] = useState<
-    Record<"L" | "R", { channelId: string; channelName: string } | null>
+    Record<"L" | "R", { channelId: string; channelName: string; sourceUrl: string | null } | null>
   >({ L: null, R: null });
+  const [pvrSessions, setPvrSessions] = useState<PvrManagedSession[]>(() =>
+    loadPersistedScheduledPvrSessions()
+  );
+  const [pvrHistory, setPvrHistory] = useState<PvrManagedSession[]>(() => loadPvrHistory());
+  const [pvrRecordDir, setPvrRecordDir] = useState<string | null>(() => loadPvrRecordDir());
+  const pvrRecordDirRef = useRef<string | null>(pvrRecordDir);
+  pvrRecordDirRef.current = pvrRecordDir;
+  const pvrSessionsRef = useRef(pvrSessions);
+  pvrSessionsRef.current = pvrSessions;
   /** Electron: two localhost origins (different ports) so left/right streams do not share one connection pool. */
   const [streamProxyOrigins, setStreamProxyOrigins] = useState<[string, string] | null>(null);
   const [compactView, setCompactView] = useState(() => loadUiSession().compactView);
@@ -557,6 +582,7 @@ export default function App() {
       recording: boolean;
       channelId?: string | null;
       channelName?: string | null;
+      sourceUrl?: string | null;
     }) => {
       const { pane, recording } = status;
       setRecordingPanes((cur) => (cur[pane] === recording ? cur : { ...cur, [pane]: recording }));
@@ -566,12 +592,14 @@ export default function App() {
             ? {
                 channelId: status.channelId,
                 channelName: (status.channelName ?? "").trim() || "Channel",
+                sourceUrl: status.sourceUrl?.trim() || null,
               }
             : null;
         const prev = cur[pane];
         if (
           prev?.channelId === nextMeta?.channelId &&
           prev?.channelName === nextMeta?.channelName &&
+          prev?.sourceUrl === nextMeta?.sourceUrl &&
           (prev == null) === (nextMeta == null)
         ) {
           return cur;
@@ -582,21 +610,212 @@ export default function App() {
     []
   );
 
-  const recordingActive = recordingPanes.L || recordingPanes.R;
+  const syncPvrSessions = useCallback((next: PvrManagedSession[]) => {
+    pvrSessionsRef.current = next;
+    setPvrSessions(next);
+    persistScheduledPvrSessions(next);
+  }, []);
+
+  const refreshPvrHistory = useCallback(() => {
+    setPvrHistory(loadPvrHistory());
+  }, []);
+
+  const stopPvrSessionById = useCallback(
+    async (sessionId: string) => {
+      const session = pvrSessionsRef.current.find((s) => s.sessionId === sessionId);
+      if (!session) return;
+
+      if (session.status === "scheduled") {
+        removePvrHistoryEntry(sessionId);
+        syncPvrSessions(pvrSessionsRef.current.filter((s) => s.sessionId !== sessionId));
+        refreshPvrHistory();
+        return;
+      }
+
+      let filePath = session.filePath;
+      if (session.status === "recording" && session.recordId && window.iptv?.stopStreamRecord) {
+        try {
+          console.log(`[PVR] Stopping recording ${session.recordId} for session ${sessionId}`);
+          const res = await window.iptv.stopStreamRecord(session.recordId);
+          if (res.filePath?.trim()) filePath = res.filePath.trim();
+          console.log(`[PVR] Recording stopped, filePath=${filePath}`);
+        } catch (e) {
+          console.error(`[PVR] Error stopping recording ${session.recordId}:`, e);
+        }
+      }
+      appendPvrHistory({
+        ...session,
+        status: "completed",
+        filePath,
+        completedAtMs: Date.now(),
+      });
+      refreshPvrHistory();
+      syncPvrSessions(pvrSessionsRef.current.filter((s) => s.sessionId !== sessionId));
+    },
+    [refreshPvrHistory, syncPvrSessions]
+  );
+
+  const handlePvrRecordDirChange = useCallback((dir: string | null) => {
+    const trimmed = dir?.trim() || null;
+    setPvrRecordDir(trimmed);
+    savePvrRecordDir(trimmed);
+  }, []);
+
+  const beginPvrCapture = useCallback(
+    async (session: PvrManagedSession) => {
+      const live = pvrSessionsRef.current.find((s) => s.sessionId === session.sessionId);
+      if (!live) return false;
+      if (live.recordId) return true;
+      if (!window.iptv?.startStreamRecord) return false;
+      const dir = pvrRecordDirRef.current?.trim();
+      if (!dir) return false;
+      const channel = channels.find((c) => c.id === session.channelId);
+      if (!channel?.url?.trim()) return false;
+      try {
+        const now = Date.now();
+        const out = await startElectronPvrRecord(session, channel, dir, now);
+        const stopAtMs = out.recordUntilMs ?? session.stopAtMs;
+        syncPvrSessions(
+          pvrSessionsRef.current.map((s) =>
+            s.sessionId === session.sessionId
+              ? {
+                  ...s,
+                  status: "recording" as const,
+                  startedAtMs: now,
+                  stopAtMs,
+                  recordId: out.id,
+                  filePath: out.filePath,
+                }
+              : s
+          )
+        );
+        return true;
+      } catch (e) {
+        console.error(`[PVR] beginPvrCapture failed for ${session.sessionId}:`, e);
+        syncPvrSessions(pvrSessionsRef.current.filter((s) => s.sessionId !== session.sessionId));
+        return false;
+      }
+    },
+    [channels, syncPvrSessions]
+  );
+
+  const handleRequestStartPvr = useCallback(
+    async (req: PvrStartRequest): Promise<{ ok: boolean; error?: string }> => {
+      const url = req.channel.url?.trim();
+      if (!url) return { ok: false, error: "Channel has no stream URL." };
+      if (findPvrSessionForChannel(pvrSessionsRef.current, req.channel.id)) {
+        return { ok: false, error: "This channel already has a PVR job (scheduled or recording)." };
+      }
+      if (!pvrRecordDirRef.current?.trim()) {
+        return {
+          ok: false,
+          error: "Choose a PVR save folder in the Television sidebar PVR tab before recording.",
+        };
+      }
+      const startAtMs = req.startAtMs ?? Date.now();
+      const session: PvrManagedSession = {
+        sessionId: newPvrSessionId(),
+        pane: req.pane,
+        channelId: req.channel.id,
+        channelName: req.channel.name?.trim() || "Channel",
+        sourceUrl: url,
+        status: shouldSchedulePvrStart(startAtMs) ? "scheduled" : "recording",
+        startAtMs,
+        stopAtMs: req.stopAtMs,
+        label: req.label,
+        startedAtMs: startAtMs,
+        recordingCompact: req.recordingCompact,
+      };
+      syncPvrSessions([...pvrSessionsRef.current, session]);
+      if (session.status === "scheduled") return { ok: true };
+      const started = await beginPvrCapture(session);
+      return started ? { ok: true } : { ok: false, error: "Could not start recording." };
+    },
+    [beginPvrCapture, syncPvrSessions]
+  );
+
+  useEffect(() => {
+    const tick = () => {
+      const now = Date.now();
+      const list = pvrSessionsRef.current;
+      for (const s of list) {
+        if (s.status === "scheduled" && s.startAtMs <= now && s.stopAtMs > now + 5_000) {
+          void beginPvrCapture(s);
+        } else if (s.status === "recording" && s.stopAtMs <= now) {
+          void stopPvrSessionById(s.sessionId);
+        }
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [beginPvrCapture, stopPvrSessionById]);
+
+  useEffect(() => {
+    const onStop = (ev: Event) => {
+      const detail = (ev as CustomEvent<PvrStopRequestDetail>).detail;
+      if (!detail) return;
+      if (detail.sessionId) {
+        void stopPvrSessionById(detail.sessionId);
+        return;
+      }
+      const match = pvrSessionsRef.current.find(
+        (s) =>
+          (detail.channelId ? s.channelId === detail.channelId : true) &&
+          (detail.pane ? s.pane === detail.pane : true)
+      );
+      if (match) void stopPvrSessionById(match.sessionId);
+    };
+    window.addEventListener(PVR_STOP_REQUEST_EVENT, onStop);
+    return () => window.removeEventListener(PVR_STOP_REQUEST_EVENT, onStop);
+  }, [stopPvrSessionById]);
+
+  const handleGoToPvrChannel = useCallback(
+    (channelId: string, pane: "L" | "R") => {
+      const ch = channels.find((c) => c.id === channelId);
+      if (!ch) return;
+      if (!splitView) {
+        setPrimaryActiveChannel(ch);
+        return;
+      }
+      if (pane === "L") setPrimaryActiveChannel(ch);
+      else setRightActiveChannel(ch);
+      setAssignTarget(pane === "R" ? "R" : "L");
+    },
+    [channels, setPrimaryActiveChannel, setRightActiveChannel, splitView]
+  );
+
+  const backgroundPvrRecordingChannelIds = useMemo(
+    () => pvrSessions.filter((s) => s.status === "recording").map((s) => s.channelId),
+    [pvrSessions]
+  );
+
+  const pvrPlayerProps = {
+    backgroundPvrRecordingChannelIds,
+    onRequestStartPvr: handleRequestStartPvr,
+    onRequestStopPvr: stopPvrSessionById,
+    getChannelPvrSession: (channelId: string | null | undefined) =>
+      channelId ? findPvrSessionForChannel(pvrSessions, channelId) : null,
+  } as const;
+
+  const recordingActive =
+    recordingPanes.L || recordingPanes.R || pvrSessions.some((s) => s.status === "recording");
   const recordingChannelIds = useMemo(() => {
-    const ids: string[] = [];
-    if (recordingPaneMeta.L?.channelId) ids.push(recordingPaneMeta.L.channelId);
-    if (recordingPaneMeta.R?.channelId && recordingPaneMeta.R.channelId !== recordingPaneMeta.L?.channelId) {
-      ids.push(recordingPaneMeta.R.channelId);
-    }
-    return ids;
-  }, [recordingPaneMeta]);
+    const ids = new Set<string>();
+    if (recordingPaneMeta.L?.channelId) ids.add(recordingPaneMeta.L.channelId);
+    if (recordingPaneMeta.R?.channelId) ids.add(recordingPaneMeta.R.channelId);
+    for (const s of pvrSessions) ids.add(s.channelId);
+    return [...ids];
+  }, [recordingPaneMeta, pvrSessions]);
   const recordingStatusLabel = useMemo(() => {
     const parts: string[] = [];
     if (recordingPaneMeta.L) parts.push(recordingPaneMeta.L.channelName);
     if (recordingPaneMeta.R) parts.push(recordingPaneMeta.R.channelName);
+    for (const s of pvrSessions) {
+      if (!parts.includes(s.channelName)) parts.push(s.channelName);
+    }
     return parts.length ? parts.join(" · ") : null;
-  }, [recordingPaneMeta]);
+  }, [recordingPaneMeta, pvrSessions]);
 
   const onSidebarResizerPointerDown = useCallback((e: PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -675,6 +894,16 @@ export default function App() {
               compactView={compactView}
               onCompactViewChange={setCompactView}
               onOpenSettings={openSettings}
+              pvrActiveSessions={pvrSessions}
+              pvrHistory={pvrHistory}
+              onStopPvrJob={stopPvrSessionById}
+              onGoToPvrChannel={handleGoToPvrChannel}
+              onClearPvrHistory={() => {
+                clearPvrHistory();
+                refreshPvrHistory();
+              }}
+              pvrRecordDir={pvrRecordDir}
+              onPvrRecordDirChange={handlePvrRecordDirChange}
             />
           </aside>
           <div
@@ -720,6 +949,7 @@ export default function App() {
                   playbackPane="L"
                   onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
                   onRecordingStatusChange={setPaneRecording}
+                  {...pvrPlayerProps}
                 />
               </section>
             </>
@@ -736,6 +966,7 @@ export default function App() {
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
                 onRecordingStatusChange={setPaneRecording}
+                {...pvrPlayerProps}
               />
               <VideoPlayer
                 channel={channelRight}
@@ -748,6 +979,7 @@ export default function App() {
                 inSplitView
                 onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
                 onRecordingStatusChange={setPaneRecording}
+                {...pvrPlayerProps}
               />
             </div>
           ) : (
@@ -759,6 +991,7 @@ export default function App() {
               playbackPane="L"
               onLocalLibraryAudioEnded={handleLocalLibraryAudioEnded}
               onRecordingStatusChange={setPaneRecording}
+              {...pvrPlayerProps}
             />
           )}
         </Suspense>
